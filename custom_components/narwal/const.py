@@ -31,11 +31,21 @@ PLATFORMS: list[Platform] = [
     Platform.CAMERA,
 ]
 
-FAN_SPEED_MAP: dict[str, FanLevel] = {
-    "quiet": FanLevel.QUIET,
-    "normal": FanLevel.NORMAL,
-    "strong": FanLevel.STRONG,
-    "max": FanLevel.MAX,
+# HA fan_speed labels for the live clean/set_fan_level command. Its
+# SweepFanLevel enum stops at DEEP; SUPER remains available to clean settings.
+_FAN_SPEED_CANONICAL: dict[str, FanLevel] = {
+    "Quiet": FanLevel.MUTE,
+    "Standard": FanLevel.NORMAL,
+    "Strong": FanLevel.STRONG,
+    "Super powerful": FanLevel.DEEP,
 }
 
-FAN_SPEED_LIST: list[str] = list(FAN_SPEED_MAP.keys())
+FAN_SPEED_LIST: list[str] = list(_FAN_SPEED_CANONICAL)
+
+# FAN_SPEED_MAP also accepts the original lowercase fan_speed values (quiet/normal/strong/max) so existing automations keep working; these aliases are not offered in FAN_SPEED_LIST.
+FAN_SPEED_MAP: dict[str, FanLevel] = _FAN_SPEED_CANONICAL | {
+    "quiet": FanLevel.MUTE,
+    "normal": FanLevel.NORMAL,
+    "strong": FanLevel.STRONG,
+    "max": FanLevel.DEEP,
+}

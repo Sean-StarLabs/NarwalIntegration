@@ -34,12 +34,12 @@ class TestNarwalClientInit:
     def test_commands_require_connection(self) -> None:
         client = NarwalClient("10.0.0.1")
         with pytest.raises(NarwalConnectionError):
-            asyncio.get_event_loop().run_until_complete(client.start())
+            asyncio.run(client.start())
 
     def test_send_raw_without_connection_raises(self) -> None:
         client = NarwalClient("10.0.0.1")
         with pytest.raises(NarwalConnectionError):
-            asyncio.get_event_loop().run_until_complete(
+            asyncio.run(
                 client.send_raw("test/topic", b"\x08\x01")
             )
 
@@ -132,7 +132,7 @@ class TestStartLegacyAndV2Fallback:
             client, "send_command", new_callable=AsyncMock
         ) as mock_send:
             mock_send.return_value = success
-            result = asyncio.get_event_loop().run_until_complete(client.start())
+            result = asyncio.run(client.start())
 
         assert result is success
         mock_send.assert_awaited_once()  # no fallback fired
@@ -152,7 +152,7 @@ class TestStartLegacyAndV2Fallback:
             client, "send_command", new_callable=AsyncMock
         ) as mock_send:
             mock_send.side_effect = [not_applicable, success]
-            result = asyncio.get_event_loop().run_until_complete(client.start())
+            result = asyncio.run(client.start())
 
         assert mock_send.await_count == 2
         # Second call's payload must be v2 (different bytes from legacy)
@@ -173,7 +173,7 @@ class TestStartLegacyAndV2Fallback:
             client, "send_command", new_callable=AsyncMock
         ) as mock_send:
             mock_send.return_value = not_applicable
-            result = asyncio.get_event_loop().run_until_complete(client.start())
+            result = asyncio.run(client.start())
 
         mock_send.assert_awaited_once()  # no v2 retry without rooms
         assert result.result_code == CommandResult.NOT_APPLICABLE
@@ -189,7 +189,7 @@ class TestStartLegacyAndV2Fallback:
             client, "send_command", new_callable=AsyncMock
         ) as mock_send:
             mock_send.return_value = not_applicable
-            result = asyncio.get_event_loop().run_until_complete(client.start())
+            result = asyncio.run(client.start())
 
         mock_send.assert_awaited_once()
         assert result.result_code == CommandResult.NOT_APPLICABLE

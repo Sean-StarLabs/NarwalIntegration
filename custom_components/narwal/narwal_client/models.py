@@ -254,6 +254,7 @@ class MapData:
     origin_y: int = 0  # y pixel offset from field 2.6.1
     obstacles: list[ObstacleInfo] = field(default_factory=list)
     raw: dict[str, Any] = field(default_factory=dict)
+    map_id: int = 0  # active map id (field 2.1) — required by clean/start_clean
 
     @classmethod
     def from_response(
@@ -344,6 +345,7 @@ class MapData:
             obstacles = _parse_obstacles(field32)
 
         return cls(
+            map_id=int(payload.get("1", 0)),
             width=int(payload.get("4", 0)),
             height=int(payload.get("5", 0)),
             resolution=resolution,

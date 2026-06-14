@@ -51,6 +51,20 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     return vac
 
 
+class TestFanSpeed:
+    """Live suction controls expose only levels accepted by the robot."""
+
+    async def test_max_alias_reports_highest_live_level(self) -> None:
+        """The legacy max alias reports the level actually sent."""
+        vac = _make_vacuum()
+        vac.coordinator.client.set_fan_speed = AsyncMock()
+
+        await vac.async_set_fan_speed("max")
+
+        vac.coordinator.client.set_fan_speed.assert_awaited_once()
+        assert vac._last_fan_speed == "Super powerful"
+
+
 class TestAsyncGetSegments:
     """Tests for async_get_segments."""
 

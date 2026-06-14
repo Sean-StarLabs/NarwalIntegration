@@ -189,7 +189,14 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         level = FAN_SPEED_MAP.get(fan_speed)
         if level is not None:
             await self.coordinator.client.set_fan_speed(level)
-            self._last_fan_speed = fan_speed
+            self._last_fan_speed = next(
+                (
+                    label
+                    for label in FAN_SPEED_LIST
+                    if FAN_SPEED_MAP[label] == level
+                ),
+                fan_speed,
+            )
             self.async_write_ha_state()
 
     # --- Segment API (HA 2026.3 room-specific cleaning) ---

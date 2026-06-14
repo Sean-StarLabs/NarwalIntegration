@@ -51,6 +51,8 @@ KNOWN_PRODUCT_KEYS = [
     "cUlfJN5JYP",   # Unknown model (APK, contributed by @northwestsupra)
 ]
 
+LEGACY_ROOM_CLEAN_PRODUCT_KEYS = {"QoEsI5qYXO"}
+
 # --- Status topics (robot → client, field 4 / 0x22 frames) ---
 TOPIC_WORKING_STATUS = "status/working_status"
 TOPIC_ROBOT_BASE_STATUS = "status/robot_base_status"
@@ -82,8 +84,8 @@ TOPIC_CMD_DRY_MOP = "supply/dry_mop"
 TOPIC_CMD_DUST_GATHERING = "supply/dust_gathering"
 
 # Cleaning (Pita protocol — correct for AX12)
-TOPIC_CMD_START_CLEAN = "clean/plan/start"  # whole-house clean (empty payload)
-TOPIC_CMD_START_CLEAN_LEGACY = "clean/start_clean"  # does NOT work from STANDBY
+TOPIC_CMD_PLAN_START = "clean/plan/start"  # whole-house clean (empty payload)
+TOPIC_CMD_CLEAN_TASK = "clean/start_clean"  # room/zone CleanTask; only works docked
 TOPIC_CMD_EASY_CLEAN = "clean/easy_clean/start"
 TOPIC_CMD_SET_FAN_LEVEL = "clean/set_fan_level"
 TOPIC_CMD_SET_MOP_HUMIDITY = "clean/set_mop_humidity"
@@ -141,6 +143,7 @@ class CommandResult(IntEnum):
     SUCCESS = 1
     NOT_APPLICABLE = 2  # e.g., set_fan_level when not cleaning
     CONFLICT = 3  # e.g., recall when already recalling
+    NOT_READY = 4  # clean/start_clean while not docked (robot in STANDBY)
 
 
 class WorkingStatus(IntEnum):
@@ -179,20 +182,42 @@ class WorkingStatus(IntEnum):
 
 
 class FanLevel(IntEnum):
-    """Suction fan speed levels (SweepMode from APK)."""
+    """CleanParam suction level (CleanTask.pbenum FanLevel)."""
 
-    QUIET = 0
-    NORMAL = 1
-    STRONG = 2
-    MAX = 3
+    UNSPECIFIED = 0
+    MUTE = 1
+    QUIET = MUTE
+    NORMAL = 2
+    STRONG = 3
+    DEEP = 4
+    MAX = DEEP
+    SUPER = 5
 
 
 class MopHumidity(IntEnum):
-    """Mop wetness levels."""
+    """Water volume. CleanParam tag 4 and the live clean/set_mop_humidity command share these ints."""
 
-    DRY = 0
+    UNSPECIFIED = 0
+    DRY = 1
+    NORMAL = 2
+    WET = 3
+
+
+class MopStrengthLevel(IntEnum):
+    """Mop scrub intensity (CleanParam tag 3)."""
+
+    UNSPECIFIED = 0
     NORMAL = 1
-    WET = 2
+    HIGH = 2
+
+
+class WorkMode(IntEnum):
+    """Clean work mode — the app's robot_work_mode_* selector (Vacuum / Mop / Vacuum then mop / Vacuum and mop). Its value IS the CleanTask.taskType the robot executes; the per-item CleanParam.mode (the proto's own CleanMode enum) is derived separately in client._WORK_MODE_PARAM."""
+
+    VACUUM = 1
+    MOP = 2
+    VACUUM_THEN_MOP = 3
+    VACUUM_AND_MOP = 4
 
 
 # robot_base_status field numbers

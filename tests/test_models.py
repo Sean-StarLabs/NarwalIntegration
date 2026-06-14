@@ -14,6 +14,33 @@ from narwal_client.models import (
 )
 
 
+def test_map_data_preserves_existing_positional_arguments() -> None:
+    room = RoomInfo(room_id=7)
+    obstacle = ObstacleInfo(id=1)
+
+    map_data = MapData(
+        10,
+        20,
+        5,
+        [room],
+        b"map",
+        200,
+        1234,
+        1.5,
+        2.5,
+        3,
+        4,
+        [obstacle],
+        {"source": "test"},
+    )
+
+    assert map_data.width == 10
+    assert map_data.height == 20
+    assert map_data.rooms == [room]
+    assert map_data.raw == {"source": "test"}
+    assert map_data.map_id == 0
+
+
 class TestNarwalState:
     """Tests for NarwalState data model."""
 
