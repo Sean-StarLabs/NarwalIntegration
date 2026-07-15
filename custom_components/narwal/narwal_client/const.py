@@ -24,6 +24,7 @@ KNOWN_PRODUCT_KEYS = [
     # Confirmed working (local WebSocket)
     "QoEsI5qYXO",  # AX12 — Narwal Flow (primary, confirmed)
     "QxMSPG6VSO",  # Narwal Flow 2 (confirmed working via local WebSocket)
+    "iSuVlI1If2",  # Narwal Flow 2 alternate key (confirmed working locally)
     "DrzDKQ0MU8",   # CX4  — Freo Z10 Ultra (confirmed by @irekkl-maker)
     # Confirmed cloud-only (port 9002 open but no local broadcasts)
     "BYWBPqSxeC",   # CX7  — Freo Z Ultra (cloud-only, confirmed by @gabrielozcomidi)
@@ -60,7 +61,11 @@ TOPIC_UPGRADE_STATUS = "upgrade/upgrade_status"
 TOPIC_DOWNLOAD_STATUS = "status/download_status"
 TOPIC_DISPLAY_MAP = "map/display_map"
 TOPIC_TIMELINE_STATUS = "status/time_line_status"
+TOPIC_POINT_NAVI_PLAN_TRAJ = "status/point_navi_plan_traj"
 TOPIC_PLANNING_DEBUG = "developer/planning_debug_info"
+TOPIC_ROBOT_STATUS = "status/robot"
+TOPIC_ROBOT_CURRENT_STATUS = "status/robot/current"
+TOPIC_ROBOT_TASK_STATUS = "robot/task/status"
 
 # --- Command topics (client → robot, confirmed working) ---
 # Common
@@ -80,8 +85,12 @@ TOPIC_CMD_CANCEL = "task/cancel"
 # Supply/dock
 TOPIC_CMD_RECALL = "supply/recall"
 TOPIC_CMD_WASH_MOP = "supply/wash_mop"
+TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS = "supply/wash_mop_by_robot_status"
 TOPIC_CMD_DRY_MOP = "supply/dry_mop"
 TOPIC_CMD_DUST_GATHERING = "supply/dust_gathering"
+TOPIC_CMD_WASH_AND_DRY_MOP = "supply/wash_and_dry_mop"
+TOPIC_CMD_DRY_DUST_BAG = "supply/dry_dust_bag"
+TOPIC_CMD_DRY_STATION_BAG = "supply/dry_station_bag"
 
 # Cleaning (Pita protocol — correct for AX12)
 TOPIC_CMD_PLAN_START = "clean/plan/start"  # whole-house clean (empty payload)
@@ -90,6 +99,9 @@ TOPIC_CMD_EASY_CLEAN = "clean/easy_clean/start"
 TOPIC_CMD_SET_FAN_LEVEL = "clean/set_fan_level"
 TOPIC_CMD_SET_MOP_HUMIDITY = "clean/set_mop_humidity"
 TOPIC_CMD_GET_CURRENT_TASK = "clean/current_clean_task/get"
+TOPIC_CMD_GET_CLEAN_PROGRESS_INFO = "info/get_clean_progress_info"
+TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME = "supply/get_dry_mop_remain_time"
+TOPIC_CMD_GET_ROBOT_TASK_STATUS = "robot/task/status/get"
 
 # Map
 TOPIC_CMD_GET_MAP = "map/get_map"
@@ -152,8 +164,10 @@ class WorkingStatus(IntEnum):
     Values confirmed via live WebSocket monitoring:
       1  = STANDBY (idle, transition state between cleaning and docked)
       2  = DOCKED_V2 (on dock; confirmed v01.07.23.00 while charging at 10-36%)
+      3  = CLEANING_V2 (active room clean; confirmed on Flow 2 v01.07.23)
       4  = CLEANING (plan-based start; also stays 4 while returning to dock on older FW)
       5  = CLEANING_ALT (observed live: robot was physically stuck when reporting 5)
+      7  = CLEANING_FLOW2 (active cleaning on Flow 2 v01.07.10.33)
       10 = DOCKED (on dock, charging)
       14 = CHARGED (on dock, fully charged)
       19 = TASK_COMPLETED (transitional: scheduled task finished, returning to base)
@@ -171,14 +185,26 @@ class WorkingStatus(IntEnum):
     UNKNOWN = 0
     STANDBY = 1       # idle / transition state
     DOCKED_V2 = 2     # on dock (v01.07.23.00+ — replaces DOCKED=10/CHARGED=14 from older FW)
+    CLEANING_V2 = 3   # active cleaning on Flow 2 firmware v01.07.23+
     CLEANING = 4      # active cleaning (stays 4 even while returning to dock)
     CLEANING_ALT = 5  # cleaning — observed when robot was physically stuck; may indicate error/stuck state
+    CLEANING_FLOW2 = 7  # active cleaning on Flow 2 v01.07.10.33
     DOCKED = 10       # on dock (does NOT reliably indicate charging vs charged)
     CHARGED = 14      # on dock (reported before 100% — use battery_level for charge state)
     TASK_COMPLETED = 19  # transitional: task finished, robot returning to base (#41)
     # PLACEHOLDER: error state value not yet observed live.
     # Trigger a real error (e.g., pick up robot mid-clean) to discover the value.
     ERROR = 99
+
+
+ACTIVE_CLEANING_STATUSES = frozenset(
+    {
+        WorkingStatus.CLEANING_V2,
+        WorkingStatus.CLEANING,
+        WorkingStatus.CLEANING_ALT,
+        WorkingStatus.CLEANING_FLOW2,
+    }
+)
 
 
 class FanLevel(IntEnum):
@@ -209,6 +235,13 @@ class MopStrengthLevel(IntEnum):
     UNSPECIFIED = 0
     NORMAL = 1
     HIGH = 2
+
+
+class CleaningRoute(IntEnum):
+    """Cleaning route overlap level (CleanParam tag 8)."""
+
+    STANDARD = 1
+    METICULOUS = 2
 
 
 class WorkMode(IntEnum):

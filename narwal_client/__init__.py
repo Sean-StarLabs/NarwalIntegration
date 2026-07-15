@@ -1,7 +1,15 @@
 """Narwal robot vacuum client library — local WebSocket API."""
 
 from .client import NarwalClient, NarwalCommandError, NarwalConnectionError
-from .const import CommandResult, FanLevel, MopHumidity, MopStrengthLevel, WorkMode, WorkingStatus
+from .const import (
+    CleaningRoute,
+    CommandResult,
+    FanLevel,
+    MopHumidity,
+    MopStrengthLevel,
+    WorkMode,
+    WorkingStatus,
+)
 from .models import CommandResponse, DeviceInfo, MapData, MapDisplayData, NarwalState, RoomInfo
 from .protocol import build_frame, parse_frame
 
@@ -12,6 +20,7 @@ __all__ = [
     "NarwalState",
     "CommandResponse",
     "CommandResult",
+    "CleaningRoute",
     "DeviceInfo",
     "FanLevel",
     "MapData",

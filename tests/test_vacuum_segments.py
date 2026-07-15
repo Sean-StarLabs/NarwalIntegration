@@ -17,6 +17,7 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from narwal_client.models import MapData, NarwalState, RoomInfo  # noqa: E402
+from narwal_client.const import WorkingStatus  # noqa: E402
 from custom_components.narwal.vacuum import NarwalVacuum  # noqa: E402
 
 # Grab Segment class from stubs for assertions
@@ -193,6 +194,41 @@ class TestAsyncCleanSegments:
         await vac.async_clean_segments(["11", "9"])
 
         vac.coordinator.client.start_rooms.assert_awaited_once_with([11, 9])
+
+
+class TestAsyncStart:
+    """Tests for starting and resuming cleans."""
+
+    async def test_docked_stale_pause_starts_new_clean(self) -> None:
+        """A stale paused status on the dock must not resume an old task."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.CLEANING
+        state.is_paused = True
+        state.dock_sub_state = 1
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start = AsyncMock(
+            return_value=MagicMock(result_code=1, success=True)
+        )
+        vac.coordinator.client.resume = AsyncMock()
+
+        await vac.async_start()
+
+        vac.coordinator.client.start.assert_awaited_once()
+        vac.coordinator.client.resume.assert_not_awaited()
+
+
+class TestVacuumActivity:
+    """Tests for derived vacuum activity."""
+
+    def test_docked_state_wins_over_stale_pause(self) -> None:
+        """Stale cleaning and pause fields must not hide a docked robot."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.CLEANING_FLOW2
+        state.is_paused = True
+        state.dock_sub_state = 1
+
+        assert _make_vacuum(state=state).activity == "docked"
 
 
 class TestCheckSegmentChanges:

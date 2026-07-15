@@ -20,6 +20,7 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from .narwal_client import CommandResult, FanLevel, NarwalCommandError, WorkingStatus
+from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 from . import NarwalConfigEntry
 from .const import FAN_SPEED_LIST, FAN_SPEED_MAP
@@ -33,8 +34,10 @@ WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
     WorkingStatus.CHARGED: VacuumActivity.DOCKED,
     WorkingStatus.DOCKED_V2: VacuumActivity.DOCKED,
     WorkingStatus.STANDBY: VacuumActivity.IDLE,
+    WorkingStatus.CLEANING_V2: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING_ALT: VacuumActivity.CLEANING,
+    WorkingStatus.CLEANING_FLOW2: VacuumActivity.CLEANING,
     WorkingStatus.TASK_COMPLETED: VacuumActivity.RETURNING,
     WorkingStatus.ERROR: VacuumActivity.ERROR,
 }
@@ -77,9 +80,9 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         state = self.coordinator.data
         if state is None:
             return VacuumActivity.IDLE
-        is_cleaning_state = state.working_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
-        )
+        is_cleaning_state = state.working_status in ACTIVE_CLEANING_STATUSES
+        if state.is_docked:
+            return VacuumActivity.DOCKED
         # is_paused (field 3.2) stays stale after docking — only trust
         # during cleaning states. Paused takes priority over returning
         # since the robot physically stops when paused mid-return.
@@ -91,8 +94,6 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             return VacuumActivity.RETURNING
         if state.is_cleaning:
             return VacuumActivity.CLEANING
-        if state.is_docked:
-            return VacuumActivity.DOCKED
         activity = WORKING_STATUS_TO_ACTIVITY.get(state.working_status)
         if activity is not None:
             return activity
@@ -138,8 +139,10 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         await self._ensure_awake()
         state = self.coordinator.data
         # is_paused stays stale after docking — only trust it during cleaning
-        is_cleaning = state and state.working_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
+        is_cleaning = (
+            state
+            and not state.is_docked
+            and state.working_status in ACTIVE_CLEANING_STATUSES
         )
         if is_cleaning and state.is_paused:
             await self.coordinator.client.resume(timeout=self._ACTION_TIMEOUT)

@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import NarwalConfigEntry
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client.const import WorkingStatus
+from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -154,17 +154,17 @@ class NarwalMapCamera(NarwalEntity, Camera):
 
         # Detect cleaning session transitions — clear trail on new session
         current_status = state.working_status
-        was_cleaning = self._last_cleaning_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
-        )
-        is_cleaning = current_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
+        was_cleaning = self._last_cleaning_status in ACTIVE_CLEANING_STATUSES
+        is_cleaning = (
+            current_status in ACTIVE_CLEANING_STATUSES and not state.is_docked
         )
         if is_cleaning and not was_cleaning:
             _LOGGER.info("New cleaning session — clearing trail and vision obstacles")
             self._reset_trail()
         if current_status != WorkingStatus.UNKNOWN:
-            self._last_cleaning_status = current_status
+            self._last_cleaning_status = (
+                current_status if not state.is_docked else WorkingStatus.STANDBY
+            )
 
         if _DEBUG_VIEW:
             if not display or (display.robot_x == 0.0 and display.robot_y == 0.0):

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import struct
+import time
+import zlib
 
 from narwal_client.const import WorkingStatus
 from narwal_client.models import (
@@ -54,13 +56,27 @@ class TestNarwalState:
         assert not state.is_returning
 
     def test_update_from_working_status(self) -> None:
-        """working_status topic sets cleaning metrics, not robot state."""
+        """working_status topic sets cleaning metrics and infers active cleaning."""
         state = NarwalState()
         state.update_from_working_status({"3": 120, "13": 18000, "15": 600})
         assert state.cleaning_time == 120
         assert state.cleaning_area == 18000
-        # working_status is NOT set by this method (comes from base_status)
-        assert state.working_status == WorkingStatus.UNKNOWN
+        assert state.working_status == WorkingStatus.CLEANING
+
+    def test_working_status_clears_stale_station_activity(self) -> None:
+        """A fresh clean must override stale dock-side activity."""
+        state = NarwalState(
+            working_status=WorkingStatus.DOCKED,
+            dock_sub_state=1,
+            station_activity=4,
+        )
+
+        state.update_from_working_status({"3": 120, "13": 18000})
+
+        assert state.working_status == WorkingStatus.CLEANING
+        assert state.station_activity == 0
+        assert state.is_cleaning
+        assert not state.is_docked
 
     def test_update_from_base_status_cleaning(self) -> None:
         state = NarwalState()
@@ -142,6 +158,22 @@ class TestNarwalState:
         assert state.working_status == WorkingStatus.STANDBY
         assert state.is_docked
 
+    def test_update_from_base_status_station_activity(self) -> None:
+        """field3.18 means station-side work is active."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 19, "18": 4}})
+        assert state.station_activity == 4
+        assert state.is_station_active
+        assert state.is_docked
+
+    def test_station_activity_resets_when_absent(self) -> None:
+        """field3.18 resets when later base status omits it."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 19, "18": 4}})
+        state.update_from_base_status({"3": {"1": 1, "3": 1}})
+        assert state.station_activity == 0
+        assert not state.is_station_active
+
     def test_update_from_base_status_paused(self) -> None:
         """Paused overlay: field 3 sub-field 2 = 1."""
         state = NarwalState()
@@ -168,6 +200,37 @@ class TestNarwalState:
         # Should not raise — unknown sub-fields logged at debug level
         state.update_from_base_status({"3": {"1": 2, "4": 99, "11": 3}})
         assert state.working_status == WorkingStatus.DOCKED_V2
+
+    def test_off_dock_fields_clear_stale_dock_subfields(self) -> None:
+        """Flow 2 off-dock fields override dock subfields omitted by new firmware."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 10, "10": 1, "12": 2}, "11": 2, "47": 3}
+        )
+        assert state.is_docked
+
+        state.update_from_base_status(
+            {"3": {"1": 3, "4": 7}, "11": 1, "47": 2}
+        )
+
+        assert state.dock_sub_state == 0
+        assert state.dock_activity == 0
+        assert state.is_cleaning
+        assert not state.is_docked
+
+    def test_active_status_clears_stale_dock_subfields(self) -> None:
+        """An active status clears dock fields omitted by Flow 2 firmware."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 10, "10": 1, "12": 2}, "11": 2, "47": 3}
+        )
+
+        state.update_from_base_status({"3": {"1": 3, "4": 7}})
+
+        assert state.dock_sub_state == 0
+        assert state.dock_activity == 0
+        assert state.is_cleaning
+        assert not state.is_docked
 
     def test_new_fw_dock_field11_gte2(self) -> None:
         """v01.07.23 dock_field11=3 detected as docked via >= 2 check."""
@@ -246,6 +309,50 @@ class TestNarwalState:
         state.update_from_download_status({"1": 2})
         assert state.download_status == 2
 
+    def test_update_from_robot_task_status(self) -> None:
+        """Polled and broadcast task status expose progress and room."""
+        for topic in ("robot/task/status/get", "robot/task/status"):
+            state = NarwalState()
+            state.update_from_aux_status(
+                topic,
+                {
+                    "1": 1,
+                    "2": {
+                        "1": 93,
+                        "2": 694,
+                        "6": {"1": 5, "2": 1, "3": "Landing"},
+                    },
+                },
+            )
+            assert state.task_progress_percent == 93
+            assert state.task_elapsed_time == 694
+            assert state.current_room_id == 5
+            assert state.current_room_name == "Landing"
+
+    def test_update_from_robot_task_status_decodes_room_name(self) -> None:
+        """Task room names are decoded from protobuf bytes."""
+        state = NarwalState()
+
+        state.update_from_aux_status(
+            "robot/task/status",
+            {"2": {"1": 42, "6": {"1": 5, "3": b"Landing"}}},
+        )
+
+        assert state.current_room_name == "Landing"
+
+    def test_task_room_uses_current_map_display_name(self) -> None:
+        """Task telemetry uses the current user-facing map room name."""
+        state = NarwalState(
+            map_data=MapData(rooms=[RoomInfo(room_id=6, name="Bathroom")])
+        )
+
+        state.update_from_aux_status(
+            "robot/task/status",
+            {"2": {"1": 42, "6": {"1": 6, "3": "浴室"}}},
+        )
+
+        assert state.current_room_name == "Bathroom"
+
     def test_incremental_updates(self) -> None:
         """State should accumulate across multiple topic updates."""
         state = NarwalState()
@@ -264,6 +371,12 @@ class TestNarwalState:
         raw = {"2": _float_to_uint32(100.0), "38": 100, "47": 2, "unknown_field": "value"}
         state.update_from_base_status(raw)
         assert state.raw_base_status == raw
+
+    def test_aux_status_preserved(self) -> None:
+        state = NarwalState()
+        raw = {"1": {"2": 40}, "3": 120}
+        state.update_from_aux_status("status/robot", raw)
+        assert state.raw_aux_status["status/robot"] == raw
 
     def test_battery_field2_float32_83(self) -> None:
         """Field 2 = 1118175232 → 83.0% battery (confirmed from monitor capture)."""
@@ -322,11 +435,107 @@ class TestNarwalState:
         assert state.working_status == WorkingStatus.DOCKED  # NOT overwritten
         assert state.is_docked  # still correct
 
+    def test_repeated_stale_working_status_does_not_refresh_activity(self) -> None:
+        """Unchanged working_status counters are stale, not active cleaning."""
+        state = NarwalState()
+        state.update_from_base_status({
+            "3": {"1": 4},
+            "11": 1,
+            "47": 2,
+            "2": _float_to_uint32(80.0),
+        })
+        state.update_from_working_status({"3": 120, "13": 18000})
+        assert state.has_recent_active_working_status
+
+        state.last_active_working_status_time = time.monotonic() - 20
+        state.update_from_working_status({"3": 120, "13": 18000})
+
+        assert not state.has_recent_active_working_status
+
+    def test_explicit_docked_status_ends_recent_activity(self) -> None:
+        """A terminal base status wins immediately over recent task counters."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 4}, "11": 1, "47": 2})
+        state.update_from_working_status({"3": 120, "13": 18000})
+        assert state.has_recent_active_working_status
+
+        state.update_from_base_status({"3": {"1": 10}, "11": 2, "47": 3})
+
+        assert not state.has_recent_active_working_status
+        assert state.is_docked
+        assert not state.is_cleaning
+
+    def test_rising_battery_infers_stale_cleaning_is_docked(self) -> None:
+        """A rising battery after stale cleaning telemetry means charging/docked."""
+        state = NarwalState()
+        state.update_from_base_status({
+            "3": {"1": 4},
+            "11": 1,
+            "47": 2,
+            "2": _float_to_uint32(80.0),
+        })
+        state.update_from_working_status({"3": 120, "13": 18000})
+        state.last_active_working_status_time = time.monotonic() - 20
+
+        state.update_battery_from_base_status({"2": _float_to_uint32(81.0)})
+
+        assert state.inferred_docked_from_battery
+        assert state.is_docked
+        assert not state.is_cleaning
+
+    def test_explicit_off_dock_status_clears_inferred_docked_state(self) -> None:
+        """Fresh off-dock fields override battery-based dock inference."""
+        state = NarwalState(inferred_docked_from_battery=True)
+
+        state.update_from_base_status({"3": {"1": 4}, "11": 1, "47": 2})
+
+        assert not state.inferred_docked_from_battery
+        assert not state.is_docked
+
+    def test_explicit_off_dock_status_wins_over_rising_battery(self) -> None:
+        """Battery inference cannot override off-dock fields in the same packet."""
+        state = NarwalState(
+            working_status=WorkingStatus.CLEANING,
+            battery_level=80,
+        )
+
+        state.update_from_base_status(
+            {"3": {"1": 4}, "11": 1, "47": 2, "2": _float_to_uint32(81.0)}
+        )
+
+        assert not state.inferred_docked_from_battery
+        assert not state.is_docked
+
+    def test_dock_fields_override_stale_task_completed_status(self) -> None:
+        """Flow 2 can report TASK_COMPLETED while dock fields already say docked."""
+        state = NarwalState()
+        state.update_from_base_status({
+            "3": {"1": 4},
+            "11": 1,
+            "47": 2,
+            "2": _float_to_uint32(80.0),
+        })
+        state.update_from_working_status({"3": 120, "13": 18000})
+        state.last_active_working_status_time = time.monotonic() - 20
+
+        state.update_from_base_status({
+            "3": {"1": 19, "18": 4},
+            "11": 2,
+            "47": 3,
+            "2": _float_to_uint32(82.0),
+        })
+
+        assert state.working_status == WorkingStatus.TASK_COMPLETED
+        assert state.is_docked
+        assert not state.is_cleaning
+
     def test_returning_to_dock_field7(self) -> None:
         """Field 3.7=1 indicates returning to dock (confirmed live)."""
         state = NarwalState()
         # Live data: {1=4, 7=1, 10=2} — CLEANING + returning + docking
-        state.update_from_base_status({"3": {"1": 4, "7": 1, "10": 2}})
+        state.update_from_base_status(
+            {"3": {"1": 4, "7": 1, "10": 2}, "11": 1, "47": 2}
+        )
         assert state.working_status == WorkingStatus.CLEANING
         assert state.is_returning_to_dock
         assert state.dock_sub_state == 2
@@ -380,6 +589,17 @@ def _float_to_uint32(f: float) -> int:
 
 class TestMapData:
     """Tests for MapData.from_response()."""
+
+    def test_unassigned_obstacles_are_not_cleanable_floor(self) -> None:
+        """Whole-map estimates exclude unassigned obstacle pixels."""
+        map_data = MapData(
+            width=2,
+            height=1,
+            resolution=10,
+            compressed_map=zlib.compress(bytes([0x0A, 0x02, 0x20, 0x28])),
+        )
+
+        assert map_data.cleanable_area_cm2() == 1
 
     def test_basic_map_parsing(self) -> None:
         decoded = {"2": {
@@ -630,10 +850,13 @@ class TestRoomInfoModelOverrides:
 
     def test_flow_2_overrides_apply(self) -> None:
         """Flow 2 product key renames sub-types 1, 5, 10."""
-        flow2 = "QxMSPG6VSO"
-        assert RoomInfo(room_sub_type=1, model_key=flow2).display_name == "Master Bedroom"
-        assert RoomInfo(room_sub_type=5, model_key=flow2).display_name == "Bathroom"
-        assert RoomInfo(room_sub_type=10, model_key=flow2).display_name == "Corridor"
+        for flow2 in ("QxMSPG6VSO", "iSuVlI1If2"):
+            assert (
+                RoomInfo(room_sub_type=1, model_key=flow2).display_name
+                == "Master Bedroom"
+            )
+            assert RoomInfo(room_sub_type=5, model_key=flow2).display_name == "Bathroom"
+            assert RoomInfo(room_sub_type=10, model_key=flow2).display_name == "Corridor"
 
     def test_flow_2_non_overridden_types_use_defaults(self) -> None:
         """Sub-types not in the Flow 2 override map use the base names."""

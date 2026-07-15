@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from narwal_client.client import NarwalClient, NarwalConnectionError
-from narwal_client.const import CommandResult
+from narwal_client.const import CommandResult, WorkingStatus
 from narwal_client.models import CommandResponse, MapData, RoomInfo
 
 
@@ -31,10 +31,113 @@ class TestNarwalClientInit:
         assert not client.connected
         assert client.state.battery_level == 0
 
+    def test_confirmed_dock_status_ends_active_marker(self) -> None:
+        """Fresh dock indicators are not discarded as stale task state."""
+        client = NarwalClient("10.0.0.1")
+        client.state.working_status = WorkingStatus.CLEANING
+        client._last_active_working_status_time = 100.0
+
+        client._update_from_base_status_broadcast(
+            {"3": {"1": 10}, "11": 2, "47": 3}, now=101.0
+        )
+
+        assert client.state.working_status == WorkingStatus.DOCKED
+        assert client.state.is_docked
+
+    @pytest.mark.parametrize("dock_field", [{"10": 1}, {"12": 2}])
+    def test_nested_dock_status_ends_active_marker(
+        self, dock_field: dict[str, int]
+    ) -> None:
+        """Nested old-firmware dock indicators confirm a terminal status."""
+        client = NarwalClient("10.0.0.1")
+        client.state.working_status = WorkingStatus.CLEANING
+        client._last_active_working_status_time = 100.0
+
+        client._update_from_base_status_broadcast(
+            {"3": {"1": 10, **dock_field}}, now=101.0
+        )
+
+        assert client.state.working_status == WorkingStatus.DOCKED
+        assert client.state.is_docked
+
+    def test_unconfirmed_standby_status_remains_stale(self) -> None:
+        """An idle overlay does not replace a newly accepted clean."""
+        client = NarwalClient("10.0.0.1")
+        client.state.working_status = WorkingStatus.CLEANING
+        client._last_active_working_status_time = 100.0
+
+        client._update_from_base_status_broadcast(
+            {"3": {"1": 1}, "11": 1, "47": 2}, now=101.0
+        )
+
+        assert client.state.working_status == WorkingStatus.CLEANING
+
     def test_commands_require_connection(self) -> None:
         client = NarwalClient("10.0.0.1")
         with pytest.raises(NarwalConnectionError):
             asyncio.run(client.start())
+
+    def test_idle_keepalive_renews_topic_subscription(self) -> None:
+        client = NarwalClient("10.0.0.1")
+        client._connected.set()
+        client._ws = AsyncMock()
+        client._robot_awake = True
+        client._TOPIC_RESUB_INTERVAL = -1
+
+        sleep_count = 0
+
+        async def stop_after_first_iteration(_delay: float) -> None:
+            nonlocal sleep_count
+            sleep_count += 1
+            if sleep_count == 2:
+                client._connected.clear()
+
+        with (
+            patch("narwal_client.client.asyncio.sleep", stop_after_first_iteration),
+            patch.object(client, "_state_needs_keepalive", return_value=False),
+        ):
+            asyncio.run(client._keepalive_loop())
+
+        client._ws.send.assert_awaited_once()
+
+    def test_idle_reconnect_subscribes_without_waking(self) -> None:
+        """An idle reconnect restores subscriptions without a wake burst."""
+        client = NarwalClient("10.0.0.1")
+
+        class EmptyWebSocket:
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                client._should_reconnect = False
+                raise StopAsyncIteration
+
+        async def connect() -> None:
+            client._ws = EmptyWebSocket()
+            client._connected.set()
+
+        client.connect = AsyncMock(side_effect=connect)
+        client.subscribe_to_topics = AsyncMock()
+        client._send_wake_burst = AsyncMock()
+        client._heartbeat_loop = AsyncMock()
+        client._keepalive_loop = AsyncMock()
+
+        with patch.object(client, "_state_needs_keepalive", return_value=False):
+            asyncio.run(client.start_listening())
+
+        client.subscribe_to_topics.assert_awaited_once_with()
+        client._send_wake_burst.assert_not_awaited()
+
+    def test_stale_paused_overlay_does_not_wake_docked_robot(self) -> None:
+        """Dock fields override stale pause bits for keepalive decisions."""
+        client = NarwalClient("10.0.0.1")
+        client.state.working_status = WorkingStatus.CLEANING
+        client.state.is_paused = True
+        client.state.dock_field11 = 2
+        client.state.dock_field47 = 3
+
+        assert client.state.is_docked
+        assert not client._state_needs_keepalive()
 
     def test_send_raw_without_connection_raises(self) -> None:
         client = NarwalClient("10.0.0.1")

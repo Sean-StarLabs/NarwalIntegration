@@ -4,12 +4,20 @@ from __future__ import annotations
 
 import logging
 import struct
+import time
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
 _LOGGER = logging.getLogger(__name__)
+_ACTIVE_WORKING_STATUS_TTL = 15.0
 
-from .const import CommandResult, FanLevel, MopHumidity, WorkingStatus
+from .const import (
+    ACTIVE_CLEANING_STATUSES,
+    TOPIC_CMD_GET_ROBOT_TASK_STATUS,
+    TOPIC_ROBOT_TASK_STATUS,
+    CommandResult,
+    WorkingStatus,
+)
 
 
 @dataclass
@@ -51,6 +59,11 @@ class RoomInfo:
     # Confirmed on Narwal Flow 2 (QxMSPG6VSO, firmware v01.07.16.01) — see #22.
     MODEL_ROOM_TYPE_OVERRIDES: ClassVar[dict[str, dict[int, str]]] = {
         "QxMSPG6VSO": {  # Flow 2
+            1: "Master Bedroom",
+            5: "Bathroom",
+            10: "Corridor",
+        },
+        "iSuVlI1If2": {  # Flow 2 alternate product key
             1: "Master Bedroom",
             5: "Bathroom",
             10: "Corridor",
@@ -237,6 +250,73 @@ def _parse_obstacles(field32: dict) -> list[ObstacleInfo]:
     return obstacles
 
 
+def _coerce_bytes(value: Any) -> bytes:
+    """Return a protobuf bytes value as bytes."""
+    if isinstance(value, bytes):
+        return value
+    if isinstance(value, bytearray):
+        return bytes(value)
+    if isinstance(value, str):
+        return value.encode("latin-1", "ignore")
+    return b""
+
+
+def _count_cleaned_pixels(value: Any, expected_pixels: int) -> int:
+    """Count non-zero cells in a display_map cleaned-area overlay."""
+    data = _coerce_bytes(value)
+    if not data:
+        return 0
+
+    from .map_renderer import _decode_packed_varints, decompress_map
+
+    decompressed = decompress_map(data)
+    pixels = _decode_packed_varints(decompressed)
+    if pixels:
+        if expected_pixels > 0:
+            pixels = pixels[:expected_pixels]
+        return sum(1 for pixel in pixels if pixel)
+
+    raw = decompressed or data
+    if expected_pixels > 0:
+        raw = raw[:expected_pixels]
+    return sum(1 for byte in raw if byte)
+
+
+def _extract_ints(value: Any) -> list[int]:
+    """Extract integer values from a loosely-decoded protobuf field."""
+    if isinstance(value, bool):
+        return []
+    if isinstance(value, int):
+        return [value]
+    if isinstance(value, list):
+        result: list[int] = []
+        for item in value:
+            result.extend(_extract_ints(item))
+        return result
+    if isinstance(value, dict):
+        result: list[int] = []
+        for item in value.values():
+            result.extend(_extract_ints(item))
+        return result
+    return []
+
+
+def _positive_int_field(decoded: dict[str, Any], field: str) -> bool:
+    """Return true when a decoded protobuf field is a positive integer."""
+    try:
+        return int(decoded.get(field, 0) or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def _optional_int(value: Any) -> int | None:
+    """Return value coerced to int, or None when it cannot be coerced."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
 @dataclass
 class MapData:
     """Map data from get_map response."""
@@ -361,6 +441,43 @@ class MapData:
             raw=payload,
         )
 
+    def cleanable_area_cm2(self, room_ids: list[int] | None = None) -> int:
+        """Estimate cleanable area in cm² from room floor pixels."""
+        if not self.compressed_map or self.width <= 0 or self.height <= 0:
+            return 0
+        if self.resolution <= 0:
+            return 0
+
+        from .map_renderer import _decode_packed_varints, decompress_map
+
+        pixels = _decode_packed_varints(decompress_map(self.compressed_map))
+        expected = self.width * self.height
+        if len(pixels) < expected:
+            pixels.extend([0] * (expected - len(pixels)))
+        elif len(pixels) > expected:
+            pixels = pixels[:expected]
+
+        selected = {int(room_id) for room_id in room_ids or []}
+        floor_pixels = 0
+        for val in pixels:
+            if val in (0, 0x28):
+                continue
+            if val == 0x20:
+                if selected:
+                    continue
+                floor_pixels += 1
+                continue
+            room_id = val >> 8
+            pixel_type = val & 0xFF
+            if pixel_type & 0x10:
+                continue
+            if selected and room_id not in selected:
+                continue
+            floor_pixels += 1
+
+        cm_per_pixel = self.resolution / 10
+        return round(floor_pixels * cm_per_pixel * cm_per_pixel)
+
 
 @dataclass
 class MapDisplayData:
@@ -386,6 +503,10 @@ class MapDisplayData:
     # Dock/reference position from field 5 (same coordinate system as robot)
     dock_ref_x: float = 0.0
     dock_ref_y: float = 0.0
+    cleaned_width: int = 0
+    cleaned_height: int = 0
+    cleaned_pixel_count: int = 0
+    active_room_ids: list[int] = field(default_factory=list)
 
     def to_grid_coords(
         self, resolution: int, origin_x: int, origin_y: int,
@@ -457,7 +578,38 @@ class MapDisplayData:
             except (ValueError, TypeError):
                 pass
 
+        field7 = decoded.get("7")
+        if isinstance(field7, list):
+            field7 = field7[0] if field7 else None
+        if isinstance(field7, dict):
+            try:
+                result.cleaned_width = int(field7.get("1", 0))
+                result.cleaned_height = int(field7.get("2", 0))
+            except (ValueError, TypeError):
+                result.cleaned_width = 0
+                result.cleaned_height = 0
+            result.cleaned_pixel_count = _count_cleaned_pixels(
+                field7.get("3"),
+                result.cleaned_width * result.cleaned_height,
+            )
+
+        if "12" in decoded:
+            seen: set[int] = set()
+            room_ids: list[int] = []
+            for room_id in _extract_ints(decoded["12"]):
+                if room_id > 0 and room_id not in seen:
+                    seen.add(room_id)
+                    room_ids.append(room_id)
+            result.active_room_ids = room_ids
+
         return result
+
+    def cleaned_area_cm2(self, resolution: int) -> int:
+        """Return the cleaned overlay area in cm²."""
+        if self.cleaned_pixel_count <= 0 or resolution <= 0:
+            return 0
+        cm_per_pixel = resolution / 10
+        return round(self.cleaned_pixel_count * cm_per_pixel * cm_per_pixel)
 
 
 @dataclass
@@ -497,6 +649,7 @@ class NarwalState:
     working_status: WorkingStatus = WorkingStatus.UNKNOWN
     battery_level: int = 0  # real-time SOC from field 2 (float32)
     battery_health: int = 0  # static design capacity from field 38 (always 100)
+    inferred_docked_from_battery: bool = False
     firmware_version: str = ""
     firmware_target: str = ""
 
@@ -513,6 +666,12 @@ class NarwalState:
     # Cleaning stats
     cleaning_area: int = 0  # cm²
     cleaning_time: int = 0  # seconds
+    last_active_working_status_time: float = 0.0
+    task_progress_percent: int | None = None
+    task_elapsed_time: int = 0
+    current_room_id: int | None = None
+    current_room_name: str = ""
+    dry_mop_remaining_time: int | None = None
 
     # Map
     map_data: MapData | None = None
@@ -536,9 +695,21 @@ class NarwalState:
     # Dock activity (field 3 sub-field 12: 2/6 observed when docked)
     dock_activity: int = 0
 
+    # Station activity (field 3 sub-field 18)
+    # Observed: 1 during dust gathering, 4 during dock dry/disinfection work.
+    station_activity: int = 0
+
     # Dock presence (field 3 sub-field 3)
     # Values observed: 1=on dock, 2=off dock, 6=on dock (charged idle)
     dock_presence: int = 0
+
+    # Newer Flow firmware sub-state (field 3 sub-field 4).
+    # Observed during active clean startup/navigation: 8 -> 7 -> 3.
+    flow_activity: int = 0
+
+    # Newer Flow firmware task flag (field 3 sub-field 14). Observed as 1
+    # during active cleaning/navigation.
+    flow_task_flag: int = 0
 
     # Dock indicator from field 11 (top-level base_status field)
     # Validated via dock_research.py guided test (5 captures):
@@ -557,12 +728,67 @@ class NarwalState:
     # Raw data for fields we haven't fully decoded yet
     raw_base_status: dict[str, Any] = field(default_factory=dict)
     raw_working_status: dict[str, Any] = field(default_factory=dict)
+    raw_aux_status: dict[str, dict[str, Any]] = field(default_factory=dict)
+
+    def _working_status_is_cleaning_like(self) -> bool:
+        """True when the cached working_status looks like a cleaning task."""
+        return self.working_status in (
+            WorkingStatus.CLEANING,
+            WorkingStatus.CLEANING_V2,
+            WorkingStatus.CLEANING_ALT,
+            WorkingStatus.CLEANING_FLOW2,
+        )
+
+    def _dock_fields_indicate_docked(self) -> bool:
+        """True when base-status dock fields indicate the robot is on dock."""
+        if self.dock_sub_state == 1:
+            return True
+        if self.dock_activity > 0:
+            return True
+        if self.station_activity > 0:
+            return True
+        if self.dock_field11 >= 2:
+            return True
+        if self.dock_field47 in (1, 3):
+            return True
+        return False
+
+    @property
+    def is_station_active(self) -> bool:
+        """True when the base station is running a dock-side task."""
+        return self.station_activity > 0 or (
+            self.working_status == WorkingStatus.CLEANING_ALT and self.is_docked
+        )
+
+    def _set_battery_level(self, battery_level: int) -> None:
+        """Update battery level and infer docked state from charging trend."""
+        if (
+            self.battery_level > 0
+            and battery_level > self.battery_level
+            and self._working_status_is_cleaning_like()
+            and not self.has_recent_active_working_status
+        ):
+            self.inferred_docked_from_battery = True
+        self.battery_level = battery_level
+
+    @property
+    def has_recent_active_working_status(self) -> bool:
+        """True while working_status is actively reporting task counters."""
+        if self.working_status not in ACTIVE_CLEANING_STATUSES:
+            return False
+        if self.last_active_working_status_time <= 0:
+            return False
+        return time.monotonic() - self.last_active_working_status_time <= _ACTIVE_WORKING_STATUS_TTL
 
     @property
     def is_cleaning(self) -> bool:
         """True when actively cleaning (not paused, not returning to dock)."""
+        if self.has_recent_active_working_status:
+            return not self.is_paused and not self.is_returning
+        if self._dock_fields_indicate_docked() or self.inferred_docked_from_battery:
+            return False
         return (
-            self.working_status in (WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT)
+            self._working_status_is_cleaning_like()
             and not self.is_paused
             and not self.is_returning_to_dock
         )
@@ -583,25 +809,21 @@ class NarwalState:
         cleaning is not active, since the robot can report unmapped states
         (e.g. self-test) while physically docked.
         """
+        if self.has_recent_active_working_status:
+            return False
         if self.working_status in (
             WorkingStatus.DOCKED, WorkingStatus.CHARGED, WorkingStatus.DOCKED_V2,
         ):
             return True
-        if self.working_status in (WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT):
-            return False
         # For STANDBY, UNKNOWN, or any other status: check dock field signals.
         # Values differ across firmware versions:
         #   Old FW: dock_sub_state=1, dock_field11=2, dock_field47=3
         #   v01.07.23.00: dock_sub_state absent, dock_field11=3, dock_field47=1
-        if self.dock_sub_state == 1:
-            return True
-        if self.dock_activity > 0:
-            return True
-        if self.dock_field11 >= 2:
-            return True
-        if self.dock_field47 in (1, 3):
-            return True
-        return False
+        #
+        # Narwal can keep reporting a stale CLEANING working_status after the
+        # active working_status payload has stopped. Once that live payload is
+        # no longer recent, dock fields are a better source of truth.
+        return self._dock_fields_indicate_docked() or self.inferred_docked_from_battery
 
     @property
     def is_returning(self) -> bool:
@@ -620,8 +842,11 @@ class NarwalState:
         transitions to STANDBY/DOCKED/CHARGED, it has already docked
         even if field 3.7 is momentarily still set.
         """
-        if self.working_status not in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
+        if not self.has_recent_active_working_status and self.working_status not in (
+            WorkingStatus.CLEANING,
+            WorkingStatus.CLEANING_V2,
+            WorkingStatus.CLEANING_ALT,
+            WorkingStatus.CLEANING_FLOW2,
         ):
             return False
         return self.is_returning_to_dock and self.dock_sub_state == 2
@@ -636,6 +861,8 @@ class NarwalState:
           Field 15 = 600 during cleaning (purpose uncertain)
         """
         self.raw_working_status = decoded
+        previous_cleaning_time = self.cleaning_time
+        previous_cleaning_area = self.cleaning_area
         if "3" in decoded:
             try:
                 self.cleaning_time = int(decoded["3"])
@@ -646,6 +873,34 @@ class NarwalState:
         if "15" in decoded:
             # Field 15 may be cumulative time; prefer field 3 for current session
             pass
+        has_active_payload = any(
+            _positive_int_field(decoded, field) for field in ("3", "13")
+        )
+        active_payload_changed = (
+            self.cleaning_time != previous_cleaning_time
+            or self.cleaning_area != previous_cleaning_area
+        )
+        if has_active_payload and active_payload_changed:
+            self.last_active_working_status_time = time.monotonic()
+            self.inferred_docked_from_battery = False
+        if (
+            has_active_payload
+            and active_payload_changed
+            and self.working_status
+            in (
+                WorkingStatus.UNKNOWN,
+                WorkingStatus.STANDBY,
+                WorkingStatus.DOCKED,
+                WorkingStatus.CHARGED,
+                WorkingStatus.DOCKED_V2,
+            )
+        ):
+            self.working_status = WorkingStatus.CLEANING
+            self.dock_field11 = 1
+            self.dock_field47 = 2
+            self.dock_sub_state = 0
+            self.dock_activity = 0
+            self.station_activity = 0
 
     def update_from_base_status(self, decoded: dict[str, Any]) -> None:
         """Update state from a decoded robot_base_status message.
@@ -661,6 +916,7 @@ class NarwalState:
           3.7  = 1 means RETURNING to dock (live-validated)
           3.10 = dock sub-state (1=docked, 2=docking in progress)
           3.12 = dock activity (values 2, 6 observed)
+          3.18 = station activity (1=dust gathering, 4=dry/disinfection observed)
 
         Dock indicators (validated via dock_research.py, 5 captures):
           Field 11 = 2 when docked, 1 when undocked
@@ -717,13 +973,41 @@ class NarwalState:
                     self.dock_activity = int(field3["12"])
                 except (ValueError, TypeError):
                     pass
+            self.station_activity = 0
+            if "18" in field3:
+                try:
+                    self.station_activity = int(field3["18"])
+                except (ValueError, TypeError):
+                    pass
             if "3" in field3:
                 try:
                     self.dock_presence = int(field3["3"])
                 except (ValueError, TypeError):
                     pass
+            self.flow_activity = 0
+            if "4" in field3:
+                try:
+                    self.flow_activity = int(field3["4"])
+                except (ValueError, TypeError):
+                    pass
+            self.flow_task_flag = 0
+            if "14" in field3:
+                try:
+                    self.flow_task_flag = int(field3["14"])
+                except (ValueError, TypeError):
+                    pass
+            if self.working_status in ACTIVE_CLEANING_STATUSES:
+                if "11" not in decoded:
+                    self.dock_field11 = 1
+                if "47" not in decoded:
+                    self.dock_field47 = 2
+                if "10" not in field3:
+                    self.dock_sub_state = 0
+                if "12" not in field3:
+                    self.dock_activity = 0
+                self.inferred_docked_from_battery = False
             # Log unrecognized sub-fields for future firmware mapping
-            _known_f3 = {"1", "2", "3", "7", "10", "12"}
+            _known_f3 = {"1", "2", "3", "4", "7", "10", "11", "12", "14", "18"}
             _unknown_f3 = set(field3.keys()) - _known_f3
             if _unknown_f3:
                 _LOGGER.debug(
@@ -736,12 +1020,21 @@ class NarwalState:
                 "Please report this at the GitHub repo.",
                 type(field3).__name__, field3,
             )
+        explicitly_off_dock = (
+            ("11" in decoded and self.dock_field11 == 1)
+            or ("47" in decoded and self.dock_field47 == 2)
+        )
+        if not self.is_returning_to_dock and explicitly_off_dock:
+            self.dock_sub_state = 0
+            self.dock_activity = 0
         if "2" in decoded:
             # Field 2 = real-time battery SOC as float32
             # (e.g. 1118175232 → 83.0%; bbp may return int or float)
             bat = _to_float32(decoded["2"])
             if bat is not None:
-                self.battery_level = round(bat)
+                self._set_battery_level(round(bat))
+        if explicitly_off_dock:
+            self.inferred_docked_from_battery = False
         if "38" in decoded:
             # Field 38 = static battery health (always 100, design capacity)
             self.battery_health = int(decoded["38"])
@@ -768,7 +1061,7 @@ class NarwalState:
         if "2" in decoded:
             bat = _to_float32(decoded["2"])
             if bat is not None:
-                self.battery_level = round(bat)
+                self._set_battery_level(round(bat))
         if "38" in decoded:
             self.battery_health = int(decoded["38"])
         if "36" in decoded:
@@ -799,3 +1092,46 @@ class NarwalState:
         """Update state from a decoded download_status message."""
         if "1" in decoded:
             self.download_status = int(decoded["1"])
+
+    def update_from_aux_status(self, topic: str, decoded: dict[str, Any]) -> None:
+        """Store decoded status payloads that are not mapped yet."""
+        self.raw_aux_status[topic] = decoded
+        if topic in {TOPIC_ROBOT_TASK_STATUS, TOPIC_CMD_GET_ROBOT_TASK_STATUS}:
+            payload = decoded.get("2")
+            if not isinstance(payload, dict):
+                return
+            progress = _optional_int(payload.get("1"))
+            if progress is not None:
+                self.task_progress_percent = max(0, min(100, progress))
+            elapsed = _optional_int(payload.get("2"))
+            if elapsed is not None:
+                self.task_elapsed_time = elapsed
+            room = payload.get("6")
+            if not isinstance(room, dict):
+                room = payload.get("8")
+            if isinstance(room, dict):
+                self.current_room_id = _optional_int(room.get("1"))
+                name = room.get("3")
+                if isinstance(name, (bytes, bytearray)):
+                    self.current_room_name = bytes(name).decode(
+                        "utf-8", errors="replace"
+                    )
+                else:
+                    self.current_room_name = str(name) if name else ""
+                    if self.current_room_name.startswith(
+                        "b'"
+                    ) and self.current_room_name.endswith("'"):
+                        self.current_room_name = self.current_room_name[2:-1]
+                if self.current_room_id is not None and self.map_data is not None:
+                    map_room = next(
+                        (
+                            candidate
+                            for candidate in self.map_data.rooms
+                            if candidate.room_id == self.current_room_id
+                        ),
+                        None,
+                    )
+                    if map_room is not None:
+                        self.current_room_name = map_room.display_name
+        elif topic == "supply/get_dry_mop_remain_time":
+            self.dry_mop_remaining_time = _optional_int(decoded.get("2"))

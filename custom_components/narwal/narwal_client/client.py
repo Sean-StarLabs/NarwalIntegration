@@ -16,6 +16,7 @@ from .const import (
     BROADCAST_STALE_TIMEOUT,
     COMMAND_RESPONSE_TIMEOUT,
     DEFAULT_PORT,
+    DEFAULT_TOPIC_PREFIX,
     HEARTBEAT_INTERVAL,
     KEEPALIVE_INTERVAL,
     KNOWN_PRODUCT_KEYS,
@@ -26,37 +27,49 @@ from .const import (
     TOPIC_CMD_ACTIVE_ROBOT,
     TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_CANCEL,
+    TOPIC_CMD_CLEAN_TASK,
+    TOPIC_CMD_DRY_DUST_BAG,
     TOPIC_CMD_DRY_MOP,
+    TOPIC_CMD_DRY_STATION_BAG,
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_EASY_CLEAN,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_ALL_MAPS,
     TOPIC_CMD_GET_BASE_STATUS,
+    TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_CURRENT_TASK,
     TOPIC_CMD_GET_DEVICE_INFO,
+    TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
     TOPIC_CMD_GET_FEATURE_LIST,
     TOPIC_CMD_GET_MAP,
+    TOPIC_CMD_GET_ROBOT_TASK_STATUS,
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
-    TOPIC_CMD_PING,
+    TOPIC_CMD_PLAN_START,
     TOPIC_CMD_RECALL,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
-    TOPIC_CMD_SET_MOP_HUMIDITY,
-    TOPIC_CMD_PLAN_START,
-    TOPIC_CMD_CLEAN_TASK,
-    TOPIC_CMD_TAKE_PICTURE,
     TOPIC_CMD_SET_LED,
+    TOPIC_CMD_SET_MOP_HUMIDITY,
+    TOPIC_CMD_TAKE_PICTURE,
+    TOPIC_CMD_WASH_AND_DRY_MOP,
     TOPIC_CMD_WASH_MOP,
+    TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
-    DEFAULT_TOPIC_PREFIX,
+    TOPIC_PLANNING_DEBUG,
+    TOPIC_POINT_NAVI_PLAN_TRAJ,
+    TOPIC_ROBOT_CURRENT_STATUS,
+    TOPIC_ROBOT_STATUS,
+    TOPIC_ROBOT_TASK_STATUS,
+    TOPIC_TIMELINE_STATUS,
     WAKE_TIMEOUT,
+    CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
     MopStrengthLevel,
-    WorkMode,
     WorkingStatus,
+    WorkMode,
 )
 from .models import CommandResponse, DeviceInfo, MapData, MapDisplayData, NarwalState
 from .protocol import (
@@ -68,6 +81,92 @@ from .protocol import (
 )
 
 _LOGGER = logging.getLogger(__name__)
+
+_ACTIVE_WORKING_STATUS_TTL = 15.0
+_STALE_DOCK_BASE_STATUSES = {
+    WorkingStatus.UNKNOWN,
+    WorkingStatus.STANDBY,
+    WorkingStatus.DOCKED,
+    WorkingStatus.CHARGED,
+    WorkingStatus.DOCKED_V2,
+}
+_AUX_STATUS_TOPICS = {
+    TOPIC_TIMELINE_STATUS,
+    TOPIC_POINT_NAVI_PLAN_TRAJ,
+    TOPIC_PLANNING_DEBUG,
+    TOPIC_ROBOT_STATUS,
+    TOPIC_ROBOT_CURRENT_STATUS,
+    TOPIC_ROBOT_TASK_STATUS,
+}
+
+
+def _short_repr(value: Any, limit: int = 1200) -> str:
+    text = repr(value)
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}…"
+
+
+def _normalise_blackboxprotobuf_typedef(typedef: dict[str, Any]) -> dict[str, Any]:
+    """Add field names expected by some blackboxprotobuf releases."""
+    for info in typedef.values():
+        info.setdefault("name", "")
+        message_typedef = info.get("message_typedef")
+        if isinstance(message_typedef, dict):
+            _normalise_blackboxprotobuf_typedef(message_typedef)
+        alt_typedefs = info.get("alt_typedefs")
+        if isinstance(alt_typedefs, dict):
+            for alt_typedef in alt_typedefs.values():
+                if isinstance(alt_typedef, dict):
+                    _normalise_blackboxprotobuf_typedef(alt_typedef)
+    return typedef
+
+
+def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStatus | None:
+    """Extract robot_base_status field 3.1."""
+    if not isinstance(decoded, dict):
+        return None
+    field3 = decoded.get("3")
+    if isinstance(field3, list):
+        field3 = field3[0] if field3 else None
+    if not isinstance(field3, dict) or "1" not in field3:
+        return None
+    try:
+        return WorkingStatus(int(field3["1"]))
+    except (TypeError, ValueError):
+        return None
+
+
+def _base_status_confirms_docked(
+    decoded: dict[str, Any] | object, status: WorkingStatus | None
+) -> bool:
+    """Return true when a terminal status also carries live dock indicators."""
+    if not isinstance(decoded, dict) or status not in {
+        WorkingStatus.STANDBY,
+        WorkingStatus.DOCKED,
+        WorkingStatus.CHARGED,
+        WorkingStatus.DOCKED_V2,
+    }:
+        return False
+    field3 = decoded.get("3")
+    if isinstance(field3, list):
+        field3 = field3[0] if field3 else None
+    field3 = field3 if isinstance(field3, dict) else {}
+
+    def int_field(container: dict[str, Any], field: str) -> int:
+        try:
+            return int(container.get(field, 0))
+        except (TypeError, ValueError):
+            return 0
+
+    return (
+        int_field(decoded, "11") >= 2
+        or int_field(decoded, "47") in (1, 3)
+        or int_field(field3, "3") in (1, 6)
+        or int_field(field3, "10") == 1
+        or int_field(field3, "12") > 0
+        or int_field(field3, "18") > 0
+    )
 
 
 class NarwalConnectionError(Exception):
@@ -115,7 +214,11 @@ class NarwalClient:
         self._listener_active = False  # True when start_listening() is running recv loop
         self._robot_awake = False  # True once we receive a broadcast
         self._last_broadcast_time: float = 0.0  # monotonic time of last broadcast
+        self._last_status_time: float = 0.0  # monotonic time of last status/base broadcast
         self._last_display_map_time: float = 0.0  # monotonic time of last display_map
+        self._last_active_working_status_time: float = 0.0
+        self._last_aux_log_time: dict[str, float] = {}
+        self._last_base_status_log: tuple[Any, Any, Any] | None = None
         # Queue for field5 command responses
         self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
         # Lock to prevent concurrent send_command calls from racing on the queue
@@ -148,6 +251,89 @@ class NarwalClient:
         if self._last_display_map_time <= 0:
             return 999.0
         return time.monotonic() - self._last_display_map_time
+
+    @property
+    def last_status_age(self) -> float:
+        """Seconds since last status/base broadcast (999.0 if none received)."""
+        if self._last_status_time <= 0:
+            return 999.0
+        return time.monotonic() - self._last_status_time
+
+    def _active_working_status_is_recent(self, now: float | None = None) -> bool:
+        """Return true while fresh working_status telemetry is contradicting base_status."""
+        if self._last_active_working_status_time <= 0:
+            return False
+        now = time.monotonic() if now is None else now
+        return now - self._last_active_working_status_time <= _ACTIVE_WORKING_STATUS_TTL
+
+    def _state_needs_keepalive(self) -> bool:
+        """Return true when the app-style keepalive should keep the robot awake."""
+        state = self.state
+        if state.working_status == WorkingStatus.UNKNOWN:
+            return True
+        if state.working_status == WorkingStatus.ERROR:
+            return True
+        if state.is_cleaning or state.is_returning:
+            return True
+        if state.is_station_active:
+            return True
+        if (
+            state.is_paused
+            and state._working_status_is_cleaning_like()
+            and not state.is_docked
+        ):
+            return True
+        if state.working_status == WorkingStatus.CLEANING_ALT and state.is_docked:
+            return True
+        return not state.is_docked
+
+    def _update_from_working_status_broadcast(
+        self, decoded: dict[str, Any], now: float | None = None
+    ) -> None:
+        """Update state from a working_status broadcast."""
+        self.state.update_from_working_status(decoded)
+        if self.state.has_recent_active_working_status:
+            self._last_active_working_status_time = (
+                self.state.last_active_working_status_time
+            )
+
+    def _update_from_base_status_broadcast(
+        self, decoded: dict[str, Any], now: float | None = None
+    ) -> None:
+        """Update state from robot_base_status, ignoring stale dock overlays mid-task."""
+        now = time.monotonic() if now is None else now
+        base_status = _base_status_working_status(decoded)
+        signature = (decoded.get("3"), decoded.get("11"), decoded.get("47"))
+        if signature != self._last_base_status_log:
+            self._last_base_status_log = signature
+            _LOGGER.debug(
+                "%s robot_base_status field3=%r field11=%r field47=%r",
+                self.host,
+                decoded.get("3"),
+                decoded.get("11"),
+                decoded.get("47"),
+            )
+        if (
+            base_status in _STALE_DOCK_BASE_STATUSES
+            and self._active_working_status_is_recent(now)
+            and not _base_status_confirms_docked(decoded, base_status)
+        ):
+            _LOGGER.debug(
+                "Ignoring stale %s base_status while active working_status is fresh",
+                base_status.name,
+            )
+            self.state.update_battery_from_base_status(decoded)
+            return
+        self.state.update_from_base_status(decoded)
+
+    def _update_from_aux_status_broadcast(
+        self, short_topic: str, decoded: dict[str, Any]
+    ) -> None:
+        self.state.update_from_aux_status(short_topic, decoded)
+        now = time.monotonic()
+        if now - self._last_aux_log_time.get(short_topic, 0.0) > 30.0:
+            self._last_aux_log_time[short_topic] = now
+            _LOGGER.debug("%s decoded status: %s", short_topic, _short_repr(decoded))
 
     async def connect(self) -> None:
         """Establish WebSocket connection to the vacuum.
@@ -255,6 +441,9 @@ class NarwalClient:
                     else:
                         raw_id = str(raw_id).strip()
                     if raw_id:
+                        parts = msg.topic.split("/") if msg.topic else []
+                        if len(parts) >= 2 and parts[1]:
+                            self.topic_prefix = f"/{parts[1]}"
                         self.device_id = raw_id
                         _LOGGER.info("Discovered device_id from response: %s", self.device_id)
                         return self.device_id
@@ -333,12 +522,11 @@ class NarwalClient:
             try:
                 if not self.connected:
                     await self.connect()
-                    # Immediate wake burst on (re)connect — the fresh TCP
-                    # connection may trigger the robot's deep-sleep wake
-                    # interrupt, but only if we send commands before it
-                    # expires.  Don't wait for the keepalive loop's first
-                    # tick (15s delay would be too late).
-                    await self._send_wake_burst()
+                    if self._state_needs_keepalive():
+                        await self._send_wake_burst()
+                    else:
+                        await self.subscribe_to_topics()
+                        _LOGGER.debug("Robot is docked/idle; not sending reconnect wake")
 
                 retry_delay = RECONNECT_INITIAL_DELAY  # reset on success
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -413,10 +601,13 @@ class NarwalClient:
             _LOGGER.debug("Failed to decode protobuf for topic %s", short_topic)
             return
 
+        now = time.monotonic()
         if short_topic == "status/working_status":
-            self.state.update_from_working_status(decoded)
+            self._last_status_time = now
+            self._update_from_working_status_broadcast(decoded, now)
         elif short_topic == "status/robot_base_status":
-            self.state.update_from_base_status(decoded)
+            self._last_status_time = now
+            self._update_from_base_status_broadcast(decoded, now)
         elif short_topic == "upgrade/upgrade_status":
             self.state.update_from_upgrade_status(decoded)
         elif short_topic == "status/download_status":
@@ -430,6 +621,8 @@ class NarwalClient:
                 self.state.map_display_data.robot_y,
                 self.state.map_display_data.timestamp,
             )
+        elif short_topic in _AUX_STATUS_TOPICS:
+            self._update_from_aux_status_broadcast(short_topic, decoded)
         if self.on_state_update:
             self.on_state_update(self.state)
 
@@ -489,9 +682,12 @@ class NarwalClient:
         "upgrade/upgrade_status",
         "status/download_status",
         "map/display_map",
-        "status/time_line_status",
-        "status/point_navi_plan_traj",
-        "developer/planning_debug_info",
+        TOPIC_TIMELINE_STATUS,
+        TOPIC_POINT_NAVI_PLAN_TRAJ,
+        TOPIC_PLANNING_DEBUG,
+        TOPIC_ROBOT_STATUS,
+        TOPIC_ROBOT_CURRENT_STATUS,
+        TOPIC_ROBOT_TASK_STATUS,
     ]
 
     def _build_topic_subscription(self, duration: int = 600) -> bytes:
@@ -696,9 +892,12 @@ class NarwalClient:
                         except Exception:
                             _LOGGER.debug("Topic re-subscribe failed")
 
+                    if not self._state_needs_keepalive():
+                        _LOGGER.debug("Robot is docked/idle; skipping app keepalive")
+                        continue
+
                     # Send lightweight heartbeat to keep robot awake.
-                    # The Narwal app sends this continuously regardless of
-                    # robot state — it's safe during cleaning.
+                    # This is only needed while an active task is in progress.
                     try:
                         payload = self._encode_varint_field(1, 1)
                         frame = build_frame(
@@ -710,6 +909,11 @@ class NarwalClient:
                         _LOGGER.debug("Keepalive send failed")
                         break
                 else:
+                    if not self._state_needs_keepalive():
+                        consecutive_wake_failures = 0
+                        _LOGGER.debug("Robot is docked/idle; not waking")
+                        continue
+
                     # Robot appears asleep — send full wake burst
                     # (wake burst includes topic subscription)
                     consecutive_wake_failures += 1
@@ -857,16 +1061,19 @@ class NarwalClient:
             except Exception:
                 continue
 
+            now = time.monotonic()
             if short_topic == "status/working_status":
-                self.state.update_from_working_status(decoded)
+                self._update_from_working_status_broadcast(decoded, now)
             elif short_topic == "status/robot_base_status":
-                self.state.update_from_base_status(decoded)
+                self._update_from_base_status_broadcast(decoded, now)
             elif short_topic == "upgrade/upgrade_status":
                 self.state.update_from_upgrade_status(decoded)
             elif short_topic == "status/download_status":
                 self.state.update_from_download_status(decoded)
             elif short_topic == "map/display_map":
                 self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
+            elif short_topic in _AUX_STATUS_TOPICS:
+                self._update_from_aux_status_broadcast(short_topic, decoded)
 
         raise NarwalCommandError(
             f"No field5 response within {timeout}s"
@@ -948,9 +1155,10 @@ class NarwalClient:
             len(room_ids),
         )
         payload = self._build_clean_payload_v2(room_ids)
-        return await self.send_command(
+        resp = await self.send_command(
             TOPIC_CMD_PLAN_START, payload=payload, timeout=10.0,
         )
+        return resp
 
     def _build_clean_payload_v2(
         self,
@@ -1047,7 +1255,9 @@ class NarwalClient:
                 },
             }
         }
-        return blackboxprotobuf.encode_message(msg, typedef)
+        return blackboxprotobuf.encode_message(
+            msg, _normalise_blackboxprotobuf_typedef(typedef)
+        )
 
     # WorkMode -> (CleanParam.mode tag 1, pass-count tags to set from `passes`). The robot's
     # execution mode is CleanTask.taskType (= the WorkMode value); CleanParam.mode and the
@@ -1070,13 +1280,14 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.NORMAL,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
     ) -> bytes:
         """Build a clean/start_clean request for the given rooms.
 
         StartClean_Request{1: CleanTask{1: map_id, 2: [CleanItem...], 3: {} (TaskOption),
         5: taskType}}; CleanItem{1: ZoneOption{1: 1 (room zone), 2: room_id}, 2: CleanParam,
         3: order}. taskType (the execution-mode carrier) and CleanParam.mode/pass-tag are
-        derived from work_mode. overlapLevel is omitted — live-validated as ignored here.
+        derived from work_mode. overlapLevel is CleanParam tag 8 when supplied.
 
         Args:
             room_ids: Robot room IDs (RoomInfo.room_id).
@@ -1086,6 +1297,7 @@ class NarwalClient:
             water: Mop water volume (tag 4).
             mop_strength: Mop scrub intensity (tag 3).
             passes: Clean count, routed to the pass tag(s) for the mode.
+            route: Optional route overlap level (tag 8).
         """
         import blackboxprotobuf
 
@@ -1096,6 +1308,8 @@ class NarwalClient:
             "3": int(mop_strength),
             "4": int(water),
         }
+        if route is not None:
+            param["8"] = int(route)
         for tag in pass_tags:
             param[tag] = int(passes)
 
@@ -1130,7 +1344,9 @@ class NarwalClient:
             "3": {"type": "message", "message_typedef": {}},
             "5": {"type": "int"},
         }}}
-        return blackboxprotobuf.encode_message({"1": task}, typedef)
+        return blackboxprotobuf.encode_message(
+            {"1": task}, _normalise_blackboxprotobuf_typedef(typedef)
+        )
 
     def _build_room_clean_payload(self, room_ids: list[int]) -> bytes:
         """Build the legacy flat room-clean payload for older firmware."""
@@ -1194,6 +1410,7 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.WET,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
     ) -> CommandResponse:
         """Start cleaning the given rooms via clean/start_clean.
 
@@ -1209,7 +1426,7 @@ class NarwalClient:
 
         Args:
             room_ids: Robot room IDs (RoomInfo.room_id), mapped from HA areas.
-            work_mode, fan, water, mop_strength, passes: CleanParam settings —
+            work_mode, fan, water, mop_strength, passes, route: CleanParam settings —
                 see _build_start_clean_payload.
         """
         if not room_ids:
@@ -1246,6 +1463,7 @@ class NarwalClient:
                 water=water,
                 mop_strength=mop_strength,
                 passes=passes,
+                route=route,
             )
             resp = await self.send_command(
                 TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,
@@ -1390,6 +1608,10 @@ class NarwalClient:
         """Wash the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_WASH_MOP)
 
+    async def wash_mop_by_robot_status(self) -> CommandResponse:
+        """Wash mop pads using the app's status-gated station command."""
+        return await self.send_command(TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS)
+
     async def dry_mop(self) -> CommandResponse:
         """Dry the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_DRY_MOP)
@@ -1397,6 +1619,18 @@ class NarwalClient:
     async def empty_dustbin(self) -> CommandResponse:
         """Empty the dustbin at the station."""
         return await self.send_command(TOPIC_CMD_DUST_GATHERING)
+
+    async def wash_and_dry_mop(self) -> CommandResponse:
+        """Wash and dry the mop pads at the station."""
+        return await self.send_command(TOPIC_CMD_WASH_AND_DRY_MOP)
+
+    async def dry_dust_bag(self) -> CommandResponse:
+        """Dry/disinfect the robot dust bin/canister."""
+        return await self.send_command(TOPIC_CMD_DRY_DUST_BAG)
+
+    async def dry_station_bag(self) -> CommandResponse:
+        """Dry/disinfect the dock dust bag."""
+        return await self.send_command(TOPIC_CMD_DRY_STATION_BAG)
 
     # --- Query commands ---
 
@@ -1443,12 +1677,27 @@ class NarwalClient:
         """
         resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS)
         status_data = resp.data.get("2", {})
+        if status_data and not isinstance(status_data, dict):
+            _LOGGER.debug(
+                "%s get_status response field 2 is %s, not a base-status object: %r",
+                self.host,
+                type(status_data).__name__,
+                status_data,
+            )
+            return resp
         if status_data:
             _LOGGER.debug(
-                "get_status response (full=%s): field3=%r, field2=%r",
+                "%s get_status response (full=%s): field3=%r, field2=%r",
+                self.host,
                 full_update,
                 status_data.get("3") if isinstance(status_data, dict) else None,
                 status_data.get("2") if isinstance(status_data, dict) else None,
+            )
+            _LOGGER.debug(
+                "%s get_status decoded base_status (full=%s): %r",
+                self.host,
+                full_update,
+                status_data,
             )
             if full_update:
                 self.state.update_from_base_status(status_data)
@@ -1461,6 +1710,27 @@ class NarwalClient:
     async def get_current_task(self) -> CommandResponse:
         """Query the current clean task."""
         return await self.send_command(TOPIC_CMD_GET_CURRENT_TASK)
+
+    async def get_clean_progress_info(self) -> CommandResponse:
+        """Query active clean progress information."""
+        resp = await self.send_command(TOPIC_CMD_GET_CLEAN_PROGRESS_INFO)
+        self.state.update_from_aux_status(TOPIC_CMD_GET_CLEAN_PROGRESS_INFO, resp.data)
+        _LOGGER.debug("%s clean_progress_info response: %r", self.host, resp.data)
+        return resp
+
+    async def get_dry_mop_remain_time(self) -> CommandResponse:
+        """Query remaining mop drying time."""
+        resp = await self.send_command(TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME)
+        self.state.update_from_aux_status(TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME, resp.data)
+        _LOGGER.debug("%s dry_mop_remain_time response: %r", self.host, resp.data)
+        return resp
+
+    async def get_robot_task_status(self) -> CommandResponse:
+        """Query the robot task status model."""
+        resp = await self.send_command(TOPIC_CMD_GET_ROBOT_TASK_STATUS)
+        self.state.update_from_aux_status(TOPIC_CMD_GET_ROBOT_TASK_STATUS, resp.data)
+        _LOGGER.debug("%s robot_task_status response: %r", self.host, resp.data)
+        return resp
 
     async def get_map(self) -> MapData:
         """Download the full map data."""

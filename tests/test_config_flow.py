@@ -101,7 +101,7 @@ class TestNarwalConfigFlow:
         flow.async_show_form.assert_called_once()
         call_kwargs = flow.async_show_form.call_args.kwargs
         assert call_kwargs["errors"] == {"base": "cannot_connect"}
-        mock_client.disconnect.assert_awaited_once()
+        assert mock_client.disconnect.await_count == 2
 
     async def test_duplicate_device_aborts(self) -> None:
         """async_step_user with duplicate unique_id aborts with already_configured."""

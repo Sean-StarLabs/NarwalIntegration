@@ -43,47 +43,69 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
             model_label = user_input[CONF_MODEL]
             product_key = NARWAL_MODELS[model_label]
 
-            # If user selected a specific model, set topic prefix directly
-            topic_prefix = None if product_key == "auto" else f"/{product_key}"
-
-            client = NarwalClient(
-                host=host, port=port, topic_prefix=topic_prefix,
-            )
-            try:
-                await client.connect()
-                # Discover device_id from broadcast, then query info
-                await client.discover_device_id(timeout=15.0)
-                # Drain any stale field5 responses left in the WebSocket
-                # buffer from discover's wake probes before sending a
-                # real command
-                await client.drain_ws_buffer()
-                device_info = await client.get_device_info()
-            except Exception as ex:
-                _LOGGER.warning(
-                    "Setup failed: %s: %s", type(ex).__name__, ex,
-                )
-                errors["base"] = "cannot_connect"
+            # Try the selected model key first for speed. Some Flow/Flow 2
+            # units only wake on a sibling key before reporting their actual
+            # product key, so fall back to auto-discovery before failing.
+            topic_prefixes: list[str | None]
+            if product_key == "auto":
+                topic_prefixes = [None]
             else:
-                device_id = device_info.device_id
-                await self.async_set_unique_id(device_id)
-                self._abort_if_unique_id_configured()
+                topic_prefixes = [f"/{product_key}", None]
 
-                # Use the product key that actually worked (may have been
-                # auto-detected during discovery even if user picked "auto")
-                resolved_key = client.topic_prefix.lstrip("/")
-
-                return self.async_create_entry(
-                    title=model_label if product_key != "auto" else f"Narwal {resolved_key}",
-                    data={
-                        "host": host,
-                        "port": port,
-                        "device_id": device_id,
-                        CONF_PRODUCT_KEY: resolved_key,
-                        CONF_MODEL: model_label,
-                    },
+            last_error: Exception | None = None
+            for topic_prefix in topic_prefixes:
+                client = NarwalClient(
+                    host=host, port=port, topic_prefix=topic_prefix,
                 )
-            finally:
-                await client.disconnect()
+                try:
+                    await client.connect()
+                    # Discover device_id from broadcast, then query info
+                    await client.discover_device_id(timeout=15.0)
+                    # Drain any stale field5 responses left in the WebSocket
+                    # buffer from discover's wake probes before sending a
+                    # real command
+                    await client.drain_ws_buffer()
+                    device_info = await client.get_device_info()
+                except Exception as ex:
+                    last_error = ex
+                    _LOGGER.debug(
+                        "Setup probe failed with prefix %s: %s: %s",
+                        topic_prefix or "auto",
+                        type(ex).__name__,
+                        ex,
+                    )
+                    await client.disconnect()
+                    continue
+
+                try:
+                    device_id = device_info.device_id
+                    await self.async_set_unique_id(device_id)
+                    self._abort_if_unique_id_configured()
+
+                    # Use the product key that actually worked (may have been
+                    # auto-detected during discovery even if user picked "auto")
+                    resolved_key = client.topic_prefix.lstrip("/")
+
+                    return self.async_create_entry(
+                        title=model_label if product_key != "auto" else f"Narwal {resolved_key}",
+                        data={
+                            "host": host,
+                            "port": port,
+                            "device_id": device_id,
+                            CONF_PRODUCT_KEY: resolved_key,
+                            CONF_MODEL: model_label,
+                        },
+                    )
+                finally:
+                    await client.disconnect()
+
+            if last_error is not None:
+                _LOGGER.warning(
+                    "Setup failed: %s: %s",
+                    type(last_error).__name__,
+                    last_error,
+                )
+            errors["base"] = "cannot_connect"
 
         return self.async_show_form(
             step_id="user",
