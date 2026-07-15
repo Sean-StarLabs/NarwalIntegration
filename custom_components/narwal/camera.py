@@ -12,6 +12,16 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
+from .const import (
+    CONF_SHOW_FURNITURE,
+    CONF_SHOW_FURNITURE_LABELS,
+    CONF_SHOW_ROOM_LABELS,
+    CONF_MAP_ROTATION,
+    CONF_MAP_ZOOM,
+    MAP_OPTION_DEFAULTS,
+    MAP_ROTATION_DEFAULT,
+    MAP_ZOOM_DEFAULT,
+)
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
@@ -25,6 +35,9 @@ _MIN_RENDER_INTERVAL = 2
 # Trail recording (used in both debug and normal modes)
 _TRAIL_MAX_POINTS = 50000  # full cleaning session worth
 _TRAIL_RECORD_INTERVAL = 3  # seconds between trail point recordings
+_TRAIL_MIN_GRID_DELTA = 0.25
+_TRAIL_MAX_GRID_JUMP_FRACTION = 0.18
+_TRAIL_MAX_GRID_JUMP_MIN = 24.0
 
 # Debug view: blank canvas with robot dot + trail.
 # Set to False to use the real map renderer instead.
@@ -64,6 +77,12 @@ class NarwalMapCamera(NarwalEntity, Camera):
         # Cached base map (PIL Image) — only re-rendered when static map changes
         self._base_map_image = None  # PIL Image or None
         self._base_map_ts: int = 0  # created_at of the static map used for base
+        self._base_map_options_key: tuple[bool, bool, bool] = (
+            MAP_OPTION_DEFAULTS[CONF_SHOW_ROOM_LABELS],
+            MAP_OPTION_DEFAULTS[CONF_SHOW_FURNITURE],
+            MAP_OPTION_DEFAULTS[CONF_SHOW_FURNITURE_LABELS],
+        )
+        self._room_label_points: list[tuple[str, float, float]] = []
         # Trail state — accumulated grid-coordinate positions during cleaning
         self._trail: list[tuple[float, float]] = []
         self._last_trail_record: float = 0.0
@@ -75,6 +94,42 @@ class NarwalMapCamera(NarwalEntity, Camera):
         self._vp_min_y: float = 0.0
         self._vp_max_y: float = 0.0
         self._vp_initialized: bool = False
+
+    def _map_option(self, key: str) -> bool:
+        """Return a persisted map display option."""
+        return bool(
+            self.coordinator.config_entry.options.get(
+                key,
+                MAP_OPTION_DEFAULTS[key],
+            )
+        )
+
+    def _map_rotation(self) -> int:
+        """Return persisted clockwise map rotation in degrees."""
+        try:
+            rotation = int(
+                self.coordinator.config_entry.options.get(
+                    CONF_MAP_ROTATION,
+                    MAP_ROTATION_DEFAULT,
+                )
+            )
+        except (TypeError, ValueError):
+            return MAP_ROTATION_DEFAULT
+        rotation %= 360
+        return rotation if rotation in (0, 90, 180, 270) else MAP_ROTATION_DEFAULT
+
+    def _map_zoom(self) -> float:
+        """Return persisted map zoom factor."""
+        try:
+            zoom = float(
+                self.coordinator.config_entry.options.get(
+                    CONF_MAP_ZOOM,
+                    MAP_ZOOM_DEFAULT,
+                )
+            )
+        except (TypeError, ValueError):
+            return MAP_ZOOM_DEFAULT
+        return max(1.0, min(2.0, zoom))
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None,
@@ -138,11 +193,44 @@ class NarwalMapCamera(NarwalEntity, Camera):
         self._trail.clear()
         self._last_trail_record = 0.0
 
-    def _record_trail_position(self, grid_x: float, grid_y: float) -> None:
+    def _record_trail_position(
+        self,
+        grid_x: float,
+        grid_y: float,
+        map_width: int,
+        map_height: int,
+    ) -> None:
         """Record a grid-coordinate position to the cleaning trail."""
+        if not math.isfinite(grid_x) or not math.isfinite(grid_y):
+            return
+        if grid_x < 0 or grid_y < 0 or grid_x >= map_width or grid_y >= map_height:
+            _LOGGER.debug(
+                "Skipping Narwal trail point outside map bounds: %.1f, %.1f (%dx%d)",
+                grid_x,
+                grid_y,
+                map_width,
+                map_height,
+            )
+            return
+
         now = time.monotonic()
         if now - self._last_trail_record >= _TRAIL_RECORD_INTERVAL:
             if len(self._trail) < _TRAIL_MAX_POINTS:
+                if self._trail:
+                    last_x, last_y = self._trail[-1]
+                    distance = math.hypot(grid_x - last_x, grid_y - last_y)
+                    if distance < _TRAIL_MIN_GRID_DELTA:
+                        self._last_trail_record = now
+                        return
+                    max_jump = max(
+                        _TRAIL_MAX_GRID_JUMP_MIN,
+                        min(map_width, map_height) * _TRAIL_MAX_GRID_JUMP_FRACTION,
+                    )
+                    if distance > max_jump:
+                        _LOGGER.debug(
+                            "Splitting Narwal trail at large jump: %.1f grid px",
+                            distance,
+                        )
                 self._trail.append((grid_x, grid_y))
             self._last_trail_record = now
 
@@ -181,29 +269,64 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 self.async_write_ha_state()
                 return
 
-            # Record trail in grid coordinates
-            if display and not (display.robot_x == 0.0 and display.robot_y == 0.0):
+            # Record trail in grid coordinates only while actively cleaning.
+            if (
+                is_cleaning
+                and display
+                and not (display.robot_x == 0.0 and display.robot_y == 0.0)
+            ):
                 grid_pos = display.to_grid_coords(
                     static_map.resolution, static_map.origin_x, static_map.origin_y,
                 )
                 if grid_pos is not None:
-                    self._record_trail_position(grid_pos[0], grid_pos[1])
+                    self._record_trail_position(
+                        grid_pos[0],
+                        grid_pos[1],
+                        static_map.width,
+                        static_map.height,
+                    )
 
             static_ts = static_map.created_at or 0
             trail_len = len(self._trail)
+            map_options_key = (
+                self._map_option(CONF_SHOW_ROOM_LABELS),
+                self._map_option(CONF_SHOW_FURNITURE),
+                self._map_option(CONF_SHOW_FURNITURE_LABELS),
+            )
+            view_options_key = (self._map_rotation(), self._map_zoom())
             if display:
-                new_key = (static_ts, display.robot_x, display.robot_y, display.robot_heading, trail_len)
+                new_key = (
+                    static_ts,
+                    map_options_key,
+                    view_options_key,
+                    display.robot_x,
+                    display.robot_y,
+                    display.robot_heading,
+                    trail_len,
+                )
             else:
-                new_key = (static_ts,)
+                new_key = (static_ts, map_options_key, view_options_key)
 
         now = time.monotonic()
         since_render = now - self._last_render_time if self._last_render_time else 999
+        options_changed = (
+            not _DEBUG_VIEW
+            and bool(self._cache_key)
+            and (
+                self._cache_key[1] != map_options_key
+                or self._cache_key[2] != view_options_key
+            )
+        )
 
         if new_key == self._cache_key and self._cached_image:
             self.async_write_ha_state()
             return
 
-        if self._cached_image and since_render < _MIN_RENDER_INTERVAL:
+        if (
+            self._cached_image
+            and since_render < _MIN_RENDER_INTERVAL
+            and not options_changed
+        ):
             self.async_write_ha_state()
             return
 
@@ -247,31 +370,56 @@ class NarwalMapCamera(NarwalEntity, Camera):
             self.async_write_ha_state()
             return
 
-        from .narwal_client.map_renderer import render_base_map, render_overlay
+        from .narwal_client.map_renderer import (
+            render_base_map,
+            render_overlay,
+            room_label_points,
+        )
 
         # Rebuild base map only when static map data changes
         static_ts = static_map.created_at or 0
-        if self._base_map_image is None or static_ts != self._base_map_ts:
+        map_options_key = (
+            self._map_option(CONF_SHOW_ROOM_LABELS),
+            self._map_option(CONF_SHOW_FURNITURE),
+            self._map_option(CONF_SHOW_FURNITURE_LABELS),
+        )
+        if (
+            self._base_map_image is None
+            or static_ts != self._base_map_ts
+            or map_options_key != self._base_map_options_key
+        ):
             room_names: dict[int, str] | None = None
-            if static_map.rooms:
+            if map_options_key[0] and static_map.rooms:
                 room_names = {
                     r.room_id: r.display_name for r in static_map.rooms
                 }
+            obstacles = static_map.obstacles if map_options_key[1] else None
             base_img = await self.hass.async_add_executor_job(
                 render_base_map,
                 static_map.compressed_map,
                 static_map.width,
                 static_map.height,
-                static_map.dock_x,
-                static_map.dock_y,
+                None,
+                None,
                 room_names,
-                static_map.obstacles,
+                obstacles,
                 static_map.origin_x,
                 static_map.origin_y,
+                map_options_key[2],
+                False,
+                False,
             )
             if base_img:
                 self._base_map_image = base_img
                 self._base_map_ts = static_ts
+                self._base_map_options_key = map_options_key
+                self._room_label_points = await self.hass.async_add_executor_job(
+                    room_label_points,
+                    static_map.compressed_map,
+                    static_map.width,
+                    static_map.height,
+                    room_names,
+                )
                 _LOGGER.info("Base map rendered (ts=%d, %dx%d)", static_ts, static_map.width, static_map.height)
             else:
                 self.async_write_ha_state()
@@ -337,6 +485,11 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 robot_y,
                 robot_heading,
                 trail,
+                self._map_rotation(),
+                self._map_zoom(),
+                self._room_label_points,
+                static_map.dock_x,
+                static_map.dock_y,
             )
 
             if png_bytes:

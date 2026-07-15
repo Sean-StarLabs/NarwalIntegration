@@ -107,9 +107,9 @@ def install() -> None:
     ha_helpers = _mod("homeassistant.helpers", ha)
 
     ha_cv = _mod("homeassistant.helpers.config_validation", ha_helpers)
-    ha_cv.boolean = MagicMock(side_effect=lambda value: value)  # type: ignore[attr-defined]
     ha_cv.entity_ids = MagicMock()  # type: ignore[attr-defined]
     ha_cv.ensure_list = MagicMock(side_effect=lambda value: value)  # type: ignore[attr-defined]
+    ha_cv.boolean = MagicMock(side_effect=lambda value: value)  # type: ignore[attr-defined]
 
     ha_er = _mod("homeassistant.helpers.entity_registry", ha_helpers)
     ha_er.async_get = MagicMock()  # type: ignore[attr-defined]

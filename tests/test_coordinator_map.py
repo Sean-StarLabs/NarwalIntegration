@@ -8,10 +8,7 @@ Covers MAP-04 (post-cleaning map refresh) validation gaps:
 
 from __future__ import annotations
 
-import sys
-from unittest.mock import AsyncMock, MagicMock, PropertyMock
-
-import pytest
+from unittest.mock import MagicMock
 
 # Install HA stubs before any custom_components import
 import tests.ha_stubs  # noqa: E402
@@ -48,10 +45,17 @@ class TestCoordinatorMapRefresh:
         coordinator._listen_task = None
         coordinator._map_fetch_pending = False
         coordinator._last_display_map_resub = 0.0
+        coordinator._last_status_resub = 0.0
         coordinator._prev_working_status = WorkingStatus.UNKNOWN
         coordinator.update_interval = None
         coordinator.async_set_updated_data = MagicMock()
-        mock_entry.async_create_background_task = MagicMock()
+        def _close_background_task(*args: object) -> None:
+            for arg in args:
+                if hasattr(arg, "close"):
+                    arg.close()
+
+        mock_entry.async_create_background_task = MagicMock(side_effect=_close_background_task)
+        mock_hass.async_create_task = MagicMock(side_effect=_close_background_task)
         # Prevent TypeError on display_map dropout check when is_cleaning
         coordinator.client.last_display_map_age = 0.0
         return coordinator

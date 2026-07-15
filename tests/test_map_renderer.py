@@ -12,12 +12,16 @@ import io
 import zlib
 
 from narwal_client.map_renderer import (
+    MAP_RENDER_SCALE,
     render_base_map,
     render_overlay,
     decompress_map,
     _decode_packed_varints,
+    _scaled_coord,
     OBSTACLE_COLORS,
     OBSTACLE_COLOR_DEFAULT,
+    render_map_png,
+    _transform_point,
 )
 from narwal_client.models import ObstacleInfo
 
@@ -77,7 +81,13 @@ class TestRenderBaseMap:
 
         assert result is not None
         assert isinstance(result, Image.Image)
-        assert result.size == (width, height)
+        assert result.size == (width * MAP_RENDER_SCALE, height * MAP_RENDER_SCALE)
+        assert result.mode == "RGBA"
+        assert result.getpixel((0, 0))[3] == 255
+
+    def test_scaled_coordinate_is_clamped_to_image_edge(self) -> None:
+        """Fractional coordinates in the last grid cell remain visible."""
+        assert _scaled_coord(29.9, MAP_RENDER_SCALE, 90) == 89
 
     def test_with_dock_position(self) -> None:
         """Given MapData with dock_x/dock_y, render_base_map includes dock."""
@@ -96,10 +106,14 @@ class TestRenderBaseMap:
         # The dock is drawn as a white circle — check that the center pixel
         # at the dock position (Y-flipped) is white or near-white
         dock_px_y = height - 1 - 15  # Y-flip
-        r, g, b = result.getpixel((15, dock_px_y))
-        assert r > 200 and g > 200 and b > 200, (
-            f"Expected white-ish dock pixel, got ({r}, {g}, {b})"
-        )
+        dock_px = int(round(15 * MAP_RENDER_SCALE + (MAP_RENDER_SCALE / 2)))
+        dock_py = int(round(dock_px_y * MAP_RENDER_SCALE + (MAP_RENDER_SCALE / 2)))
+        region = [
+            result.getpixel((x, y))[:3]
+            for x in range(dock_px - 5, dock_px + 6)
+            for y in range(dock_py - 5, dock_py + 6)
+        ]
+        assert any(r > 200 and g > 200 and b > 200 for r, g, b in region)
 
     def test_empty_compressed_data(self) -> None:
         """Given empty compressed data, returns None gracefully."""
@@ -168,6 +182,10 @@ class TestRenderOverlay:
         assert isinstance(result, bytes)
         assert result[:8] == b"\x89PNG\r\n\x1a\n"
 
+    def test_unsupported_rotation_uses_unrotated_transform(self) -> None:
+        """Bitmap and overlay points share the same fallback rotation."""
+        assert _transform_point(5, 10, 30, 20, 45, 1.0) == (5, 10)
+
     def test_does_not_modify_base(self) -> None:
         """render_overlay does not mutate the base image."""
         from PIL import Image
@@ -207,7 +225,24 @@ class TestRenderOverlay:
         # Verify we can open the PNG
         from PIL import Image
         img = Image.open(io.BytesIO(png))
-        assert img.size == (width, height)
+        assert img.size == (width * MAP_RENDER_SCALE, height * MAP_RENDER_SCALE)
+
+
+class TestRenderMapPng:
+    """Tests for the one-shot map rendering path."""
+
+    def test_room_pixels_are_opaque_rgba(self) -> None:
+        """Room colors match the RGBA image mode."""
+        from PIL import Image
+
+        width, height = 10, 10
+        compressed = _make_room_grid(width, height, room_id=1)
+
+        png = render_map_png(zlib.decompress(compressed), width, height)
+        image = Image.open(io.BytesIO(png))
+
+        assert image.mode == "RGBA"
+        assert image.getpixel((0, 0))[3] == 255
 
 
 class TestObstacleRendering:
@@ -229,7 +264,7 @@ class TestObstacleRendering:
         )
         assert result is not None
         assert isinstance(result, Image.Image)
-        assert result.size == (width, height)
+        assert result.size == (width * MAP_RENDER_SCALE, height * MAP_RENDER_SCALE)
 
     def test_obstacle_type_colors_exist(self) -> None:
         """OBSTACLE_COLORS dict has entries for all furniture enum types."""
@@ -298,5 +333,3 @@ class TestObstacleRendering:
         assert result_with is not None
         # Images should differ (obstacle drawn on one but not other)
         assert list(result_without.getdata()) != list(result_with.getdata())
-
-
