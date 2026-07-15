@@ -27,9 +27,27 @@ CONF_PRODUCT_KEY = "product_key"
 PLATFORMS: list[Platform] = [
     Platform.VACUUM,
     Platform.SENSOR,
+    Platform.SELECT,
     Platform.BINARY_SENSOR,
     Platform.CAMERA,
+    Platform.BUTTON,
 ]
+
+CONF_SHOW_ROOM_LABELS = "show_room_labels"
+CONF_SHOW_FURNITURE = "show_furniture"
+CONF_SHOW_FURNITURE_LABELS = "show_furniture_labels"
+CONF_MAP_ROTATION = "map_rotation"
+CONF_MAP_ZOOM = "map_zoom"
+SERVICE_CLEAN_ROOMS = "clean_rooms"
+
+MAP_OPTION_DEFAULTS: dict[str, bool] = {
+    CONF_SHOW_ROOM_LABELS: True,
+    CONF_SHOW_FURNITURE: False,
+    CONF_SHOW_FURNITURE_LABELS: False,
+}
+
+MAP_ROTATION_DEFAULT = 0
+MAP_ZOOM_DEFAULT = 1.0
 
 # HA fan_speed labels for the live clean/set_fan_level command. Its
 # SweepFanLevel enum stops at DEEP; SUPER remains available to clean settings.

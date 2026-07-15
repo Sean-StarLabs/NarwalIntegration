@@ -19,7 +19,16 @@ except ImportError:
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .narwal_client import CommandResult, FanLevel, NarwalCommandError, WorkingStatus
+from .narwal_client import (
+    CleaningRoute,
+    CommandResult,
+    FanLevel,
+    MopHumidity,
+    MopStrengthLevel,
+    NarwalCommandError,
+    WorkMode,
+    WorkingStatus,
+)
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 from . import NarwalConfigEntry
@@ -29,13 +38,34 @@ from .entity import NarwalEntity
 
 _LOGGER = logging.getLogger(__name__)
 
+ROOM_CLEAN_MODES = {
+    "Vacuum": WorkMode.VACUUM,
+    "Mop": WorkMode.MOP,
+    "Vacuum then mop": WorkMode.VACUUM_THEN_MOP,
+    "Vacuum and mop": WorkMode.VACUUM_AND_MOP,
+}
+ROOM_CLEAN_SUCTION = {"AI": FanLevel.UNSPECIFIED, **FAN_SPEED_MAP}
+ROOM_CLEAN_WATER = {
+    "Dry": MopHumidity.DRY,
+    "Normal": MopHumidity.NORMAL,
+    "Wet": MopHumidity.WET,
+}
+ROOM_CLEAN_SCRUB = {
+    "Normal": MopStrengthLevel.NORMAL,
+    "High": MopStrengthLevel.HIGH,
+}
+ROOM_CLEAN_ROUTES = {
+    "Standard": CleaningRoute.STANDARD,
+    "Meticulous": CleaningRoute.METICULOUS,
+}
+
 WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
     WorkingStatus.DOCKED: VacuumActivity.DOCKED,
     WorkingStatus.CHARGED: VacuumActivity.DOCKED,
     WorkingStatus.DOCKED_V2: VacuumActivity.DOCKED,
     WorkingStatus.STANDBY: VacuumActivity.IDLE,
-    WorkingStatus.CLEANING_V2: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING: VacuumActivity.CLEANING,
+    WorkingStatus.CLEANING_V2: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING_ALT: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING_FLOW2: VacuumActivity.CLEANING,
     WorkingStatus.TASK_COMPLETED: VacuumActivity.RETURNING,
@@ -80,9 +110,12 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         state = self.coordinator.data
         if state is None:
             return VacuumActivity.IDLE
-        is_cleaning_state = state.working_status in ACTIVE_CLEANING_STATUSES
         if state.is_docked:
             return VacuumActivity.DOCKED
+        is_cleaning_state = (
+            state.working_status in ACTIVE_CLEANING_STATUSES
+            or state.has_recent_active_working_status
+        )
         # is_paused (field 3.2) stays stale after docking — only trust
         # during cleaning states. Paused takes priority over returning
         # since the robot physically stops when paused mid-return.
@@ -97,13 +130,9 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         activity = WORKING_STATUS_TO_ACTIVITY.get(state.working_status)
         if activity is not None:
             return activity
-        # Unknown working_status value — infer from dock signals so we
-        # don't report IDLE while the robot is clearly active off-dock.
-        # New firmware versions may introduce values we haven't mapped yet.
-        if not state.is_docked:
+        if state.working_status == WorkingStatus.UNKNOWN and not state.is_docked:
             _LOGGER.warning(
-                "Unmapped working_status %s (%d) while off-dock — reporting CLEANING",
-                state.working_status.name, state.working_status.value,
+                "Unknown working status while off-dock; reporting cleaning"
             )
             return VacuumActivity.CLEANING
         return VacuumActivity.IDLE
@@ -139,10 +168,13 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         await self._ensure_awake()
         state = self.coordinator.data
         # is_paused stays stale after docking — only trust it during cleaning
-        is_cleaning = (
+        is_cleaning = bool(
             state
             and not state.is_docked
-            and state.working_status in ACTIVE_CLEANING_STATUSES
+            and (
+                state.working_status in ACTIVE_CLEANING_STATUSES
+                or state.has_recent_active_working_status
+            )
         )
         if is_cleaning and state.is_paused:
             await self.coordinator.client.resume(timeout=self._ACTION_TIMEOUT)
@@ -242,7 +274,16 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         await self._ensure_awake()
         room_ids = [int(sid) for sid in segment_ids]
         _LOGGER.info("Starting room-specific clean: rooms=%s", room_ids)
-        resp = await self.coordinator.client.start_rooms(room_ids)
+        settings = self.coordinator.select_options
+        resp = await self.coordinator.client.start_rooms(
+            room_ids,
+            work_mode=ROOM_CLEAN_MODES[settings.get("mode", "Vacuum and mop")],
+            fan=ROOM_CLEAN_SUCTION[settings.get("suction", "AI")],
+            water=ROOM_CLEAN_WATER[settings.get("water", "Wet")],
+            mop_strength=ROOM_CLEAN_SCRUB[settings.get("scrub", "High")],
+            passes=int(settings.get("passes", "2")),
+            route=ROOM_CLEAN_ROUTES[settings.get("route", "Meticulous")],
+        )
         try:
             result_name = CommandResult(resp.result_code).name
         except ValueError:

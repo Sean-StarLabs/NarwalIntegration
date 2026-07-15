@@ -31,6 +31,25 @@
       "cleaning_time": {
         "name": "Cleaning time"
       },
+      "task_progress": {
+        "name": "Progress"
+      },
+      "current_room": {
+        "name": "Current room"
+      },
+      "station_task": {
+        "name": "Station task",
+        "state": {
+          "emptying_dustbin": "Emptying dustbin",
+          "washing_mop": "Washing mop",
+          "drying_mop": "Drying mop",
+          "drying_or_disinfecting": "Drying / disinfecting",
+          "station_active": "Station active"
+        }
+      },
+      "dry_mop_remaining_time": {
+        "name": "Drying time left"
+      },
       "firmware_version": {
         "name": "Firmware version"
       },
@@ -41,6 +60,19 @@
           "fully_charged": "Fully Charged",
           "not_charging": "Not Charging"
         }
+      },
+      "task_status": {
+        "name": "Status",
+        "state": {
+          "cleaning": "Cleaning",
+          "returning": "Returning",
+          "paused": "Paused",
+          "station_active": "Station active",
+          "docked": "Docked",
+          "idle": "Idle",
+          "error": "Error",
+          "unknown": "Unknown"
+        }
       }
     },
     "binary_sensor": {
@@ -50,6 +82,60 @@
           "on": "Docked",
           "off": "Undocked"
         }
+      },
+      "charging": {
+        "name": "Charging"
+      }
+    },
+    "switch": {
+      "show_room_labels": {
+        "name": "Show room labels"
+      },
+      "show_furniture": {
+        "name": "Show furniture"
+      },
+      "show_furniture_labels": {
+        "name": "Show furniture labels"
+      }
+    },
+    "select": {
+      "mode": {
+        "name": "Mode"
+      },
+      "suction": {
+        "name": "Suction"
+      },
+      "water": {
+        "name": "Water"
+      },
+      "scrub": {
+        "name": "Scrub"
+      },
+      "route": {
+        "name": "Route"
+      },
+      "passes": {
+        "name": "Passes"
+      }
+    },
+    "button": {
+      "empty_dustbin": {
+        "name": "Empty dustbin"
+      },
+      "wash_mop": {
+        "name": "Wash mop"
+      },
+      "dry_mop": {
+        "name": "Dry mop"
+      },
+      "wash_and_dry_mop": {
+        "name": "Wash and dry mop"
+      },
+      "dry_dust_bin": {
+        "name": "Dry and disinfect dust bin"
+      },
+      "dry_dock_bag": {
+        "name": "Dry and disinfect dock bag"
       }
     }
   }

@@ -61,6 +61,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._last_display_map_resub: float = 0.0
         self._consecutive_failures = 0
         self._max_failures = 5  # 5 * 60s = 5 minutes before entities go unavailable
+        self.select_options: dict[str, str] = {}
 
     async def async_setup(self) -> None:
         """Connect to the vacuum and start the WebSocket listener.

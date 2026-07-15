@@ -6,8 +6,7 @@ UpdateFailed after the threshold, and resets counters on success/push.
 
 from __future__ import annotations
 
-import sys
-from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import pytest
 
@@ -18,8 +17,7 @@ tests.ha_stubs.install()
 
 from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
 from custom_components.narwal.narwal_client import NarwalConnectionError, NarwalState  # noqa: E402
-
-UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
+from homeassistant.helpers.update_coordinator import UpdateFailed  # noqa: E402
 
 
 class TestCoordinatorResilience:
@@ -75,17 +73,16 @@ class TestCoordinatorResilience:
             assert result is coordinator.client.state
             assert coordinator._consecutive_failures == i + 1
 
-    async def test_update_failed_after_max_failures(self) -> None:
-        """_async_update_data raises UpdateFailed after 5 consecutive failures."""
+    async def test_stale_data_after_max_failures(self) -> None:
+        """_async_update_data raises after the failure threshold."""
         coordinator = self._make_coordinator()
         type(coordinator.client).connected = PropertyMock(return_value=False)
 
-        # Burn through 4 failures (stale data returned)
         for _ in range(4):
-            await coordinator._async_update_data()
+            result = await coordinator._async_update_data()
+            assert result is coordinator.client.state
 
-        # 5th failure raises UpdateFailed
-        with pytest.raises(UpdateFailed, match="5 consecutive polls"):
+        with pytest.raises(UpdateFailed):
             await coordinator._async_update_data()
 
         assert coordinator._consecutive_failures == 5

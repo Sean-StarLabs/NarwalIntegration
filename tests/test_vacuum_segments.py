@@ -17,7 +17,14 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from narwal_client.models import MapData, NarwalState, RoomInfo  # noqa: E402
-from narwal_client.const import WorkingStatus  # noqa: E402
+from narwal_client.const import (  # noqa: E402
+    CleaningRoute,
+    FanLevel,
+    MopHumidity,
+    MopStrengthLevel,
+    WorkMode,
+    WorkingStatus,
+)
 from custom_components.narwal.vacuum import NarwalVacuum  # noqa: E402
 
 # Grab Segment class from stubs for assertions
@@ -191,9 +198,26 @@ class TestAsyncCleanSegments:
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.wake = AsyncMock()
 
+        vac.coordinator.select_options = {
+            "mode": "Mop",
+            "suction": "Strong",
+            "water": "Normal",
+            "scrub": "High",
+            "passes": "3",
+            "route": "Standard",
+        }
+
         await vac.async_clean_segments(["11", "9"])
 
-        vac.coordinator.client.start_rooms.assert_awaited_once_with([11, 9])
+        vac.coordinator.client.start_rooms.assert_awaited_once_with(
+            [11, 9],
+            work_mode=WorkMode.MOP,
+            fan=FanLevel.STRONG,
+            water=MopHumidity.NORMAL,
+            mop_strength=MopStrengthLevel.HIGH,
+            passes=3,
+            route=CleaningRoute.STANDARD,
+        )
 
 
 class TestAsyncStart:
@@ -229,6 +253,15 @@ class TestVacuumActivity:
         state.dock_sub_state = 1
 
         assert _make_vacuum(state=state).activity == "docked"
+
+    def test_unknown_off_dock_status_reports_cleaning(self) -> None:
+        """New firmware states stay active until their enum is mapped."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.UNKNOWN
+        state.dock_field11 = 1
+        state.dock_field47 = 2
+
+        assert _make_vacuum(state=state).activity == "cleaning"
 
 
 class TestCheckSegmentChanges:

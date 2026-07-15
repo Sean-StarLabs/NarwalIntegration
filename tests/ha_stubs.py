@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from types import ModuleType
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 _INSTALLED = False
 
@@ -35,12 +35,25 @@ def install() -> None:
     vol.Required = MagicMock(side_effect=lambda *a, **kw: a[0] if a else "key")  # type: ignore[attr-defined]
     vol.Optional = MagicMock(side_effect=lambda *a, **kw: a[0] if a else "key")  # type: ignore[attr-defined]
     vol.In = MagicMock()  # type: ignore[attr-defined]
+    vol.All = MagicMock()  # type: ignore[attr-defined]
+    vol.Coerce = MagicMock()  # type: ignore[attr-defined]
+    vol.Range = MagicMock()  # type: ignore[attr-defined]
 
     # --- homeassistant ---
     ha = _mod("homeassistant")
 
+    ha_auth = _mod("homeassistant.auth", ha)
+    ha_permissions = _mod("homeassistant.auth.permissions", ha_auth)
+    ha_permissions_const = _mod(
+        "homeassistant.auth.permissions.const", ha_permissions
+    )
+    ha_permissions_const.POLICY_CONTROL = "control"  # type: ignore[attr-defined]
+
     # homeassistant.const
     ha_const = _mod("homeassistant.const", ha)
+    ha_const.ATTR_AREA_ID = "area_id"  # type: ignore[attr-defined]
+    ha_const.ATTR_DEVICE_ID = "device_id"  # type: ignore[attr-defined]
+    ha_const.ATTR_ENTITY_ID = "entity_id"  # type: ignore[attr-defined]
     ha_const.Platform = MagicMock()  # type: ignore[attr-defined]
 
     # homeassistant.core
@@ -51,6 +64,14 @@ def install() -> None:
     # homeassistant.exceptions
     ha_exc = _mod("homeassistant.exceptions", ha)
     ha_exc.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})  # type: ignore[attr-defined]
+    ha_exc.HomeAssistantError = type("HomeAssistantError", (Exception,), {})  # type: ignore[attr-defined]
+
+    class _PermissionError(Exception):
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            super().__init__(*args)
+
+    ha_exc.Unauthorized = _PermissionError  # type: ignore[attr-defined]
+    ha_exc.UnknownUser = _PermissionError  # type: ignore[attr-defined]
 
     # homeassistant.config_entries
     ha_ce = _mod("homeassistant.config_entries", ha)
@@ -84,6 +105,18 @@ def install() -> None:
 
     # homeassistant.helpers (and sub-modules)
     ha_helpers = _mod("homeassistant.helpers", ha)
+
+    ha_cv = _mod("homeassistant.helpers.config_validation", ha_helpers)
+    ha_cv.entity_ids = MagicMock()  # type: ignore[attr-defined]
+    ha_cv.ensure_list = MagicMock(side_effect=lambda value: value)  # type: ignore[attr-defined]
+
+    ha_er = _mod("homeassistant.helpers.entity_registry", ha_helpers)
+    ha_er.async_get = MagicMock()  # type: ignore[attr-defined]
+
+    ha_service = _mod("homeassistant.helpers.service", ha_helpers)
+    ha_service.async_extract_entity_ids = AsyncMock(  # type: ignore[attr-defined]
+        side_effect=lambda call: set(call.data.get("entity_id", []))
+    )
 
     ha_uc = _mod("homeassistant.helpers.update_coordinator", ha_helpers)
 
@@ -127,6 +160,7 @@ def install() -> None:
     ha_comp = _mod("homeassistant.components", ha)
 
     ha_vac = _mod("homeassistant.components.vacuum", ha_comp)
+    ha_vac.DOMAIN = "vacuum"  # type: ignore[attr-defined]
     class _Segment:
         """Stub for homeassistant.components.vacuum.Segment."""
         def __init__(self, *, id: str, name: str, group: str | None = None) -> None:
