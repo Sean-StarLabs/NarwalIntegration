@@ -8,6 +8,7 @@ can be imported and tested in isolation.
 from __future__ import annotations
 
 import sys
+from dataclasses import dataclass
 from types import ModuleType
 from unittest.mock import AsyncMock, MagicMock
 
@@ -54,7 +55,21 @@ def install() -> None:
     ha_const.ATTR_AREA_ID = "area_id"  # type: ignore[attr-defined]
     ha_const.ATTR_DEVICE_ID = "device_id"  # type: ignore[attr-defined]
     ha_const.ATTR_ENTITY_ID = "entity_id"  # type: ignore[attr-defined]
+    ha_const.PERCENTAGE = "%"  # type: ignore[attr-defined]
     ha_const.Platform = MagicMock()  # type: ignore[attr-defined]
+
+    class _EntityCategory:
+        DIAGNOSTIC = "diagnostic"
+
+    class _UnitOfArea:
+        SQUARE_METERS = "m²"
+
+    class _UnitOfTime:
+        SECONDS = "s"
+
+    ha_const.EntityCategory = _EntityCategory  # type: ignore[attr-defined]
+    ha_const.UnitOfArea = _UnitOfArea  # type: ignore[attr-defined]
+    ha_const.UnitOfTime = _UnitOfTime  # type: ignore[attr-defined]
 
     # homeassistant.core
     ha_core = _mod("homeassistant.core", ha)
@@ -217,9 +232,33 @@ def install() -> None:
     ha_vac.VacuumEntityFeature = _VacuumEntityFeature  # type: ignore[attr-defined]
 
     ha_sensor = _mod("homeassistant.components.sensor", ha_comp)
-    ha_sensor.SensorEntity = MagicMock  # type: ignore[attr-defined]
-    ha_sensor.SensorDeviceClass = MagicMock  # type: ignore[attr-defined]
-    ha_sensor.SensorStateClass = MagicMock  # type: ignore[attr-defined]
+
+    class _SensorEntity:
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+    @dataclass(frozen=True, kw_only=True)
+    class _SensorEntityDescription:
+        key: str
+        translation_key: str | None = None
+        device_class: str | None = None
+        native_unit_of_measurement: str | None = None
+        state_class: str | None = None
+        options: list[str] | None = None
+        entity_category: str | None = None
+
+    class _SensorDeviceClass:
+        BATTERY = "battery"
+        DURATION = "duration"
+        ENUM = "enum"
+
+    class _SensorStateClass:
+        MEASUREMENT = "measurement"
+
+    ha_sensor.SensorEntity = _SensorEntity  # type: ignore[attr-defined]
+    ha_sensor.SensorEntityDescription = _SensorEntityDescription  # type: ignore[attr-defined]
+    ha_sensor.SensorDeviceClass = _SensorDeviceClass  # type: ignore[attr-defined]
+    ha_sensor.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
 
     ha_select = _mod("homeassistant.components.select", ha_comp)
     ha_select.DOMAIN = "select"  # type: ignore[attr-defined]

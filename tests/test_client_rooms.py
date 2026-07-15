@@ -281,6 +281,34 @@ class TestStartRooms:
         mock_send.assert_awaited_once()
         assert result.result_code == CommandResult.CONFLICT
 
+    def test_result_code_zero_marks_clean_active(self) -> None:
+        """Flow firmware result code zero is an accepted clean response."""
+        client = self._client()
+        accepted = CommandResponse(result_code=0, data={"1": 0})
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = accepted
+            result = _run(client.start_rooms([5]))
+
+        assert result is accepted
+        assert result.success
+        assert result.result_code == CommandResult.SUCCESS
+        assert client.state.has_recent_active_working_status
+        assert client._active_working_status_is_recent()
+        assert client.state.is_cleaning
+
+    def test_missing_result_code_does_not_mark_clean_active(self) -> None:
+        """A response without an explicit result code is not a clean ack."""
+        client = self._client()
+        response = CommandResponse(result_code=0, data={"2": {"1": 50}})
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = response
+            result = _run(client.start_rooms([5]))
+
+        assert result is response
+        assert result.result_code == 0
+        assert not client.state.has_recent_active_working_status
+        assert not client._active_working_status_is_recent()
+
     def test_not_applicable_falls_back_to_plan_start(self) -> None:
         """Older firmware retains the clean/plan/start compatibility path."""
         client = self._client()

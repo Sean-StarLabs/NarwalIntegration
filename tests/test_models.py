@@ -340,6 +340,104 @@ class TestNarwalState:
 
         assert state.current_room_name == "Landing"
 
+    def test_task_status_at_dock_marks_resumable_pause(self) -> None:
+        """Incomplete docked task status identifies a resumable clean."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+
+        state.update_from_aux_status(
+            "robot/task/status",
+            {"2": {"1": 42, "6": {"1": 5, "3": "Landing"}}},
+        )
+
+        assert state.task_active
+        assert state.task_paused
+        assert state.task_progress_percent == 42
+
+    def test_completed_task_status_clears_resumable_pause(self) -> None:
+        """Completed task status cannot leave a stale resumable clean."""
+        state = NarwalState(task_active=True, task_paused=True, is_paused=True)
+
+        state.update_from_aux_status("robot/task/status", {"2": {"1": 100}})
+
+        assert not state.task_active
+        assert not state.task_paused
+        assert state.task_progress_percent is None
+
+    def test_zero_progress_at_idle_dock_is_not_active(self) -> None:
+        """An idle zero-progress response is not a resumable clean."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+
+        state.update_from_aux_status("robot/task/status", {"2": {"1": 0}})
+
+        assert not state.task_active
+        assert not state.task_paused
+
+    def test_zero_progress_preserves_accepted_task(self) -> None:
+        """Zero progress remains valid after a clean command was accepted."""
+        state = NarwalState()
+        state.mark_active_cleaning()
+
+        state.update_from_aux_status("robot/task/status", {"2": {"1": 0}})
+
+        assert state.task_active
+        assert not state.task_paused
+
+    def test_clearing_accepted_task_resets_synthetic_cleaning(self) -> None:
+        """A cleared command cannot remain cleaning before telemetry catches up."""
+        state = NarwalState()
+        state.mark_active_cleaning()
+
+        state.clear_active_task()
+
+        assert state.working_status == WorkingStatus.STANDBY
+        assert not state.is_cleaning
+
+    def test_terminal_dock_status_clears_active_task(self) -> None:
+        """A completed clean cannot remain active after an idle dock status."""
+        state = NarwalState(task_active=True, task_progress_percent=42)
+
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+
+        assert state.is_docked
+        assert not state.task_active
+
+    def test_terminal_dock_status_preserves_accepted_task(self) -> None:
+        """Dock preparation remains active before the robot starts moving."""
+        state = NarwalState()
+        state.mark_active_cleaning()
+        state.last_active_working_status_time = 0.0
+
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+        state.update_from_aux_status("robot/task/status", {"2": {"1": 0}})
+
+        assert state.task_active
+        assert not state.task_paused
+
+    def test_terminal_dock_status_preserves_paused_task(self) -> None:
+        """A confirmed paused clean remains resumable after reaching the dock."""
+        state = NarwalState(task_active=True, task_paused=True, is_paused=True)
+
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+
+        assert state.is_docked
+        assert state.task_active
+        assert state.task_paused
+
+    def test_stale_docked_pause_does_not_mark_task_active(self) -> None:
+        """A stale base-status pause bit alone is not a resumable task."""
+        state = NarwalState()
+
+        state.update_from_base_status(
+            {"3": {"1": 4, "2": 1, "10": 1}, "11": 2, "47": 3}
+        )
+
+        assert state.is_docked
+        assert state.is_paused
+        assert not state.task_active
+        assert not state.task_paused
+
     def test_task_room_uses_current_map_display_name(self) -> None:
         """Task telemetry uses the current user-facing map room name."""
         state = NarwalState(
@@ -463,6 +561,84 @@ class TestNarwalState:
 
         assert not state.has_recent_active_working_status
         assert state.is_docked
+        assert not state.is_cleaning
+
+    def test_mark_active_cleaning_clears_stale_return(self) -> None:
+        """A newly accepted clean does not inherit the previous return flag."""
+        state = NarwalState()
+        state.is_returning_to_dock = True
+
+        state.mark_active_cleaning()
+
+        assert not state.is_returning_to_dock
+        assert state.is_cleaning
+
+    def test_mark_active_cleaning_overrides_docked_state(self) -> None:
+        """Accepted clean command should show active before broadcasts arrive."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+        state.is_paused = True
+
+        state.mark_active_cleaning()
+
+        assert state.working_status == WorkingStatus.CLEANING
+        assert state.has_recent_active_working_status
+        assert not state.is_paused
+        assert state.is_cleaning
+        assert not state.is_docked
+
+    def test_mark_active_cleaning_clears_previous_task_metrics(self) -> None:
+        """A newly accepted clean does not expose the previous task's metrics."""
+        state = NarwalState(
+            cleaning_area=18000,
+            cleaning_time=120,
+            task_progress_percent=93,
+            task_elapsed_time=694,
+            current_room_id=5,
+            current_room_name="Landing",
+        )
+
+        state.mark_active_cleaning()
+
+        assert state.cleaning_area == 0
+        assert state.cleaning_time == 0
+        assert state.task_progress_percent is None
+        assert state.task_elapsed_time == 0
+        assert state.current_room_id is None
+        assert state.current_room_name == ""
+
+    def test_mark_active_cleaning_ignores_previous_task_payload(self) -> None:
+        """A late payload from the previous task does not restore stale metrics."""
+        state = NarwalState(cleaning_area=18000, cleaning_time=120)
+        state.mark_active_cleaning()
+        active_since = state.last_active_working_status_time
+
+        state.update_from_working_status({"3": 120, "13": 18000})
+
+        assert state.cleaning_area == 0
+        assert state.cleaning_time == 0
+        assert state.last_active_working_status_time == active_since
+
+        state.update_from_working_status({"3": 1, "13": 0})
+
+        assert state.cleaning_area == 0
+        assert state.cleaning_time == 1
+        assert state.last_active_working_status_time >= active_since
+
+    def test_refresh_active_cleaning_preserves_task_overlays(self) -> None:
+        """Task-detail refresh does not erase pause or return telemetry."""
+        state = NarwalState(
+            is_paused=True,
+            is_returning_to_dock=True,
+            dock_sub_state=2,
+        )
+
+        state.refresh_active_cleaning()
+
+        assert state.is_paused
+        assert state.is_returning_to_dock
+        assert state.dock_sub_state == 2
+        assert state.is_returning
         assert not state.is_cleaning
 
     def test_rising_battery_infers_stale_cleaning_is_docked(self) -> None:

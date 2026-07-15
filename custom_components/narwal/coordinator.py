@@ -23,6 +23,30 @@ POLL_INTERVAL = timedelta(seconds=60)
 # Fast re-poll when state is incomplete (robot asleep at startup)
 FAST_POLL_INTERVAL = timedelta(seconds=10)
 FAST_POLL_MAX = 6  # up to 60s of fast polling before falling back to normal
+ACTIVE_TASK_REFRESH_INTERVAL = 10.0
+
+
+def _response_has_active_task(response: object, *, task_active: bool = False) -> bool:
+    """Return whether a task-status response reports an active clean."""
+    data = getattr(response, "data", None)
+    if not isinstance(data, dict):
+        return False
+    payload = data.get("2")
+    if not isinstance(payload, dict):
+        return False
+    try:
+        progress = int(payload.get("1"))
+    except (TypeError, ValueError):
+        return False
+    return 0 < progress < 100 or (progress == 0 and task_active)
+
+
+def _refresh_active_task_marker(client: NarwalClient) -> None:
+    """Keep state and stale-base suppression on the same active timestamp."""
+    client.state.refresh_active_cleaning()
+    client._last_active_working_status_time = (
+        client.state.last_active_working_status_time
+    )
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
@@ -59,6 +83,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._prev_working_status = WorkingStatus.UNKNOWN
         self._map_fetch_pending = False
         self._last_display_map_resub: float = 0.0
+        self._last_status_resub: float = 0.0
+        self._last_task_details_refresh: float = 0.0
         self._consecutive_failures = 0
         self._max_failures = 5  # 5 * 60s = 5 minutes before entities go unavailable
         self.select_options: dict[str, str] = {}
@@ -71,7 +97,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         try/except so setup never crashes if the robot is asleep.
         The listener's keepalive loop handles waking independently.
         """
+        _LOGGER.debug("Narwal setup start for %s", self.config_entry.title)
         await self.client.connect()
+        _LOGGER.debug("Narwal connected for %s", self.config_entry.title)
 
         # Fetch initial state BEFORE starting listener (no concurrent recv)
         try:
@@ -81,6 +109,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         try:
             await self.client.get_status(full_update=True)
+            if self.client.state.is_docked:
+                task_status = await self.client.get_robot_task_status()
+                if not _response_has_active_task(
+                    task_status, task_active=self.client.state.task_active
+                ):
+                    await asyncio.sleep(0.25)
+                    await self.client.get_robot_task_status()
         except Exception:
             _LOGGER.debug("Could not fetch initial status")
 
@@ -100,11 +135,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         # Set up push callback and start persistent listener
         self.client.on_state_update = self._on_state_update
-        self._listen_task = self.config_entry.async_create_background_task(
-            self.hass,
-            self.client.start_listening(),
-            f"{DOMAIN}_ws_listener",
-        )
+        self._ensure_listener_running()
 
         state = self.client.state
         _LOGGER.info(
@@ -154,10 +185,21 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         # display_map dropout recovery: if cleaning but no display_map for
         # 30s, re-send topic subscription. Only subscription — no wake burst
         # (wake bursts during cleaning cause pause bouncing).
-        is_cleaning = state.working_status in ACTIVE_CLEANING_STATUSES
+        is_cleaning = (
+            not state.is_station_active
+            and (
+                state.is_cleaning
+                or (
+                    not state.is_docked
+                    and state.working_status in ACTIVE_CLEANING_STATUSES
+                )
+                or state.has_recent_active_working_status
+            )
+        )
         if is_cleaning:
             display_age = self.client.last_display_map_age
             now = time.monotonic()
+            status_recovery_scheduled = False
             if (
                 display_age > 30.0
                 and now - self._last_display_map_resub > 45.0
@@ -172,6 +214,36 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     self._resub_topics(),
                     f"{DOMAIN}_resub",
                 )
+            if now - self._last_status_resub > 30.0:
+                _LOGGER.info("Refreshing active clean base status")
+                self._last_status_resub = now
+                self._last_task_details_refresh = now
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self._recover_status_broadcasts(),
+                    f"{DOMAIN}_status_recover",
+                )
+                status_recovery_scheduled = True
+            if (
+                not status_recovery_scheduled
+                and now - getattr(self, "_last_task_details_refresh", 0.0)
+                > ACTIVE_TASK_REFRESH_INTERVAL
+            ):
+                self._last_task_details_refresh = now
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self._refresh_task_details(cleaning=True),
+                    f"{DOMAIN}_task_details",
+                )
+        elif state.is_station_active:
+            now = time.monotonic()
+            if now - getattr(self, "_last_task_details_refresh", 0.0) > 30.0:
+                self._last_task_details_refresh = now
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self._refresh_task_details(cleaning=False),
+                    f"{DOMAIN}_task_details",
+                )
 
         self.async_set_updated_data(state)
 
@@ -183,6 +255,17 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 "Broadcast received (status=%s) — normal polling restored",
                 state.working_status.name,
             )
+
+    def _ensure_listener_running(self) -> None:
+        """Start the WebSocket listener if it is not already active."""
+        if self._listen_task is not None and not self._listen_task.done():
+            return
+        self.client.on_state_update = self._on_state_update
+        self._listen_task = self.config_entry.async_create_background_task(
+            self.hass,
+            self.client.start_listening(),
+            f"{DOMAIN}_ws_listener",
+        )
 
     async def _fetch_missing_map(self) -> None:
         """Fetch static map when it's missing (get_map failed at startup)."""
@@ -206,10 +289,44 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         except Exception:
             _LOGGER.debug("Topic re-subscription failed")
 
+    async def _recover_status_broadcasts(self) -> None:
+        """Recover missing status/base broadcasts while display_map still flows."""
+        try:
+            await self.client.subscribe_to_topics()
+            await self.client.get_clean_progress_info()
+            task_status = await self.client.get_robot_task_status()
+        except Exception:
+            _LOGGER.debug("Status broadcast recovery failed")
+            return
+        if _response_has_active_task(
+            task_status, task_active=self.client.state.task_active
+        ):
+            _refresh_active_task_marker(self.client)
+        self.async_set_updated_data(self.client.state)
+
+    async def _refresh_task_details(self, *, cleaning: bool) -> None:
+        """Query app-style task detail endpoints while a task is active."""
+        try:
+            if cleaning:
+                await self.client.get_clean_progress_info()
+            else:
+                await self.client.get_dry_mop_remain_time()
+            task_status = await self.client.get_robot_task_status()
+        except Exception as err:
+            _LOGGER.debug("Task detail refresh failed: %s", err)
+            return
+        if cleaning and _response_has_active_task(
+            task_status, task_active=self.client.state.task_active
+        ):
+            _refresh_active_task_marker(self.client)
+        self.async_set_updated_data(self.client.state)
+
     async def _refresh_dock_status(self) -> None:
         """Immediate get_status() after return-to-dock to refresh dock fields."""
         try:
             await self.client.get_status(full_update=True)
+            if self.client.state.is_docked:
+                await self.client.get_robot_task_status()
             self.async_set_updated_data(self.client.state)
         except Exception:
             _LOGGER.debug("Failed to refresh dock status after transition")
@@ -217,17 +334,19 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     async def _async_update_data(self) -> NarwalState:
         """Polling fallback — fetch status if no push updates arrived.
 
-        Reconnection is handled by the listener loop's exponential backoff.
-        We do NOT call client.connect() here to avoid racing with the listener
-        and violating the single-WS-connection-per-IP constraint.
-
-        On poll failure, returns stale data for up to _max_failures consecutive
-        failures (~5 minutes) before raising UpdateFailed.
+        Reconnection is handled by the listener loop's exponential backoff. If
+        that listener has exited, restart it. Keep the last known data briefly,
+        then mark the coordinator unavailable after the failure threshold.
         """
         try:
             if not self.client.connected:
+                self._ensure_listener_running()
                 raise NarwalConnectionError("Not connected")
-            await self.client.get_status(full_update=True)
+            await self.client.get_status(
+                full_update=not self.client.state.has_recent_active_working_status
+            )
+            if self.client.state.is_docked:
+                await self.client.get_robot_task_status()
         except Exception as err:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._max_failures:
@@ -236,9 +355,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 ) from err
             _LOGGER.debug(
                 "Poll %d/%d failed (robot may be asleep): %s",
-                self._consecutive_failures, self._max_failures, err,
+                self._consecutive_failures,
+                self._max_failures,
+                err,
             )
-            return self.client.state  # stale data keeps entities available
+            return self.client.state
         else:
             self._consecutive_failures = 0
 

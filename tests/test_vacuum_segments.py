@@ -26,6 +26,7 @@ from narwal_client.const import (  # noqa: E402
     WorkingStatus,
 )
 from custom_components.narwal.vacuum import NarwalVacuum  # noqa: E402
+from custom_components.narwal.sensor import NarwalTaskStatusSensor  # noqa: E402
 
 # Grab Segment class from stubs for assertions
 import sys
@@ -191,6 +192,7 @@ class TestAsyncCleanSegments:
         """Converts string segment IDs to int and calls client.start_rooms."""
         state = NarwalState()
         vac = _make_vacuum(state=state)
+        vac.coordinator.client.state = state
         vac.coordinator.client.start_rooms = AsyncMock(
             return_value=MagicMock(result_code=0, success=True)
         )
@@ -218,6 +220,7 @@ class TestAsyncCleanSegments:
             passes=3,
             route=CleaningRoute.STANDARD,
         )
+        vac.coordinator.async_set_updated_data.assert_called_once_with(state)
 
 
 class TestAsyncStart:
@@ -230,6 +233,7 @@ class TestAsyncStart:
         state.is_paused = True
         state.dock_sub_state = 1
         vac = _make_vacuum(state=state)
+        vac.coordinator.client.state = state
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.start = AsyncMock(
             return_value=MagicMock(result_code=1, success=True)
@@ -240,10 +244,40 @@ class TestAsyncStart:
 
         vac.coordinator.client.start.assert_awaited_once()
         vac.coordinator.client.resume.assert_not_awaited()
+        vac.coordinator.async_set_updated_data.assert_called_once_with(state)
+
+    async def test_docked_resumable_task_is_resumed(self) -> None:
+        """A confirmed paused task at the dock resumes instead of conflicting."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+        state.task_active = True
+        state.task_paused = True
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start = AsyncMock()
+        vac.coordinator.client.resume = AsyncMock(
+            return_value=MagicMock(result_code=1, success=True)
+        )
+
+        await vac.async_start()
+
+        vac.coordinator.client.resume.assert_awaited_once()
+        vac.coordinator.client.start.assert_not_awaited()
+        assert state.task_active
+        assert not state.task_paused
 
 
 class TestVacuumActivity:
     """Tests for derived vacuum activity."""
+
+    def test_error_wins_over_active_task(self) -> None:
+        """A current robot error must not be hidden by stale task state."""
+        state = NarwalState(
+            working_status=WorkingStatus.ERROR,
+            task_active=True,
+        )
+
+        assert _make_vacuum(state=state).activity == "error"
 
     def test_docked_state_wins_over_stale_pause(self) -> None:
         """Stale cleaning and pause fields must not hide a docked robot."""
@@ -254,6 +288,38 @@ class TestVacuumActivity:
 
         assert _make_vacuum(state=state).activity == "docked"
 
+    def test_resumable_task_at_dock_reports_paused(self) -> None:
+        """A confirmed resumable task remains visible while docked."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+        state.task_active = True
+        state.task_paused = True
+
+        assert _make_vacuum(state=state).activity == "paused"
+
+    def test_paused_task_while_returning_reports_paused(self) -> None:
+        """A paused return remains resumable rather than merely returning."""
+        state = NarwalState(
+            working_status=WorkingStatus.CLEANING,
+            task_active=True,
+            task_paused=True,
+            is_paused=True,
+            is_returning_to_dock=True,
+            dock_sub_state=2,
+            dock_field11=1,
+            dock_field47=2,
+        )
+
+        assert _make_vacuum(state=state).activity == "paused"
+
+    def test_accepted_task_at_dock_reports_cleaning(self) -> None:
+        """Dock preparation remains visible after the active marker expires."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}, "11": 2, "47": 3})
+        state.task_active = True
+
+        assert _make_vacuum(state=state).activity == "cleaning"
+
     def test_unknown_off_dock_status_reports_cleaning(self) -> None:
         """New firmware states stay active until their enum is mapped."""
         state = NarwalState()
@@ -262,6 +328,34 @@ class TestVacuumActivity:
         state.dock_field47 = 2
 
         assert _make_vacuum(state=state).activity == "cleaning"
+
+
+class TestTaskStatusSensor:
+    """Tests for the user-facing task status ordering."""
+
+    def test_completed_status_at_dock_reports_docked(self) -> None:
+        """Definitive dock fields win over a transitional completed status."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 19}, "11": 2, "47": 3})
+        coordinator = _make_vacuum(state=state).coordinator
+
+        assert NarwalTaskStatusSensor(coordinator).native_value == "docked"
+
+    def test_paused_task_while_returning_reports_paused(self) -> None:
+        """Task status agrees that a paused return remains resumable."""
+        state = NarwalState(
+            working_status=WorkingStatus.CLEANING,
+            task_active=True,
+            task_paused=True,
+            is_paused=True,
+            is_returning_to_dock=True,
+            dock_sub_state=2,
+            dock_field11=1,
+            dock_field47=2,
+        )
+        coordinator = _make_vacuum(state=state).coordinator
+
+        assert NarwalTaskStatusSensor(coordinator).native_value == "paused"
 
 
 class TestCheckSegmentChanges:

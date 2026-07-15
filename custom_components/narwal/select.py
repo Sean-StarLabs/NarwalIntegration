@@ -213,7 +213,8 @@ class NarwalSettingSelect(NarwalEntity, SelectEntity, RestoreEntity):
         return (
             state.working_status in ACTIVE_CLEANING_STATUSES
             or state.has_recent_active_working_status
-        ) and not state.is_docked and not state.is_returning
+            or state.task_active
+        ) and not state.is_returning
 
     async def async_select_option(self, option: str) -> None:
         """Apply a setting option."""

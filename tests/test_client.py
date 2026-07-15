@@ -236,6 +236,19 @@ class TestStartLegacyAndV2Fallback:
         assert result is success
         mock_send.assert_awaited_once()  # no fallback fired
 
+    def test_start_marks_code_zero_as_active_cleaning(self) -> None:
+        client = self._connected_client()
+        accepted = CommandResponse(result_code=0, data={"1": 0})
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = accepted
+            result = asyncio.run(client.start())
+
+        assert result.result_code == CommandResult.SUCCESS
+        assert result.success
+        assert client.state.is_cleaning
+        assert client._active_working_status_is_recent()
+
     def test_start_falls_back_to_v2_on_not_applicable(self) -> None:
         """NOT_APPLICABLE from legacy triggers v2 retry with cached rooms."""
         client = self._connected_client()

@@ -671,7 +671,12 @@ class NarwalState:
     task_elapsed_time: int = 0
     current_room_id: int | None = None
     current_room_name: str = ""
+    task_active: bool = False
+    task_paused: bool = False
     dry_mop_remaining_time: int | None = None
+    _previous_task_metrics: tuple[int, int] | None = field(
+        default=None, init=False, repr=False
+    )
 
     # Map
     map_data: MapData | None = None
@@ -786,6 +791,60 @@ class NarwalState:
             return False
         return time.monotonic() - self.last_active_working_status_time <= _ACTIVE_WORKING_STATUS_TTL
 
+    def mark_active_cleaning(self) -> None:
+        """Mark a newly accepted clean as active until telemetry catches up."""
+        if self.cleaning_time > 0 or self.cleaning_area > 0:
+            self._previous_task_metrics = (self.cleaning_time, self.cleaning_area)
+        self.cleaning_area = 0
+        self.cleaning_time = 0
+        self.task_progress_percent = None
+        self.task_elapsed_time = 0
+        self.current_room_id = None
+        self.current_room_name = ""
+        self.task_active = True
+        self.task_paused = False
+        self.is_paused = False
+        self.is_returning_to_dock = False
+        self.inferred_docked_from_battery = False
+        self.dock_field11 = 1
+        self.dock_field47 = 2
+        self.dock_sub_state = 0
+        self.dock_activity = 0
+        self.station_activity = 0
+        self.refresh_active_cleaning()
+
+    def mark_task_paused(self) -> None:
+        """Keep a paused clean resumable while the robot returns to its dock."""
+        self.task_active = True
+        self.task_paused = True
+        self.is_paused = True
+
+    def mark_task_resumed(self) -> None:
+        """Mark a paused clean active again."""
+        self.task_active = True
+        self.task_paused = False
+        self.is_paused = False
+        self.refresh_active_cleaning()
+
+    def clear_active_task(self) -> None:
+        """Clear resumable-task state after completion or cancellation."""
+        if self.working_status in ACTIVE_CLEANING_STATUSES:
+            self.working_status = WorkingStatus.STANDBY
+        self.task_active = False
+        self.task_paused = False
+        self.is_paused = False
+        self.last_active_working_status_time = 0.0
+        self.task_progress_percent = None
+        self.task_elapsed_time = 0
+        self.current_room_id = None
+        self.current_room_name = ""
+        self.is_returning_to_dock = False
+
+    def refresh_active_cleaning(self) -> None:
+        """Keep an active clean authoritative while task telemetry is current."""
+        self.working_status = WorkingStatus.CLEANING
+        self.last_active_working_status_time = time.monotonic()
+
     @property
     def is_cleaning(self) -> bool:
         """True when actively cleaning (not paused, not returning to dock)."""
@@ -867,15 +926,29 @@ class NarwalState:
           Field 15 = 600 during cleaning (purpose uncertain)
         """
         self.raw_working_status = decoded
+        incoming_cleaning_time = (
+            _optional_int(decoded.get("3")) if "3" in decoded else None
+        )
+        incoming_cleaning_area = (
+            _optional_int(decoded.get("13")) if "13" in decoded else None
+        )
+        if self._previous_task_metrics is not None:
+            previous_task_time, previous_task_area = self._previous_task_metrics
+            supplied_metrics = [
+                (incoming_cleaning_time, previous_task_time),
+                (incoming_cleaning_area, previous_task_area),
+            ]
+            supplied_metrics = [pair for pair in supplied_metrics if pair[0] is not None]
+            if supplied_metrics and all(value == old for value, old in supplied_metrics):
+                return
+            if supplied_metrics:
+                self._previous_task_metrics = None
         previous_cleaning_time = self.cleaning_time
         previous_cleaning_area = self.cleaning_area
-        if "3" in decoded:
-            try:
-                self.cleaning_time = int(decoded["3"])
-            except (ValueError, TypeError):
-                pass
-        if "13" in decoded:
-            self.cleaning_area = int(decoded["13"])
+        if incoming_cleaning_time is not None:
+            self.cleaning_time = incoming_cleaning_time
+        if incoming_cleaning_area is not None:
+            self.cleaning_area = incoming_cleaning_area
         if "15" in decoded:
             # Field 15 may be cumulative time; prefer field 3 for current session
             pass
@@ -961,7 +1034,7 @@ class NarwalState:
         if isinstance(field3, dict):
             if "1" in field3:
                 try:
-                    self.working_status = WorkingStatus(int(field3["1"]))
+                    new_working_status = WorkingStatus(int(field3["1"]))
                 except (ValueError, TypeError):
                     raw_val = field3["1"]
                     _LOGGER.warning(
@@ -969,7 +1042,8 @@ class NarwalState:
                         "Please report this value at the GitHub repo.",
                         raw_val,
                     )
-                    self.working_status = WorkingStatus.UNKNOWN
+                    new_working_status = WorkingStatus.UNKNOWN
+                self.working_status = new_working_status
             # Sub-field 2: paused overlay (0 or absent = not paused, 1 = paused)
             self.is_paused = bool(field3.get("2"))
             # Sub-field 7: returning to dock on old FW (value 1 = returning).
@@ -1010,6 +1084,12 @@ class NarwalState:
                 except (ValueError, TypeError):
                     pass
             if self.working_status in ACTIVE_CLEANING_STATUSES:
+                if self.task_active or not self.is_docked:
+                    self.task_active = True
+                    if self.is_paused:
+                        self.task_paused = True
+                    elif not self.is_docked:
+                        self.task_paused = False
                 if "11" not in decoded:
                     self.dock_field11 = 1
                 if "47" not in decoded:
@@ -1019,6 +1099,28 @@ class NarwalState:
                 if "12" not in field3:
                     self.dock_activity = 0
                 self.inferred_docked_from_battery = False
+            elif (
+                self.working_status == WorkingStatus.TASK_COMPLETED
+                or (
+                    self.working_status
+                    in {
+                        WorkingStatus.STANDBY,
+                        WorkingStatus.DOCKED,
+                        WorkingStatus.CHARGED,
+                        WorkingStatus.DOCKED_V2,
+                    }
+                    and self.is_docked
+                    and self.task_active
+                    and not self.task_paused
+                    and (
+                        self.task_progress_percent not in (None, 0)
+                        or self.cleaning_time > 0
+                        or self.cleaning_area > 0
+                        or self.current_room_id is not None
+                    )
+                )
+            ):
+                self.clear_active_task()
             # Log unrecognized sub-fields for future firmware mapping
             _known_f3 = {"1", "2", "3", "4", "7", "10", "11", "12", "14", "18"}
             _unknown_f3 = set(field3.keys()) - _known_f3
@@ -1115,7 +1217,25 @@ class NarwalState:
                 return
             progress = _optional_int(payload.get("1"))
             if progress is not None:
+                task_was_active = self.task_active
                 self.task_progress_percent = max(0, min(100, progress))
+                if progress >= 100:
+                    self.clear_active_task()
+                    return
+                if (
+                    progress > 0
+                    or self.task_active
+                    or (
+                        self.working_status in ACTIVE_CLEANING_STATUSES
+                        and not self.is_docked
+                    )
+                ):
+                    self.task_active = True
+                    self.task_paused = (
+                        self.task_paused
+                        or self.is_paused
+                        or (not task_was_active and progress > 0 and self.is_docked)
+                    )
             elapsed = _optional_int(payload.get("2"))
             if elapsed is not None:
                 self.task_elapsed_time = elapsed

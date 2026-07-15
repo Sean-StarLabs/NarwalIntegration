@@ -84,6 +84,7 @@ def test_clean_rooms_awaits_entity_target_extraction() -> None:
 
     service.async_extract_entity_ids.assert_awaited_once_with(call)
     client.start_rooms.assert_awaited_once()
+    coordinator.async_set_updated_data.assert_called_once_with(client.state)
     hass.services.async_register.assert_any_call(
         DOMAIN,
         SERVICE_CLEAN_ROOMS,

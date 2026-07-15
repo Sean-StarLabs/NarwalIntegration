@@ -8,7 +8,7 @@ Covers MAP-04 (post-cleaning map refresh) validation gaps:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Install HA stubs before any custom_components import
 import tests.ha_stubs  # noqa: E402
@@ -46,6 +46,7 @@ class TestCoordinatorMapRefresh:
         coordinator._map_fetch_pending = False
         coordinator._last_display_map_resub = 0.0
         coordinator._last_status_resub = 0.0
+        coordinator._last_task_details_refresh = 0.0
         coordinator._prev_working_status = WorkingStatus.UNKNOWN
         coordinator.update_interval = None
         coordinator.async_set_updated_data = MagicMock()
@@ -176,3 +177,39 @@ class TestCoordinatorMapRefresh:
 
         assert coordinator._fast_poll_remaining == 0
         assert coordinator.update_interval == POLL_INTERVAL
+
+    def test_active_task_details_refresh_before_marker_expires(self) -> None:
+        """Active task details refresh more often than the active-state TTL."""
+        coordinator = self._make_coordinator()
+        coordinator._last_status_resub = 100.0
+        coordinator._last_task_details_refresh = 89.0
+        state = NarwalState()
+        state.map_data = MagicMock()
+        state.working_status = WorkingStatus.CLEANING
+
+        with patch("custom_components.narwal.coordinator.time.monotonic", return_value=100.0):
+            coordinator._on_state_update(state)
+
+        task_names = [
+            call.args[2]
+            for call in coordinator.config_entry.async_create_background_task.call_args_list
+        ]
+        assert "narwal_task_details" in task_names
+
+    def test_docked_stale_cleaning_does_not_refresh_active_task(self) -> None:
+        """Stale CLEANING status at the dock does not revive an old task."""
+        coordinator = self._make_coordinator()
+        state = NarwalState()
+        state.map_data = MagicMock()
+        state.working_status = WorkingStatus.CLEANING
+        state.dock_field11 = 2
+        state.dock_field47 = 3
+
+        coordinator._on_state_update(state)
+
+        task_names = [
+            call.args[2]
+            for call in coordinator.config_entry.async_create_background_task.call_args_list
+        ]
+        assert "narwal_status_recover" not in task_names
+        assert "narwal_task_details" not in task_names

@@ -1116,6 +1116,19 @@ class NarwalClient:
     # start() falls back to the v2 room-list schema. See issue #36.
     _DEFAULT_CLEAN_PAYLOAD = bytes.fromhex("0a0e12002a0a0a060803100218012a00")
 
+    def _apply_clean_start_response(
+        self, response: CommandResponse
+    ) -> CommandResponse:
+        """Normalize accepted clean responses and mark the task active."""
+        if response.result_code == 0 and "1" in response.data:
+            response.result_code = CommandResult.SUCCESS
+        if response.success:
+            self.state.mark_active_cleaning()
+            self._last_active_working_status_time = (
+                self.state.last_active_working_status_time
+            )
+        return response
+
     async def start(self, **kwargs) -> CommandResponse:
         """Start whole-house cleaning.
 
@@ -1134,7 +1147,7 @@ class NarwalClient:
             timeout=10.0,
         )
         if resp.result_code != CommandResult.NOT_APPLICABLE:
-            return resp
+            return self._apply_clean_start_response(resp)
 
         # Legacy payload rejected — likely newer firmware. Need the room
         # list from the cached map to build a v2 payload.
@@ -1143,14 +1156,14 @@ class NarwalClient:
                 "start() got NOT_APPLICABLE and no map rooms cached; "
                 "cannot build v2 payload. Call get_map() first."
             )
-            return resp
+            return self._apply_clean_start_response(resp)
 
         room_ids = [r.room_id for r in self.state.map_data.rooms if r.room_id]
         if not room_ids:
             _LOGGER.warning(
                 "start() got NOT_APPLICABLE but cached map has 0 rooms with IDs"
             )
-            return resp
+            return self._apply_clean_start_response(resp)
 
         _LOGGER.info(
             "start(): legacy payload rejected, retrying with v2 schema (%d rooms)",
@@ -1160,7 +1173,7 @@ class NarwalClient:
         resp = await self.send_command(
             TOPIC_CMD_PLAN_START, payload=payload, timeout=10.0,
         )
-        return resp
+        return self._apply_clean_start_response(resp)
 
     def _build_clean_payload_v2(
         self,
@@ -1492,46 +1505,44 @@ class NarwalClient:
             _LOGGER.warning(
                 "start_rooms: no active map id available; trying legacy room clean"
             )
-        if resp.result_code != CommandResult.NOT_APPLICABLE:
-            return resp
-        if not supports_legacy_room_clean:
-            return resp
-
-        _LOGGER.info(
-            "start_rooms: clean/start_clean rejected, trying clean/plan/start "
-            "compatibility payloads"
-        )
-        legacy_suction = {
-            FanLevel.UNSPECIFIED: 3,
-            FanLevel.MUTE: 0,
-            FanLevel.NORMAL: 1,
-            FanLevel.STRONG: 2,
-            FanLevel.DEEP: 3,
-            FanLevel.SUPER: 3,
-        }[FanLevel(fan)]
-        legacy_water = {
-            MopHumidity.UNSPECIFIED: 2,
-            MopHumidity.DRY: 0,
-            MopHumidity.NORMAL: 1,
-            MopHumidity.WET: 2,
-        }[MopHumidity(water)]
-        legacy_v2 = self._build_clean_payload_v2(
-            room_ids,
-            suction=legacy_suction,
-            mop_humidity=legacy_water,
-            passes=passes,
-        )
-        resp = await self.send_command(
-            TOPIC_CMD_PLAN_START, payload=legacy_v2, timeout=10.0,
-        )
-        if resp.result_code != CommandResult.NOT_APPLICABLE:
-            return resp
-
-        return await self.send_command(
-            TOPIC_CMD_PLAN_START,
-            payload=self._build_room_clean_payload(room_ids),
-            timeout=10.0,
-        )
+        if (
+            resp.result_code == CommandResult.NOT_APPLICABLE
+            and supports_legacy_room_clean
+        ):
+            _LOGGER.info(
+                "start_rooms: clean/start_clean rejected, trying "
+                "clean/plan/start compatibility payloads"
+            )
+            legacy_suction = {
+                FanLevel.UNSPECIFIED: 3,
+                FanLevel.MUTE: 0,
+                FanLevel.NORMAL: 1,
+                FanLevel.STRONG: 2,
+                FanLevel.DEEP: 3,
+                FanLevel.SUPER: 3,
+            }[FanLevel(fan)]
+            legacy_water = {
+                MopHumidity.UNSPECIFIED: 2,
+                MopHumidity.DRY: 0,
+                MopHumidity.NORMAL: 1,
+                MopHumidity.WET: 2,
+            }[MopHumidity(water)]
+            legacy_v2 = self._build_clean_payload_v2(
+                room_ids,
+                suction=legacy_suction,
+                mop_humidity=legacy_water,
+                passes=passes,
+            )
+            resp = await self.send_command(
+                TOPIC_CMD_PLAN_START, payload=legacy_v2, timeout=10.0,
+            )
+            if resp.result_code == CommandResult.NOT_APPLICABLE:
+                resp = await self.send_command(
+                    TOPIC_CMD_PLAN_START,
+                    payload=self._build_room_clean_payload(room_ids),
+                    timeout=10.0,
+                )
+        return self._apply_clean_start_response(resp)
 
     async def start_easy_clean(self) -> CommandResponse:
         """Start quick/easy clean."""

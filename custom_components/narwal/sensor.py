@@ -240,17 +240,20 @@ class NarwalTaskStatusSensor(NarwalEntity, SensorEntity):
         ) or state.has_recent_active_working_status
         if state.working_status == WorkingStatus.ERROR:
             return "error"
+        if state.task_active and (state.task_paused or state.is_paused):
+            return "paused"
+        if state.is_returning:
+            return "returning"
         if state.is_station_active:
             return "station_active"
+        if state.task_active:
+            return "cleaning"
         if state.is_docked:
             return "docked"
+        if state.working_status == WorkingStatus.TASK_COMPLETED:
+            return "returning"
         if state.is_paused and is_cleaning_status:
             return "paused"
-        if (
-            state.working_status == WorkingStatus.TASK_COMPLETED
-            or state.is_returning
-        ):
-            return "returning"
         if state.is_cleaning:
             return "cleaning"
         if state.working_status == WorkingStatus.STANDBY:

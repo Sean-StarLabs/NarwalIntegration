@@ -6,6 +6,7 @@ UpdateFailed after the threshold, and resets counters on success/push.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, PropertyMock
 
 import pytest
@@ -16,7 +17,11 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
-from custom_components.narwal.narwal_client import NarwalConnectionError, NarwalState  # noqa: E402
+from custom_components.narwal.narwal_client import (  # noqa: E402
+    NarwalConnectionError,
+    NarwalState,
+    WorkingStatus,
+)
 from homeassistant.helpers.update_coordinator import UpdateFailed  # noqa: E402
 
 
@@ -106,6 +111,17 @@ class TestCoordinatorResilience:
         assert coordinator._consecutive_failures == 0
         assert result is coordinator.client.state
 
+    async def test_poll_preserves_recent_active_task_marker(self) -> None:
+        """A poll only refreshes battery while task status is fresher."""
+        coordinator = self._make_coordinator()
+        type(coordinator.client).connected = PropertyMock(return_value=True)
+        coordinator.client.state.refresh_active_cleaning()
+        coordinator.client.get_status = AsyncMock()
+
+        await coordinator._async_update_data()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=False)
+
     async def test_push_update_resets_failure_counter(self) -> None:
         """_on_state_update resets _consecutive_failures to 0."""
         coordinator = self._make_coordinator()
@@ -144,3 +160,113 @@ class TestCoordinatorResilience:
 
         assert result is coordinator.client.state
         assert coordinator._consecutive_failures == 1
+
+    async def test_status_recovery_preserves_stale_active_state(self) -> None:
+        """Recovery avoids a full status update without fresh active telemetry."""
+        coordinator = self._make_coordinator()
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.subscribe_to_topics = AsyncMock()
+        coordinator.client.get_status = AsyncMock()
+        coordinator.client.get_clean_progress_info = AsyncMock()
+        coordinator.client.get_robot_task_status = AsyncMock()
+
+        await coordinator._recover_status_broadcasts()
+
+        coordinator.client.get_status.assert_not_awaited()
+        coordinator.client.get_clean_progress_info.assert_awaited_once_with()
+        coordinator.client.get_robot_task_status.assert_awaited_once_with()
+
+    async def test_status_recovery_avoids_fresh_base_status_poll(self) -> None:
+        """Recovery never overlays an active clean with stale dock status."""
+        coordinator = self._make_coordinator()
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.state.mark_active_cleaning()
+        coordinator.client.subscribe_to_topics = AsyncMock()
+        coordinator.client.get_status = AsyncMock()
+        coordinator.client.get_clean_progress_info = AsyncMock()
+        coordinator.client.get_robot_task_status = AsyncMock()
+
+        await coordinator._recover_status_broadcasts()
+
+        coordinator.client.get_status.assert_not_awaited()
+        coordinator.client.get_clean_progress_info.assert_awaited_once_with()
+        coordinator.client.get_robot_task_status.assert_awaited_once_with()
+
+    async def test_status_recovery_renews_active_task_marker(self) -> None:
+        """Current task progress keeps stale base status from ending a clean."""
+        coordinator = self._make_coordinator()
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.subscribe_to_topics = AsyncMock()
+        coordinator.client.get_clean_progress_info = AsyncMock()
+        coordinator.client.get_robot_task_status = AsyncMock(
+            return_value=SimpleNamespace(data={"1": 1, "2": {"1": 42}})
+        )
+
+        await coordinator._recover_status_broadcasts()
+
+        assert coordinator.client.state.has_recent_active_working_status
+        assert (
+            coordinator.client._last_active_working_status_time
+            == coordinator.client.state.last_active_working_status_time
+        )
+
+    async def test_status_recovery_rejects_idle_zero_progress(self) -> None:
+        """An idle zero-progress response cannot revive stale cleaning state."""
+        coordinator = self._make_coordinator()
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.state.working_status = WorkingStatus.CLEANING
+        coordinator.client.subscribe_to_topics = AsyncMock()
+        coordinator.client.get_clean_progress_info = AsyncMock()
+        coordinator.client.get_robot_task_status = AsyncMock(
+            return_value=SimpleNamespace(data={"1": 1, "2": {"1": 0}})
+        )
+
+        await coordinator._recover_status_broadcasts()
+
+        assert not coordinator.client.state.has_recent_active_working_status
+
+    async def test_status_recovery_preserves_accepted_zero_progress(self) -> None:
+        """An accepted task remains active while it still reports zero progress."""
+        coordinator = self._make_coordinator()
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.state.mark_active_cleaning()
+        coordinator.client.state.last_active_working_status_time = 0.0
+        coordinator.client._last_active_working_status_time = 0.0
+        coordinator.client.subscribe_to_topics = AsyncMock()
+        coordinator.client.get_clean_progress_info = AsyncMock()
+        coordinator.client.get_robot_task_status = AsyncMock(
+            return_value=SimpleNamespace(data={"1": 1, "2": {"1": 0}})
+        )
+
+        await coordinator._recover_status_broadcasts()
+
+        assert coordinator.client.state.has_recent_active_working_status
+
+    async def test_task_detail_refresh_renews_client_active_marker(self) -> None:
+        """Task-detail polling also renews stale-base suppression."""
+        coordinator = self._make_coordinator()
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.get_clean_progress_info = AsyncMock()
+        coordinator.client.get_robot_task_status = AsyncMock(
+            return_value=SimpleNamespace(data={"1": 1, "2": {"1": 42}})
+        )
+
+        await coordinator._refresh_task_details(cleaning=True)
+
+        assert (
+            coordinator.client._last_active_working_status_time
+            == coordinator.client.state.last_active_working_status_time
+        )
+
+    async def test_completed_task_details_do_not_renew_active_marker(self) -> None:
+        """A completed task response does not revive cleaning state."""
+        coordinator = self._make_coordinator()
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.get_clean_progress_info = AsyncMock()
+        coordinator.client.get_robot_task_status = AsyncMock(
+            return_value=SimpleNamespace(data={"1": 1, "2": {"1": 100}})
+        )
+
+        await coordinator._refresh_task_details(cleaning=True)
+
+        assert not coordinator.client.state.has_recent_active_working_status

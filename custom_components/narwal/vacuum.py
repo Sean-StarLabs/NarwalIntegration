@@ -110,21 +110,28 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         state = self.coordinator.data
         if state is None:
             return VacuumActivity.IDLE
-        if state.is_docked:
-            return VacuumActivity.DOCKED
+        if state.working_status == WorkingStatus.ERROR:
+            return VacuumActivity.ERROR
         is_cleaning_state = (
             state.working_status in ACTIVE_CLEANING_STATUSES
             or state.has_recent_active_working_status
+            or state.task_active
         )
         # is_paused (field 3.2) stays stale after docking — only trust
         # during cleaning states. Paused takes priority over returning
         # since the robot physically stops when paused mid-return.
-        if state.is_paused and is_cleaning_state:
+        if state.task_active and (state.is_paused or state.task_paused):
             return VacuumActivity.PAUSED
-        # Check returning before cleaning — robot keeps working_status=CLEANING
-        # while navigating back to dock (field 3.7=1 indicates returning)
+        # Robot keeps working_status=CLEANING while navigating back to dock
+        # (field 3.7=1 indicates returning).
         if state.is_returning:
             return VacuumActivity.RETURNING
+        if state.task_active:
+            return VacuumActivity.CLEANING
+        if state.is_docked:
+            return VacuumActivity.DOCKED
+        if state.is_paused and is_cleaning_state:
+            return VacuumActivity.PAUSED
         if state.is_cleaning:
             return VacuumActivity.CLEANING
         activity = WORKING_STATUS_TO_ACTIVITY.get(state.working_status)
@@ -167,24 +174,29 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         """Start or resume cleaning."""
         await self._ensure_awake()
         state = self.coordinator.data
-        # is_paused stays stale after docking — only trust it during cleaning
-        is_cleaning = bool(
-            state
-            and not state.is_docked
-            and (
-                state.working_status in ACTIVE_CLEANING_STATUSES
-                or state.has_recent_active_working_status
+        if state and state.task_active and (state.is_paused or state.task_paused):
+            resp = await self.coordinator.client.resume(timeout=self._ACTION_TIMEOUT)
+            _LOGGER.info(
+                "Resume command response: code=%s, success=%s",
+                resp.result_code, resp.success,
             )
-        )
-        if is_cleaning and state.is_paused:
-            await self.coordinator.client.resume(timeout=self._ACTION_TIMEOUT)
+            if resp.success:
+                state.mark_task_resumed()
+                self.coordinator.client._last_active_working_status_time = (
+                    state.last_active_working_status_time
+                )
+                self.coordinator.async_set_updated_data(state)
         else:
             resp = await self.coordinator.client.start()
             _LOGGER.info(
                 "Start command response: code=%s, success=%s",
                 resp.result_code, resp.success,
             )
-            if not resp.success:
+            if resp.success:
+                self.coordinator.async_set_updated_data(
+                    self.coordinator.client.state
+                )
+            else:
                 _LOGGER.warning(
                     "Start command did not succeed (code=%s) — robot may not have started",
                     resp.result_code,
@@ -195,11 +207,17 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
         await self._ensure_awake()
         resp = await self.coordinator.client.stop()
         _LOGGER.info("Stop response: code=%s, success=%s", resp.result_code, resp.success)
+        if resp.success:
+            self.coordinator.client.state.clear_active_task()
+            self.coordinator.async_set_updated_data(self.coordinator.client.state)
 
     async def async_pause(self) -> None:
         """Pause cleaning."""
         resp = await self.coordinator.client.pause()
         _LOGGER.info("Pause response: code=%s, success=%s", resp.result_code, resp.success)
+        if resp.success:
+            self.coordinator.client.state.mark_task_paused()
+            self.coordinator.async_set_updated_data(self.coordinator.client.state)
 
     async def async_return_to_base(self, **kwargs) -> None:
         """Return to the dock."""
@@ -213,6 +231,9 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
             _LOGGER.warning(
                 "Return-to-base did not succeed (code=%s)", resp.result_code,
             )
+        elif self.coordinator.client.state.task_active:
+            self.coordinator.client.state.mark_task_paused()
+            self.coordinator.async_set_updated_data(self.coordinator.client.state)
 
     async def async_locate(self, **kwargs) -> None:
         """Locate the vacuum — robot says 'Robot is here'."""
@@ -299,6 +320,10 @@ class NarwalVacuum(NarwalEntity, StateVacuumEntity):
                 "NOT_APPLICABLE means robot cannot clean right now. "
                 "Try again after the robot is idle on the dock.",
                 result_name, resp.result_code, room_ids,
+            )
+        else:
+            self.coordinator.async_set_updated_data(
+                self.coordinator.client.state
             )
 
     @callback
