@@ -7,7 +7,10 @@
         "data": {
           "host": "IP Address",
           "port": "Port",
-          "model": "Model"
+          "model": "Model",
+          "cloud_email": "Narwal cloud email",
+          "cloud_password": "Narwal cloud password",
+          "cloud_region": "Narwal cloud region"
         }
       }
     },
@@ -17,6 +20,19 @@
     },
     "abort": {
       "already_configured": "This vacuum is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Narwal cloud",
+        "description": "Optional cloud login used only for read-only consumable life data. Clear the email to disable cloud access.",
+        "data": {
+          "cloud_email": "Narwal cloud email",
+          "cloud_password": "Narwal cloud password",
+          "cloud_region": "Narwal cloud region"
+        }
+      }
     }
   },
   "entity": {

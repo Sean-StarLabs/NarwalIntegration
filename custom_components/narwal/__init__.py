@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 
 import voluptuous as vol
 
@@ -21,9 +22,13 @@ from homeassistant.helpers import config_validation as cv, service
 from homeassistant.helpers import entity_registry as er
 
 from .const import (
+    CONF_CLOUD_EMAIL,
+    CONF_CLOUD_PASSWORD,
+    CONF_CLOUD_REGION,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
     DOCK_LIGHT_SERVICE_MODES,
+    DEFAULT_CLOUD_REGION,
     DOMAIN,
     PLATFORMS,
     SERVICE_CLEAN_ROOMS,
@@ -45,6 +50,41 @@ from .narwal_client import (
 _LOGGER = logging.getLogger(__name__)
 
 type NarwalConfigEntry = ConfigEntry[NarwalCoordinator]
+
+
+def _cloud_credentials(entry: ConfigEntry) -> tuple[str | None, str | None, str]:
+    """Return the effective cloud credentials for an entry."""
+    raw_options = getattr(entry, "options", {}) or {}
+    options = raw_options if isinstance(raw_options, Mapping) else {}
+    cloud_email = (
+        options[CONF_CLOUD_EMAIL]
+        if CONF_CLOUD_EMAIL in options
+        else entry.data.get(CONF_CLOUD_EMAIL)
+    )
+    cloud_password = (
+        options[CONF_CLOUD_PASSWORD]
+        if CONF_CLOUD_PASSWORD in options
+        else entry.data.get(CONF_CLOUD_PASSWORD)
+    )
+    cloud_region = (
+        options[CONF_CLOUD_REGION]
+        if CONF_CLOUD_REGION in options
+        else entry.data.get(CONF_CLOUD_REGION, DEFAULT_CLOUD_REGION)
+    )
+    return (
+        cloud_email or None,
+        cloud_password or None,
+        cloud_region,
+    )
+
+
+async def _async_entry_updated(
+    hass: HomeAssistant,
+    entry: NarwalConfigEntry,
+) -> None:
+    """Reload when cloud credentials change, but not for map display options."""
+    if entry.runtime_data.cloud_credentials != _cloud_credentials(entry):
+        await hass.config_entries.async_reload(entry.entry_id)
 
 FIELD_ROOMS = "rooms"
 FIELD_MODE = "mode"
@@ -402,6 +442,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bo
         ) from err
 
     entry.runtime_data = coordinator
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
     data = _domain_data(hass)
     data[entry.entry_id] = coordinator
 

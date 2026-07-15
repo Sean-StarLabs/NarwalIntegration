@@ -6,7 +6,11 @@
         "description": "Enter the IP address of your Narwal robot vacuum.",
         "data": {
           "host": "IP Address",
-          "port": "Port"
+          "port": "Port",
+          "model": "Model",
+          "cloud_email": "Narwal cloud email",
+          "cloud_password": "Narwal cloud password",
+          "cloud_region": "Narwal cloud region"
         }
       }
     },
@@ -16,6 +20,19 @@
     },
     "abort": {
       "already_configured": "This vacuum is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Narwal cloud",
+        "description": "Optional cloud login used only for read-only consumable life data. Clear the email to disable cloud access.",
+        "data": {
+          "cloud_email": "Narwal cloud email",
+          "cloud_password": "Narwal cloud password",
+          "cloud_region": "Narwal cloud region"
+        }
+      }
     }
   },
   "entity": {

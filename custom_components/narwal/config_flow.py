@@ -6,24 +6,58 @@ import logging
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.core import callback
+from homeassistant.helpers import selector
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-
-from .narwal_client import NarwalClient, NarwalCommandError, NarwalConnectionError
-
-from .const import CONF_MODEL, CONF_PRODUCT_KEY, DEFAULT_PORT, DOMAIN, NARWAL_MODELS
+from .const import (
+    CLOUD_REGIONS,
+    CONF_CLOUD_EMAIL,
+    CONF_CLOUD_PASSWORD,
+    CONF_CLOUD_REGION,
+    CONF_MODEL,
+    CONF_PRODUCT_KEY,
+    DEFAULT_CLOUD_REGION,
+    DEFAULT_PORT,
+    DOMAIN,
+    NARWAL_MODELS,
+)
+from .narwal_client import NarwalClient
 
 _LOGGER = logging.getLogger(__name__)
 
 MODEL_OPTIONS = list(NARWAL_MODELS.keys())
+PASSWORD_SELECTOR = selector.TextSelector(
+    selector.TextSelectorConfig(type=selector.TextSelectorType.PASSWORD)
+)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required("host"): str,
         vol.Optional("port", default=DEFAULT_PORT): int,
         vol.Required(CONF_MODEL, default=MODEL_OPTIONS[0]): vol.In(MODEL_OPTIONS),
+        vol.Optional(CONF_CLOUD_EMAIL): str,
+        vol.Optional(CONF_CLOUD_PASSWORD): PASSWORD_SELECTOR,
+        vol.Optional(CONF_CLOUD_REGION, default=DEFAULT_CLOUD_REGION): vol.In(
+            CLOUD_REGIONS
+        ),
     }
 )
+
+
+def _cloud_data_from_input(user_input: dict[str, Any]) -> dict[str, str]:
+    """Return non-empty cloud credential fields from form input."""
+    cloud_data: dict[str, str] = {}
+    cloud_email = user_input.get(CONF_CLOUD_EMAIL)
+    cloud_password = user_input.get(CONF_CLOUD_PASSWORD)
+    if cloud_email:
+        cloud_data[CONF_CLOUD_EMAIL] = cloud_email
+        if cloud_password:
+            cloud_data[CONF_CLOUD_PASSWORD] = cloud_password
+        cloud_data[CONF_CLOUD_REGION] = user_input.get(
+            CONF_CLOUD_REGION, DEFAULT_CLOUD_REGION
+        )
+    return cloud_data
 
 
 class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -31,9 +65,7 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
 
     VERSION = 2
 
-    async def async_step_user(
-        self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
+    async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         """Handle the initial step — user enters IP, port, and model."""
         errors: dict[str, str] = {}
 
@@ -46,16 +78,16 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
             # Try the selected model key first for speed. Some Flow/Flow 2
             # units only wake on a sibling key before reporting their actual
             # product key, so fall back to auto-discovery before failing.
-            topic_prefixes: list[str | None]
-            if product_key == "auto":
-                topic_prefixes = [None]
-            else:
-                topic_prefixes = [f"/{product_key}", None]
+            topic_prefixes: list[str | None] = (
+                [None] if product_key == "auto" else [f"/{product_key}", None]
+            )
 
             last_error: Exception | None = None
             for topic_prefix in topic_prefixes:
                 client = NarwalClient(
-                    host=host, port=port, topic_prefix=topic_prefix,
+                    host=host,
+                    port=port,
+                    topic_prefix=topic_prefix,
                 )
                 try:
                     await client.connect()
@@ -94,6 +126,7 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
                             "device_id": device_id,
                             CONF_PRODUCT_KEY: resolved_key,
                             CONF_MODEL: model_label,
+                            **_cloud_data_from_input(user_input),
                         },
                     )
                 finally:
@@ -111,4 +144,70 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
             step_id="user",
             data_schema=STEP_USER_DATA_SCHEMA,
             errors=errors,
+        )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        """Return the options flow."""
+        return NarwalOptionsFlow()
+
+
+class NarwalOptionsFlow(OptionsFlow):
+    """Handle Narwal options."""
+
+    async def async_step_init(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Manage Narwal cloud options."""
+        if user_input is not None:
+            options = dict(self.config_entry.options or {})
+            cloud_email = user_input.get(CONF_CLOUD_EMAIL, "").strip()
+            cloud_password = user_input.get(CONF_CLOUD_PASSWORD, "")
+            cloud_region = user_input.get(CONF_CLOUD_REGION, DEFAULT_CLOUD_REGION)
+            options[CONF_CLOUD_EMAIL] = cloud_email
+            options[CONF_CLOUD_REGION] = cloud_region
+            if not cloud_email:
+                options[CONF_CLOUD_PASSWORD] = ""
+                entry_data = dict(self.config_entry.data)
+                entry_data.pop(CONF_CLOUD_EMAIL, None)
+                entry_data.pop(CONF_CLOUD_PASSWORD, None)
+                entry_data.pop(CONF_CLOUD_REGION, None)
+                self.hass.config_entries.async_update_entry(
+                    self.config_entry,
+                    data=entry_data,
+                )
+            elif cloud_password:
+                options[CONF_CLOUD_PASSWORD] = cloud_password
+            return self.async_create_entry(
+                title="",
+                data=options,
+            )
+
+        entry_options = self.config_entry.options or {}
+        entry_data = self.config_entry.data
+        suggested_email = entry_options.get(
+            CONF_CLOUD_EMAIL,
+            entry_data.get(CONF_CLOUD_EMAIL, ""),
+        )
+        suggested_region = entry_options.get(
+            CONF_CLOUD_REGION,
+            entry_data.get(CONF_CLOUD_REGION, DEFAULT_CLOUD_REGION),
+        )
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(
+                {
+                    vol.Optional(
+                        CONF_CLOUD_EMAIL,
+                        description={"suggested_value": suggested_email},
+                    ): str,
+                    vol.Optional(CONF_CLOUD_PASSWORD): PASSWORD_SELECTOR,
+                    vol.Optional(
+                        CONF_CLOUD_REGION,
+                        default=suggested_region,
+                    ): vol.In(CLOUD_REGIONS),
+                }
+            ),
         )

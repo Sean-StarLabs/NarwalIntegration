@@ -6,7 +6,11 @@
         "description": "Entrez l’adresse IP de votre robot aspirateur Narwal.",
         "data": {
           "host": "Adresse IP",
-          "port": "Port"
+          "port": "Port",
+          "model": "Modèle",
+          "cloud_email": "E-mail cloud Narwal",
+          "cloud_password": "Mot de passe cloud Narwal",
+          "cloud_region": "Région cloud Narwal"
         }
       }
     },
@@ -16,6 +20,19 @@
     },
     "abort": {
       "already_configured": "Cet aspirateur est déjà configuré."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Cloud Narwal",
+        "description": "Connexion cloud facultative utilisée uniquement pour les données de durée de vie des consommables en lecture seule. Effacez l’e-mail pour désactiver l’accès cloud.",
+        "data": {
+          "cloud_email": "E-mail cloud Narwal",
+          "cloud_password": "Mot de passe cloud Narwal",
+          "cloud_region": "Région cloud Narwal"
+        }
+      }
     }
   },
   "entity": {

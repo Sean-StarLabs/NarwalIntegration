@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 _INSTALLED = False
@@ -100,6 +100,7 @@ def install() -> None:
             cls.DOMAIN = domain
 
     ha_ce.ConfigFlow = _ConfigFlow  # type: ignore[attr-defined]
+    ha_ce.OptionsFlow = _ConfigFlow  # type: ignore[attr-defined]
     ha_ce.ConfigFlowResult = dict  # type: ignore[attr-defined]
     class _ConfigEntry:
         """Subscriptable ConfigEntry stub for TypeAlias usage."""
@@ -134,6 +135,17 @@ def install() -> None:
     ha_service.async_extract_entity_ids = AsyncMock(  # type: ignore[attr-defined]
         side_effect=lambda call: set(call.data.get("entity_id", []))
     )
+
+    ha_ac = _mod("homeassistant.helpers.aiohttp_client", ha_helpers)
+    ha_ac.async_get_clientsession = MagicMock()  # type: ignore[attr-defined]
+
+    ha_selector = _mod("homeassistant.helpers.selector", ha_helpers)
+    ha_selector.TextSelector = lambda config: config  # type: ignore[attr-defined]
+    ha_selector.TextSelectorConfig = lambda **kwargs: kwargs  # type: ignore[attr-defined]
+    ha_selector.TextSelectorType = SimpleNamespace(PASSWORD="password")  # type: ignore[attr-defined]
+
+    ha_util = _mod("homeassistant.util", ha)
+    ha_util.slugify = lambda value: str(value).lower().replace(" ", "_")  # type: ignore[attr-defined]
 
     ha_uc = _mod("homeassistant.helpers.update_coordinator", ha_helpers)
 

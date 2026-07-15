@@ -23,6 +23,23 @@ NARWAL_MODELS: dict[str, str] = {
 
 CONF_MODEL = "model"
 CONF_PRODUCT_KEY = "product_key"
+CONF_CLOUD_EMAIL = "cloud_email"
+CONF_CLOUD_PASSWORD = "cloud_password"
+CONF_CLOUD_REGION = "cloud_region"
+
+DEFAULT_CLOUD_REGION = "eu"
+CLOUD_REGIONS = ("eu", "de", "us", "cn", "au", "jp", "kr", "sg")
+CLOUD_CONSUMABLES_POLL_HOURS = 6
+
+
+def narwal_cloud_hosts(region: str) -> tuple[str, str]:
+    """Return Narwal authentication and app hosts for a cloud region."""
+    if region not in CLOUD_REGIONS:
+        raise ValueError(f"Unsupported Narwal cloud region: {region}")
+    return (
+        f"https://{region}-idass.narwaltech.com",
+        f"https://{region}-app.narwaltech.com",
+    )
 
 PLATFORMS: list[Platform] = [
     Platform.VACUUM,
