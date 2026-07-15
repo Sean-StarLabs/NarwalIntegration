@@ -16,9 +16,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
+from .const import is_maintenance_alerts_supported
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import NarwalState, WorkingStatus
+from .narwal_client import (
+    MAINTENANCE_BASE_STATION_CLEANING_FILTER_COMPONENT,
+    NarwalState,
+    WorkingStatus,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -117,6 +122,17 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         else None,
     ),
     NarwalSensorEntityDescription(
+        key="base_station_cleaning_filter_used_hours",
+        translation_key="base_station_cleaning_filter_used_hours",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.HOURS,
+        state_class=SensorStateClass.MEASUREMENT,
+        entity_category=EntityCategory.DIAGNOSTIC,
+        value_fn=lambda state: state.maintenance_component_hours.get(
+            MAINTENANCE_BASE_STATION_CLEANING_FILTER_COMPONENT
+        ),
+    ),
+    NarwalSensorEntityDescription(
         key="firmware_version",
         translation_key="firmware_version",
         entity_category=EntityCategory.DIAGNOSTIC,
@@ -132,8 +148,14 @@ async def async_setup_entry(
 ) -> None:
     """Set up Narwal sensor entities."""
     coordinator = entry.runtime_data
+    device_info = coordinator.client.state.device_info
     entities: list[SensorEntity] = [
-        NarwalSensor(coordinator, description) for description in SENSOR_DESCRIPTIONS
+        NarwalSensor(coordinator, description)
+        for description in SENSOR_DESCRIPTIONS
+        if description.key != "base_station_cleaning_filter_used_hours"
+        or is_maintenance_alerts_supported(
+            entry.data, device_info.product_key if device_info else None
+        )
     ]
     entities.append(NarwalChargingStateSensor(coordinator))
     entities.append(NarwalTaskStatusSensor(coordinator))

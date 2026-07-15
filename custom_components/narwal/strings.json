@@ -51,6 +51,9 @@
       "dry_mop_remaining_time": {
         "name": "Drying time left"
       },
+      "base_station_cleaning_filter_used_hours": {
+        "name": "Base station cleaning filter used"
+      },
       "firmware_version": {
         "name": "Firmware version"
       },
@@ -84,8 +87,41 @@
           "off": "Undocked"
         }
       },
+      "base_station_cleaning_filter": {
+        "name": "Base station cleaning filter"
+      },
+      "caster": {
+        "name": "Caster"
+      },
       "charging": {
         "name": "Charging"
+      },
+      "dirty_water_tank": {
+        "name": "Dirty water tank"
+      },
+      "dust_bin": {
+        "name": "Dust bin"
+      },
+      "dust_bin_bag": {
+        "name": "Dust bin / bag"
+      },
+      "dust_bin_filter": {
+        "name": "Dust bin filter"
+      },
+      "edge_sensor": {
+        "name": "Edge sensor"
+      },
+      "roller_brush": {
+        "name": "Roller brush"
+      },
+      "sensor": {
+        "name": "Sensor"
+      },
+      "smart_water_module": {
+        "name": "Smart water module"
+      },
+      "sponge_filter": {
+        "name": "Sponge filter"
       }
     },
     "switch": {

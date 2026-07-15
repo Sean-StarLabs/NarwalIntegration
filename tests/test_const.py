@@ -11,6 +11,7 @@ from custom_components.narwal.const import (  # noqa: E402
     CONF_MODEL,
     CONF_PRODUCT_KEY,
     is_dock_light_supported,
+    is_maintenance_alerts_supported,
 )
 
 
@@ -37,4 +38,16 @@ def test_dock_light_option_override() -> None:
     assert not is_dock_light_supported(
         {CONF_PRODUCT_KEY: "QxMSPG6VSO"},
         {CONF_DOCK_LIGHT_SUPPORTED: False},
+    )
+
+
+def test_maintenance_alerts_supported_for_flow_2_only() -> None:
+    assert is_maintenance_alerts_supported({CONF_PRODUCT_KEY: "QxMSPG6VSO"})
+    assert is_maintenance_alerts_supported({CONF_PRODUCT_KEY: "iSuVlI1If2"})
+    assert not is_maintenance_alerts_supported({CONF_PRODUCT_KEY: "QoEsI5qYXO"})
+
+
+def test_maintenance_alerts_use_discovered_flow_2_product_key() -> None:
+    assert is_maintenance_alerts_supported(
+        {CONF_PRODUCT_KEY: "QoEsI5qYXO"}, "QxMSPG6VSO"
     )

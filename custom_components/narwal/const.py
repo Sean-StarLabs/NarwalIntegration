@@ -45,7 +45,8 @@ SERVICE_CLEAN_ROOMS = "clean_rooms"
 SERVICE_SET_DOCK_LIGHT = "set_dock_light"
 SERVICE_SET_LED = "set_led"
 
-DOCK_LIGHT_PRODUCT_KEYS = {"QxMSPG6VSO", "iSuVlI1If2"}
+FLOW_2_PRODUCT_KEYS = frozenset({"QxMSPG6VSO", "iSuVlI1If2"})
+DOCK_LIGHT_PRODUCT_KEYS = FLOW_2_PRODUCT_KEYS
 
 
 def is_dock_light_supported(data: dict, options: dict | None = None) -> bool:
@@ -53,6 +54,16 @@ def is_dock_light_supported(data: dict, options: dict | None = None) -> bool:
     if options and CONF_DOCK_LIGHT_SUPPORTED in options:
         return bool(options[CONF_DOCK_LIGHT_SUPPORTED])
     return data.get(CONF_PRODUCT_KEY) in DOCK_LIGHT_PRODUCT_KEYS
+
+
+def is_maintenance_alerts_supported(
+    data: dict, discovered_product_key: str | None = None
+) -> bool:
+    """Return whether this configured model reports maintenance alerts."""
+    return (
+        data.get(CONF_PRODUCT_KEY) in FLOW_2_PRODUCT_KEYS
+        or discovered_product_key in FLOW_2_PRODUCT_KEYS
+    )
 
 
 DOCK_LIGHT_MODES: dict[str, AmbientLightCtrlType] = {

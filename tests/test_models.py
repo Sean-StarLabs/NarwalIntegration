@@ -8,6 +8,9 @@ import zlib
 
 from narwal_client.const import WorkingStatus
 from narwal_client.models import (
+    MAINTENANCE_BASE_STATION_CLEANING_FILTER,
+    MAINTENANCE_BASE_STATION_CLEANING_FILTER_COMPONENT,
+    MAINTENANCE_COMPONENT_IDS,
     MapData,
     NarwalState,
     ObstacleInfo,
@@ -308,6 +311,89 @@ class TestNarwalState:
         state = NarwalState()
         state.update_from_download_status({"1": 2})
         assert state.download_status == 2
+
+    def test_base_station_cleaning_filter_alert_from_base_status(self) -> None:
+        """Flow 2 base-status field 48 carries the cleaning-filter prompt."""
+        state = NarwalState()
+        state.update_from_base_status({"48": {"1": {"15": {"7": {}}}}})
+        assert state.maintenance_alerts == (MAINTENANCE_BASE_STATION_CLEANING_FILTER,)
+
+    def test_base_station_cleaning_filter_alert_from_repeated_block(self) -> None:
+        """The same field48 block can decode as a repeated list."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"48": {"1": [{"2": {}, "5": {"1": {"1": 4, "2": 2}}}]}}
+        )
+        assert state.maintenance_alerts == (MAINTENANCE_BASE_STATION_CLEANING_FILTER,)
+
+    def test_maintenance_alert_from_repeated_component_id(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status(
+            {
+                "48": {
+                    "1": [
+                        {"2": {}, "5": {"1": {"1": MAINTENANCE_COMPONENT_IDS["sensor"]}}}
+                    ]
+                }
+            }
+        )
+        assert state.maintenance_alerts == ("sensor",)
+
+    def test_base_station_cleaning_filter_alert_from_progress_payload(self) -> None:
+        """Clean-progress response embeds the same base-status alert block."""
+        state = NarwalState()
+        state.update_from_aux_status(
+            "info/get_clean_progress_info",
+            {"1": 1, "2": {"48": {"1": {"15": {"7": {}}}}}},
+        )
+        assert state.maintenance_alerts == (MAINTENANCE_BASE_STATION_CLEANING_FILTER,)
+
+    def test_base_station_cleaning_filter_hours_from_progress_payload(self) -> None:
+        state = NarwalState()
+        state.update_from_aux_status(
+            "info/get_clean_progress_info",
+            {
+                "2": {
+                    "32": [
+                        {
+                            "1": 19,
+                            "18": MAINTENANCE_BASE_STATION_CLEANING_FILTER_COMPONENT,
+                        }
+                    ]
+                }
+            },
+        )
+        assert (
+            state.maintenance_component_hours[
+                MAINTENANCE_BASE_STATION_CLEANING_FILTER_COMPONENT
+            ]
+            == 19
+        )
+
+    def test_base_status_field_32_is_not_treated_as_maintenance(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status(
+            {"32": [{"1": 19, "18": MAINTENANCE_BASE_STATION_CLEANING_FILTER_COMPONENT}]}
+        )
+        assert state.maintenance_component_hours == {}
+
+    def test_progress_without_maintenance_clears_base_alert(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"48": {"1": {"15": {"7": {}}}}})
+        state.update_from_aux_status("info/get_clean_progress_info", {"1": 1, "2": {"3": 4}})
+        assert state.maintenance_alerts == ()
+
+    def test_base_status_without_maintenance_does_not_clear_alert(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"48": {"1": {"15": {"7": {}}}}})
+        state.update_from_base_status({"3": {"1": 10}})
+        assert state.maintenance_alerts == (MAINTENANCE_BASE_STATION_CLEANING_FILTER,)
+
+    def test_maintenance_alerts_clear_when_absent(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"48": {"1": {"15": {"7": {}}}}})
+        state.update_from_base_status({"48": {}})
+        assert state.maintenance_alerts == ()
 
     def test_update_from_robot_task_status(self) -> None:
         """Polled and broadcast task status expose progress and room."""

@@ -34,6 +34,7 @@ Models marked **Not Compatible** use a different protocol or are cloud-only. Thi
 ### Sensors
 - Battery level, cleaning area, cleaning time, firmware version
 - Docked status (binary sensor), charging state (Charging / Fully Charged / Not Charging)
+- Flow 2 maintenance prompts for common components
 
 ### Live Map
 - Color-coded floor plan with room labels (all rooms — user-named and auto-generated)
@@ -80,6 +81,7 @@ Models marked **Not Compatible** use a different protocol or are cloud-only. Thi
 - **Single connection** — close the Narwal app before using HA to avoid conflicts.
 - **Fan speed is set-only** — robot doesn't broadcast its current level.
 - **Default clean settings** — start and room-specific clean use max suction, wet mop, single pass. Per-room customization is not yet available.
+- **Maintenance alerts are limited** — the Flow 2 base-station replaceable cleaning-filter prompt and used-hours counter are exposed; other consumable/app alerts need live protocol captures before they can be mapped safely.
 - **Map may be stale** — robot can return an old map. A new clean cycle typically refreshes it.
 
 ## Future Features (On Hold)

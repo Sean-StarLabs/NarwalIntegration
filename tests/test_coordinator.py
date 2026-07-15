@@ -52,6 +52,7 @@ class TestCoordinatorResilience:
         coordinator._listen_task = None
         coordinator._map_fetch_pending = False
         coordinator._last_display_map_resub = 0.0
+        coordinator._last_maintenance_refresh = 0.0
         coordinator._prev_working_status = MagicMock()
         coordinator.update_interval = None
         # Prevent background task warnings
@@ -160,6 +161,49 @@ class TestCoordinatorResilience:
 
         assert result is coordinator.client.state
         assert coordinator._consecutive_failures == 1
+
+    async def test_maintenance_details_refresh_when_forced(self) -> None:
+        """Idle maintenance counters can be populated independently of a task."""
+        coordinator = self._make_coordinator()
+        coordinator.config_entry.data["product_key"] = "QxMSPG6VSO"
+        coordinator.client.get_clean_progress_info = AsyncMock()
+
+        await coordinator._refresh_maintenance_details(force=True)
+
+        coordinator.client.get_clean_progress_info.assert_awaited_once_with()
+
+    async def test_maintenance_details_refresh_is_throttled(self) -> None:
+        """Normal polls do not query maintenance details every minute."""
+        coordinator = self._make_coordinator()
+        coordinator.config_entry.data["product_key"] = "QxMSPG6VSO"
+        coordinator.client.get_clean_progress_info = AsyncMock()
+
+        await coordinator._refresh_maintenance_details(force=True)
+        await coordinator._refresh_maintenance_details()
+
+        coordinator.client.get_clean_progress_info.assert_awaited_once_with()
+
+    async def test_maintenance_details_retry_after_failure(self) -> None:
+        """A failed maintenance refresh does not suppress the next attempt."""
+        coordinator = self._make_coordinator()
+        coordinator.config_entry.data["product_key"] = "QxMSPG6VSO"
+        coordinator.client.get_clean_progress_info = AsyncMock(
+            side_effect=[NarwalConnectionError("recv timeout"), None]
+        )
+
+        await coordinator._refresh_maintenance_details()
+        await coordinator._refresh_maintenance_details()
+
+        assert coordinator.client.get_clean_progress_info.await_count == 2
+
+    async def test_maintenance_details_skip_unsupported_models(self) -> None:
+        """Models without maintenance entities are not polled for their data."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_clean_progress_info = AsyncMock()
+
+        await coordinator._refresh_maintenance_details(force=True)
+
+        coordinator.client.get_clean_progress_info.assert_not_awaited()
 
     async def test_status_recovery_preserves_stale_active_state(self) -> None:
         """Recovery avoids a full status update without fresh active telemetry."""

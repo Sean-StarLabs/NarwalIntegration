@@ -14,7 +14,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .narwal_client import NarwalClient, NarwalConnectionError, NarwalState
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
 
-from .const import DOMAIN
+from .const import DOMAIN, is_maintenance_alerts_supported
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +24,7 @@ POLL_INTERVAL = timedelta(seconds=60)
 FAST_POLL_INTERVAL = timedelta(seconds=10)
 FAST_POLL_MAX = 6  # up to 60s of fast polling before falling back to normal
 ACTIVE_TASK_REFRESH_INTERVAL = 10.0
+MAINTENANCE_REFRESH_INTERVAL_SECONDS = 900.0
 
 
 def _response_has_active_task(response: object, *, task_active: bool = False) -> bool:
@@ -85,6 +86,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._last_display_map_resub: float = 0.0
         self._last_status_resub: float = 0.0
         self._last_task_details_refresh: float = 0.0
+        self._last_maintenance_refresh: float = 0.0
         self._consecutive_failures = 0
         self._max_failures = 5  # 5 * 60s = 5 minutes before entities go unavailable
         self.select_options: dict[str, str] = {}
@@ -118,6 +120,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     await self.client.get_robot_task_status()
         except Exception:
             _LOGGER.debug("Could not fetch initial status")
+
+        await self._refresh_maintenance_details(force=True)
 
         try:
             await self.client.get_map()
@@ -331,6 +335,29 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         except Exception:
             _LOGGER.debug("Failed to refresh dock status after transition")
 
+    async def _refresh_maintenance_details(self, *, force: bool = False) -> None:
+        """Refresh maintenance counters exposed by the task-detail endpoint."""
+        device_info = self.client.state.device_info
+        if not is_maintenance_alerts_supported(
+            self.config_entry.data,
+            device_info.product_key if device_info else None,
+        ):
+            return
+        now = time.monotonic()
+        if (
+            not force
+            and self._last_maintenance_refresh > 0
+            and now - self._last_maintenance_refresh
+            < MAINTENANCE_REFRESH_INTERVAL_SECONDS
+        ):
+            return
+        try:
+            await self.client.get_clean_progress_info()
+        except Exception as err:
+            _LOGGER.debug("Maintenance detail refresh failed: %s", err)
+            return
+        self._last_maintenance_refresh = now
+
     async def _async_update_data(self) -> NarwalState:
         """Polling fallback — fetch status if no push updates arrived.
 
@@ -362,6 +389,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return self.client.state
         else:
             self._consecutive_failures = 0
+
+        await self._refresh_maintenance_details()
 
         # Retry map fetch if it failed during setup
         if self.client.state.map_data is None:

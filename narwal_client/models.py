@@ -10,6 +10,30 @@ from typing import Any, ClassVar
 
 _LOGGER = logging.getLogger(__name__)
 _ACTIVE_WORKING_STATUS_TTL = 15.0
+MAINTENANCE_BASE_STATION_CLEANING_FILTER = "base_station_cleaning_filter"
+MAINTENANCE_BASE_STATION_CLEANING_FILTER_COMPONENT = 4
+MAINTENANCE_COMPONENT_IDS: dict[str, int] = {
+    "dust_bin": 1,
+    "dust_bin_filter": 2,
+    "dirty_water_tank": 3,
+    MAINTENANCE_BASE_STATION_CLEANING_FILTER: (
+        MAINTENANCE_BASE_STATION_CLEANING_FILTER_COMPONENT
+    ),
+    "smart_water_module": 5,
+    "caster": 6,
+    "sensor": 7,
+    "edge_sensor": 8,
+    "roller_brush": 9,
+    "dust_bin_bag": 13,
+    "sponge_filter": 15,
+}
+_MAINTENANCE_ALERT_PATHS: dict[str, tuple[tuple[str, ...], ...]] = {
+    key: () for key in MAINTENANCE_COMPONENT_IDS
+}
+_MAINTENANCE_ALERT_PATHS[MAINTENANCE_BASE_STATION_CLEANING_FILTER] = (
+    ("48", "1", "15", "7"),
+)
+_MAINTENANCE_COMPONENT_ALERTS: dict[str, int] = MAINTENANCE_COMPONENT_IDS
 
 from .const import (
     ACTIVE_CLEANING_STATUSES,
@@ -309,12 +333,73 @@ def _positive_int_field(decoded: dict[str, Any], field: str) -> bool:
         return False
 
 
+def _has_field_path(value: Any, path: tuple[str, ...]) -> bool:
+    if not path:
+        return True
+    if isinstance(value, list):
+        return any(_has_field_path(item, path) for item in value)
+    if not isinstance(value, dict):
+        return False
+    key = path[0]
+    if key not in value:
+        return False
+    return _has_field_path(value[key], path[1:])
+
+
 def _optional_int(value: Any) -> int | None:
     """Return value coerced to int, or None when it cannot be coerced."""
     try:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _as_sequence(value: Any) -> tuple[Any, ...]:
+    if isinstance(value, list):
+        return tuple(value)
+    if value is None:
+        return ()
+    return (value,)
+
+
+def _get_nested(value: Any, path: tuple[str, ...]) -> Any:
+    current = value
+    for key in path:
+        if not isinstance(current, dict):
+            return None
+        current = current.get(key)
+    return current
+
+
+def _component_alert_active(decoded: dict[str, Any], component_id: int) -> bool:
+    """Return true when field48 contains an alert for a maintenance component."""
+    for item in _as_sequence(_get_nested(decoded, ("48", "1"))):
+        if _optional_int(_get_nested(item, ("5", "1", "1"))) == component_id:
+            return True
+    return False
+
+
+def _maintenance_alerts_from_base_status(decoded: dict[str, Any]) -> tuple[str, ...]:
+    alerts: list[str] = []
+    for alert, paths in _MAINTENANCE_ALERT_PATHS.items():
+        component_id = _MAINTENANCE_COMPONENT_ALERTS.get(alert)
+        if any(_has_field_path(decoded, path) for path in paths) or (
+            component_id is not None and _component_alert_active(decoded, component_id)
+        ):
+            alerts.append(alert)
+    return tuple(alerts)
+
+
+def _maintenance_hours_from_base_status(decoded: dict[str, Any]) -> dict[int, int]:
+    hours: dict[int, int] = {}
+    for item in _as_sequence(decoded.get("32")):
+        if not isinstance(item, dict):
+            continue
+        component_id = _optional_int(item.get("18"))
+        used_hours = _optional_int(item.get("1"))
+        if component_id is not None and used_hours is not None:
+            hours[component_id] = used_hours
+    return hours
 
 
 @dataclass
@@ -677,6 +762,8 @@ class NarwalState:
     _previous_task_metrics: tuple[int, int] | None = field(
         default=None, init=False, repr=False
     )
+    maintenance_alerts: tuple[str, ...] = ()
+    maintenance_component_hours: dict[int, int] = field(default_factory=dict)
 
     # Map
     map_data: MapData | None = None
@@ -1004,6 +1091,10 @@ class NarwalState:
         Note: field 32 mirrors field 3 exactly (redundant).
         """
         self.raw_base_status = decoded
+        # Base broadcasts omit field 48 intermittently. The periodic clean-
+        # progress refresh is authoritative when clearing maintenance alerts.
+        if "48" in decoded:
+            self.maintenance_alerts = _maintenance_alerts_from_base_status(decoded)
         # Field 11 = dock indicator (2=docked, 1=undocked)
         if "11" in decoded:
             try:
@@ -1211,6 +1302,14 @@ class NarwalState:
     def update_from_aux_status(self, topic: str, decoded: dict[str, Any]) -> None:
         """Store decoded status payloads that are not mapped yet."""
         self.raw_aux_status[topic] = decoded
+        if topic == "info/get_clean_progress_info":
+            payload = decoded.get("2")
+            if isinstance(payload, dict):
+                self.maintenance_alerts = _maintenance_alerts_from_base_status(payload)
+                if "32" in payload:
+                    self.maintenance_component_hours = (
+                        _maintenance_hours_from_base_status(payload)
+                    )
         if topic in {TOPIC_ROBOT_TASK_STATUS, TOPIC_CMD_GET_ROBOT_TASK_STATUS}:
             payload = decoded.get("2")
             if not isinstance(payload, dict):

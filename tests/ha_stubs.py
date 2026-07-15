@@ -65,6 +65,7 @@ def install() -> None:
         SQUARE_METERS = "m²"
 
     class _UnitOfTime:
+        HOURS = "h"
         SECONDS = "s"
 
     ha_const.EntityCategory = _EntityCategory  # type: ignore[attr-defined]
@@ -266,8 +267,17 @@ def install() -> None:
     ha_select.SelectEntityDescription = MagicMock  # type: ignore[attr-defined]
 
     ha_bs = _mod("homeassistant.components.binary_sensor", ha_comp)
+
+    @dataclass(frozen=True, kw_only=True)
+    class _BinarySensorEntityDescription:
+        key: str
+        translation_key: str | None = None
+        device_class: str | None = None
+        entity_category: str | None = None
+
     ha_bs.BinarySensorEntity = MagicMock  # type: ignore[attr-defined]
-    ha_bs.BinarySensorDeviceClass = MagicMock  # type: ignore[attr-defined]
+    ha_bs.BinarySensorEntityDescription = _BinarySensorEntityDescription  # type: ignore[attr-defined]
+    ha_bs.BinarySensorDeviceClass = MagicMock(PROBLEM="problem")  # type: ignore[attr-defined]
 
     ha_button = _mod("homeassistant.components.button", ha_comp)
     ha_button.ButtonEntity = MagicMock  # type: ignore[attr-defined]

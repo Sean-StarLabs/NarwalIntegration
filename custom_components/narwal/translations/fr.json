@@ -50,6 +50,9 @@
       "dry_mop_remaining_time": {
         "name": "Drying time left"
       },
+      "base_station_cleaning_filter_used_hours": {
+        "name": "Utilisation du filtre de nettoyage de la station"
+      },
       "firmware_version": {
         "name": "Version du firmware"
       },
@@ -83,8 +86,41 @@
           "off": "Non stationné"
         }
       },
+      "base_station_cleaning_filter": {
+        "name": "Filtre de nettoyage de la station"
+      },
+      "caster": {
+        "name": "Roulette"
+      },
       "charging": {
         "name": "Charge"
+      },
+      "dirty_water_tank": {
+        "name": "Réservoir d’eau sale"
+      },
+      "dust_bin": {
+        "name": "Bac à poussière"
+      },
+      "dust_bin_bag": {
+        "name": "Bac / sac à poussière"
+      },
+      "dust_bin_filter": {
+        "name": "Filtre du bac à poussière"
+      },
+      "edge_sensor": {
+        "name": "Capteur latéral"
+      },
+      "roller_brush": {
+        "name": "Brosse principale"
+      },
+      "sensor": {
+        "name": "Capteur"
+      },
+      "smart_water_module": {
+        "name": "Module d’eau intelligent"
+      },
+      "sponge_filter": {
+        "name": "Filtre éponge"
       }
     },
     "switch": {
