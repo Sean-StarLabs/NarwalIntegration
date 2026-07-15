@@ -725,6 +725,12 @@ class NarwalState:
     # Secondary confirmation signal.
     dock_field47: int = 0
 
+    # Base station ambient light mode from top-level base_status field 50.
+    # Values validated against the app: 1=Nightlight,
+    # 2=Fireplace / Winter warmth, 3=Purple. When the light is off the robot
+    # omits field 50 from base_status, so missing field 50 is treated as 0.
+    dock_light_mode: int | None = None
+
     # Raw data for fields we haven't fully decoded yet
     raw_base_status: dict[str, Any] = field(default_factory=dict)
     raw_working_status: dict[str, Any] = field(default_factory=dict)
@@ -937,6 +943,13 @@ class NarwalState:
                 self.dock_field47 = int(decoded["47"])
             except (ValueError, TypeError):
                 self.dock_field47 = 0
+        if "50" in decoded:
+            try:
+                self.dock_light_mode = int(decoded["50"])
+            except (ValueError, TypeError):
+                self.dock_light_mode = None
+        else:
+            self.dock_light_mode = 0
         # Field 3 is a nested message: {1: state_int, ...}
         # Sub-field layout differs across firmware versions:
         #   Old FW: {1: ws, 2: paused, 3: dock_presence, 7: returning, 10: dock_sub, 12: dock_activity}

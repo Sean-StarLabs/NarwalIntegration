@@ -66,3 +66,53 @@ clean_rooms:
           options:
             - standard
             - meticulous
+
+set_dock_light:
+  name: Set dock light
+  description: Set Narwal's base station ambient light mode.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum
+  fields:
+    "on":
+      name: On
+      description: Backwards-compatible toggle. If mode is set, mode wins.
+      required: false
+      selector:
+        boolean:
+    mode:
+      name: Mode
+      required: false
+      selector:
+        select:
+          options:
+            - "off"
+            - "fireplace"
+            - "nightlight"
+            - "purple"
+
+set_led:
+  name: Set dock light
+  description: Legacy alias for Narwal base station ambient light mode.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum
+  fields:
+    "on":
+      name: On
+      description: Backwards-compatible toggle. If mode is set, mode wins.
+      required: false
+      selector:
+        boolean:
+    mode:
+      name: Mode
+      required: false
+      selector:
+        select:
+          options:
+            - "off"
+            - "fireplace"
+            - "nightlight"
+            - "purple"

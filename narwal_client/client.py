@@ -25,6 +25,7 @@ from .const import (
     RECONNECT_INITIAL_DELAY,
     RECONNECT_MAX_DELAY,
     TOPIC_CMD_ACTIVE_ROBOT,
+    TOPIC_CMD_AMBIENT_LIGHT_CTRL,
     TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_CANCEL,
     TOPIC_CMD_CLEAN_TASK,
@@ -63,6 +64,7 @@ from .const import (
     TOPIC_ROBOT_TASK_STATUS,
     TOPIC_TIMELINE_STATUS,
     WAKE_TIMEOUT,
+    AmbientLightCtrlType,
     CleaningRoute,
     CommandResult,
     FanLevel,
@@ -1763,18 +1765,50 @@ class NarwalClient:
         _LOGGER.warning("take_picture returned result_code=%d", resp.result_code)
         return None
 
-    async def set_led(self, on: bool) -> None:
-        """Turn the camera LED fill light on or off.
+    async def set_led(self, on: bool) -> CommandResponse | None:
+        """Turn the camera LED fill light on or off."""
+        return await self.set_led_mode(1 if on else 0)
 
-        Payload: 0x08 0x01 = on, 0x08 0x00 = off (protobuf field 1, varint).
+    async def set_led_mode(self, mode: int) -> CommandResponse | None:
+        """Set the camera LED fill mode.
+
+        Payload: protobuf field 1, varint.
         """
-        payload = b"\x08\x01" if on else b"\x08\x00"
+        payload = b"\x08" + bytes([mode & 0x7F])
         try:
             resp = await self.send_command(TOPIC_CMD_SET_LED, payload=payload)
         except Exception:
-            _LOGGER.warning("set_led(%s) command failed", on)
-            return
+            _LOGGER.warning("set_led_mode(%s) command failed", mode)
+            return None
         if resp.result_code not in (CommandResult.SUCCESS, CommandResult.NOT_APPLICABLE):
             _LOGGER.warning(
-                "set_led(%s) unexpected result_code=%d", on, resp.result_code
+                "set_led_mode(%s) unexpected result_code=%d", mode, resp.result_code
             )
+        return resp
+
+    async def set_ambient_light_mode(
+        self, mode: AmbientLightCtrlType | int
+    ) -> CommandResponse | None:
+        """Set the base station ambient light mode."""
+        mode = AmbientLightCtrlType(mode)
+        payload = self._encode_varint_field(1, int(mode))
+        try:
+            resp = await self.send_command(
+                TOPIC_CMD_AMBIENT_LIGHT_CTRL,
+                payload=payload,
+            )
+        except Exception:
+            _LOGGER.warning("set_ambient_light_mode(%s) command failed", mode)
+            return None
+        if resp.result_code not in (
+            0,
+            CommandResult.SUCCESS,
+            CommandResult.NOT_APPLICABLE,
+            CommandResult.APPLIED,
+        ):
+            _LOGGER.warning(
+                "set_ambient_light_mode(%s) unexpected result_code=%d",
+                mode,
+                resp.result_code,
+            )
+        return resp

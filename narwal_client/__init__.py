@@ -2,6 +2,7 @@
 
 from .client import NarwalClient, NarwalCommandError, NarwalConnectionError
 from .const import (
+    AmbientLightCtrlType,
     CleaningRoute,
     CommandResult,
     FanLevel,
@@ -19,6 +20,7 @@ __all__ = [
     "NarwalConnectionError",
     "NarwalState",
     "CommandResponse",
+    "AmbientLightCtrlType",
     "CommandResult",
     "CleaningRoute",
     "DeviceInfo",

@@ -107,6 +107,7 @@ def install() -> None:
     ha_helpers = _mod("homeassistant.helpers", ha)
 
     ha_cv = _mod("homeassistant.helpers.config_validation", ha_helpers)
+    ha_cv.boolean = MagicMock(side_effect=lambda value: value)  # type: ignore[attr-defined]
     ha_cv.entity_ids = MagicMock()  # type: ignore[attr-defined]
     ha_cv.ensure_list = MagicMock(side_effect=lambda value: value)  # type: ignore[attr-defined]
 
@@ -220,9 +221,38 @@ def install() -> None:
     ha_sensor.SensorDeviceClass = MagicMock  # type: ignore[attr-defined]
     ha_sensor.SensorStateClass = MagicMock  # type: ignore[attr-defined]
 
+    ha_select = _mod("homeassistant.components.select", ha_comp)
+    ha_select.DOMAIN = "select"  # type: ignore[attr-defined]
+    ha_select.SelectEntity = MagicMock  # type: ignore[attr-defined]
+    ha_select.SelectEntityDescription = MagicMock  # type: ignore[attr-defined]
+
     ha_bs = _mod("homeassistant.components.binary_sensor", ha_comp)
     ha_bs.BinarySensorEntity = MagicMock  # type: ignore[attr-defined]
     ha_bs.BinarySensorDeviceClass = MagicMock  # type: ignore[attr-defined]
+
+    ha_button = _mod("homeassistant.components.button", ha_comp)
+    ha_button.ButtonEntity = MagicMock  # type: ignore[attr-defined]
+    ha_button.ButtonEntityDescription = MagicMock  # type: ignore[attr-defined]
+
+    ha_light = _mod("homeassistant.components.light", ha_comp)
+    ha_light.ATTR_EFFECT = "effect"  # type: ignore[attr-defined]
+    ha_light.DOMAIN = "light"  # type: ignore[attr-defined]
+    ha_light.ColorMode = MagicMock(ONOFF="onoff")  # type: ignore[attr-defined]
+    ha_light.LightEntityFeature = MagicMock(EFFECT=1)  # type: ignore[attr-defined]
+
+    class _LightEntity:
+        """Stub for LightEntity base class."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+        def __init__(self) -> None:
+            pass
+
+        def async_write_ha_state(self) -> None:
+            pass
+
+    ha_light.LightEntity = _LightEntity  # type: ignore[attr-defined]
 
     ha_cam = _mod("homeassistant.components.camera", ha_comp)
 

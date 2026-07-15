@@ -12,6 +12,7 @@ import tests.ha_stubs
 tests.ha_stubs.install()
 
 from custom_components.narwal import (
+    FIELD_LED_MODE,
     FIELD_MODE,
     FIELD_MOP_STRENGTH,
     FIELD_PASSES,
@@ -23,7 +24,11 @@ from custom_components.narwal import (
     _async_validate_clean_rooms_targets,
     async_setup,
 )
-from custom_components.narwal.const import DOMAIN, SERVICE_CLEAN_ROOMS
+from custom_components.narwal.const import (
+    DOMAIN,
+    SERVICE_CLEAN_ROOMS,
+    SERVICE_SET_DOCK_LIGHT,
+)
 from custom_components.narwal.coordinator import NarwalCoordinator
 from custom_components.narwal.narwal_client import CommandResult
 from homeassistant.exceptions import HomeAssistantError, Unauthorized
@@ -31,6 +36,7 @@ from homeassistant.helpers import service
 
 
 def test_clean_rooms_awaits_entity_target_extraction() -> None:
+    service.async_extract_entity_ids.reset_mock()
     hass = MagicMock()
     client = SimpleNamespace(
         robot_awake=True,
@@ -54,7 +60,11 @@ def test_clean_rooms_awaits_entity_target_extraction() -> None:
     )
 
     _async_register_services(hass)
-    handler = hass.services.async_register.call_args.args[2]
+    handlers = {
+        registration.args[1]: registration.args[2]
+        for registration in hass.services.async_register.call_args_list
+    }
+    handler = handlers[SERVICE_CLEAN_ROOMS]
 
     with (
         patch(
@@ -74,7 +84,7 @@ def test_clean_rooms_awaits_entity_target_extraction() -> None:
 
     service.async_extract_entity_ids.assert_awaited_once_with(call)
     client.start_rooms.assert_awaited_once()
-    hass.services.async_register.assert_called_once_with(
+    hass.services.async_register.assert_any_call(
         DOMAIN,
         SERVICE_CLEAN_ROOMS,
         handler,
@@ -87,7 +97,7 @@ async def test_services_are_registered_during_integration_setup() -> None:
 
     assert await async_setup(hass, {}) is True
 
-    hass.services.async_register.assert_called_once()
+    assert hass.services.async_register.call_count == 3
 
 
 async def test_clean_rooms_requires_an_explicit_target() -> None:
@@ -184,3 +194,163 @@ async def test_clean_rooms_accepts_expanded_targets(direct_target: str) -> None:
         )
 
     assert entity_ids == ["vacuum.flow_2"]
+
+
+def test_set_dock_light_awaits_entity_target_extraction() -> None:
+    service.async_extract_entity_ids.reset_mock()
+    hass = MagicMock()
+    client = SimpleNamespace(
+        robot_awake=True,
+        set_ambient_light_mode=AsyncMock(
+            return_value=SimpleNamespace(result_code=CommandResult.APPLIED)
+        ),
+    )
+    coordinator = SimpleNamespace(
+        client=client,
+        config_entry=SimpleNamespace(
+            data={"product_key": "QxMSPG6VSO"},
+            options={},
+            title="Flow 2",
+        ),
+        async_request_refresh=AsyncMock(),
+    )
+    call = SimpleNamespace(
+        context=SimpleNamespace(user_id=None),
+        data={
+            "entity_id": ["vacuum.flow_2"],
+            FIELD_LED_MODE: "nightlight",
+        }
+    )
+
+    _async_register_services(hass)
+    handlers = {
+        registration.args[1]: registration.args[2]
+        for registration in hass.services.async_register.call_args_list
+    }
+    handler = handlers[SERVICE_SET_DOCK_LIGHT]
+
+    registry = MagicMock()
+    registry.async_get.return_value = SimpleNamespace(platform=DOMAIN)
+    with (
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+        patch(
+            "custom_components.narwal._async_get_service_coordinators",
+            new=AsyncMock(return_value=[coordinator]),
+        ),
+    ):
+        asyncio.run(handler(call))
+
+    service.async_extract_entity_ids.assert_awaited_once_with(call)
+    client.set_ambient_light_mode.assert_awaited_once()
+    coordinator.async_request_refresh.assert_awaited_once()
+
+
+def test_set_dock_light_rejects_empty_explicit_target() -> None:
+    service.async_extract_entity_ids.reset_mock()
+    service.async_extract_entity_ids.return_value = set()
+    hass = MagicMock()
+    call = SimpleNamespace(
+        context=SimpleNamespace(user_id=None),
+        data={
+            "area_id": ["bedroom"],
+            FIELD_LED_MODE: "nightlight",
+        }
+    )
+
+    _async_register_services(hass)
+    handlers = {
+        registration.args[1]: registration.args[2]
+        for registration in hass.services.async_register.call_args_list
+    }
+
+    with pytest.raises(HomeAssistantError, match="Target does not contain"):
+        asyncio.run(handlers[SERVICE_SET_DOCK_LIGHT](call))
+
+    service.async_extract_entity_ids.assert_awaited_once_with(call)
+
+
+def test_set_dock_light_rejects_unauthorized_target() -> None:
+    service.async_extract_entity_ids.reset_mock()
+    hass = MagicMock()
+    user = SimpleNamespace(
+        is_admin=False,
+        permissions=SimpleNamespace(check_entity=MagicMock(return_value=False)),
+    )
+    hass.auth.async_get_user = AsyncMock(return_value=user)
+    call = SimpleNamespace(
+        context=SimpleNamespace(user_id="restricted-user"),
+        data={
+            "entity_id": ["vacuum.flow_2"],
+            FIELD_LED_MODE: "nightlight",
+        },
+    )
+
+    _async_register_services(hass)
+    handlers = {
+        registration.args[1]: registration.args[2]
+        for registration in hass.services.async_register.call_args_list
+    }
+
+    registry = MagicMock()
+    registry.async_get.return_value = SimpleNamespace(platform=DOMAIN)
+    with (
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+        pytest.raises(Unauthorized),
+    ):
+        asyncio.run(handlers[SERVICE_SET_DOCK_LIGHT](call))
+
+    user.permissions.check_entity.assert_called_once_with(
+        "vacuum.flow_2", "control"
+    )
+
+
+def test_set_dock_light_filters_indirect_non_vacuum_targets() -> None:
+    hass = MagicMock()
+    coordinator = SimpleNamespace(
+        client=SimpleNamespace(
+            robot_awake=True,
+            set_ambient_light_mode=AsyncMock(
+                return_value=SimpleNamespace(result_code=CommandResult.APPLIED)
+            ),
+        ),
+        config_entry=SimpleNamespace(
+            data={"product_key": "QxMSPG6VSO"},
+            options={},
+            title="Flow 2",
+        ),
+        async_request_refresh=AsyncMock(),
+    )
+    call = SimpleNamespace(
+        context=SimpleNamespace(user_id=None),
+        data={"device_id": ["flow-2-device"], FIELD_LED_MODE: "nightlight"},
+    )
+    registry = MagicMock()
+    registry.async_get.side_effect = {
+        "vacuum.flow_2": SimpleNamespace(platform=DOMAIN),
+        "sensor.flow_2_battery": SimpleNamespace(platform=DOMAIN),
+    }.get
+
+    _async_register_services(hass)
+    handlers = {
+        registration.args[1]: registration.args[2]
+        for registration in hass.services.async_register.call_args_list
+    }
+    extract_targets = AsyncMock(
+        return_value={"sensor.flow_2_battery", "vacuum.flow_2"}
+    )
+    get_coordinators = AsyncMock(return_value=[coordinator])
+
+    with (
+        patch(
+            "custom_components.narwal.service.async_extract_entity_ids",
+            new=extract_targets,
+        ),
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+        patch(
+            "custom_components.narwal._async_get_service_coordinators",
+            new=get_coordinators,
+        ),
+    ):
+        asyncio.run(handlers[SERVICE_SET_DOCK_LIGHT](call))
+
+    get_coordinators.assert_awaited_once_with(hass, ["vacuum.flow_2"])

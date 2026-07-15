@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import TypeAlias
 
 import voluptuous as vol
 
@@ -24,14 +23,18 @@ from homeassistant.helpers import entity_registry as er
 from .const import (
     CONF_MODEL,
     CONF_PRODUCT_KEY,
+    DOCK_LIGHT_SERVICE_MODES,
     DOMAIN,
     PLATFORMS,
     SERVICE_CLEAN_ROOMS,
+    SERVICE_SET_DOCK_LIGHT,
+    SERVICE_SET_LED,
+    is_dock_light_supported,
 )
 from .coordinator import NarwalCoordinator
 from .narwal_client import (
-    CommandResult,
     CleaningRoute,
+    CommandResult,
     FanLevel,
     MopHumidity,
     MopStrengthLevel,
@@ -41,7 +44,7 @@ from .narwal_client import (
 
 _LOGGER = logging.getLogger(__name__)
 
-NarwalConfigEntry: TypeAlias = ConfigEntry[NarwalCoordinator]
+type NarwalConfigEntry = ConfigEntry[NarwalCoordinator]
 
 FIELD_ROOMS = "rooms"
 FIELD_MODE = "mode"
@@ -50,6 +53,8 @@ FIELD_WATER = "water"
 FIELD_MOP_STRENGTH = "mop_strength"
 FIELD_PASSES = "passes"
 FIELD_ROUTE = "route"
+FIELD_ON = "on"
+FIELD_LED_MODE = "mode"
 
 WORK_MODE_OPTIONS: dict[str, WorkMode] = {
     "vacuum": WorkMode.VACUUM,
@@ -93,6 +98,17 @@ CLEAN_ROOMS_SCHEMA = vol.Schema(
         vol.Optional(FIELD_ROUTE): vol.In(ROUTE_OPTIONS),
     }
 )
+
+SET_DOCK_LIGHT_SCHEMA = vol.Schema(
+    {
+        vol.Optional(ATTR_ENTITY_ID): cv.entity_ids,
+        vol.Optional(ATTR_DEVICE_ID): cv.ensure_list,
+        vol.Optional(ATTR_AREA_ID): cv.ensure_list,
+        vol.Optional(FIELD_ON): cv.boolean,
+        vol.Optional(FIELD_LED_MODE): vol.In(DOCK_LIGHT_SERVICE_MODES),
+    }
+)
+
 
 def _normalise_room_ids(raw_rooms: list) -> list[int]:
     """Return room IDs from HA service data."""
@@ -188,22 +204,32 @@ async def _async_validate_clean_rooms_targets(
     if any(entity_id not in vacuum_entity_ids for entity_id in direct_entity_ids):
         raise HomeAssistantError("Target must be a Narwal vacuum entity")
 
+    await _async_validate_target_permissions(hass, call, vacuum_entity_ids)
+    return vacuum_entity_ids
+
+
+async def _async_validate_target_permissions(
+    hass: HomeAssistant,
+    call,
+    entity_ids: list[str],
+) -> None:
+    """Validate control permission for service target entities."""
+
     user_id = call.context.user_id
     if not user_id:
-        return vacuum_entity_ids
+        return
     user = await hass.auth.async_get_user(user_id)
     if user is None:
         raise UnknownUser(context=call.context, user_id=user_id)
     if user.is_admin:
-        return vacuum_entity_ids
-    for entity_id in vacuum_entity_ids:
+        return
+    for entity_id in entity_ids:
         if not user.permissions.check_entity(entity_id, POLICY_CONTROL):
             raise Unauthorized(
                 context=call.context,
                 entity_id=entity_id,
                 permission=POLICY_CONTROL,
             )
-    return vacuum_entity_ids
 
 
 def _async_register_services(hass: HomeAssistant) -> None:
@@ -237,9 +263,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 water=WATER_OPTIONS[call.data[FIELD_WATER]],
                 mop_strength=MOP_STRENGTH_OPTIONS[call.data[FIELD_MOP_STRENGTH]],
                 passes=call.data[FIELD_PASSES],
-                route=ROUTE_OPTIONS[call.data[FIELD_ROUTE]]
-                if FIELD_ROUTE in call.data
-                else None,
+                route=ROUTE_OPTIONS[call.data[FIELD_ROUTE]] if FIELD_ROUTE in call.data else None,
             )
             if resp.result_code == 0:
                 result_name = "ACCEPTED"
@@ -260,11 +284,83 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 )
             coordinator.async_set_updated_data(client.state)
 
+    async def async_set_dock_light(call) -> None:
+        entity_ids = list(await service.async_extract_entity_ids(call))
+        if not entity_ids and any(
+            key in call.data for key in (ATTR_ENTITY_ID, ATTR_DEVICE_ID, ATTR_AREA_ID)
+        ):
+            raise HomeAssistantError("Target does not contain a Narwal entity")
+        entity_ids = await _async_validate_clean_rooms_targets(hass, call, entity_ids)
+        coordinators = await _async_get_service_coordinators(
+            hass,
+            entity_ids,
+        )
+        command_sent = False
+        for coordinator in coordinators:
+            if not is_dock_light_supported(
+                coordinator.config_entry.data,
+                coordinator.config_entry.options,
+            ):
+                _LOGGER.warning(
+                    "Ignoring dock light command for unsupported device: %s",
+                    coordinator.config_entry.title,
+                )
+                continue
+            client = coordinator.client
+            if not client.robot_awake:
+                await client.wake(timeout=10.0)
+            if FIELD_LED_MODE in call.data:
+                mode_name = call.data[FIELD_LED_MODE]
+                mode = DOCK_LIGHT_SERVICE_MODES[mode_name]
+            elif FIELD_ON in call.data:
+                mode_name = "fireplace" if call.data[FIELD_ON] else "off"
+                mode = DOCK_LIGHT_SERVICE_MODES[mode_name]
+            else:
+                raise HomeAssistantError("Set either mode or on")
+            resp = await client.set_ambient_light_mode(mode)
+            command_sent = True
+            if resp is None:
+                raise HomeAssistantError("Narwal dock light command failed")
+            try:
+                result_name = CommandResult(resp.result_code).name
+            except ValueError:
+                result_name = f"UNKNOWN({resp.result_code})"
+            _LOGGER.info(
+                "Set dock light response: %s (code=%s), mode=%s",
+                result_name,
+                resp.result_code,
+                mode_name,
+            )
+            if resp.result_code not in (
+                0,
+                CommandResult.SUCCESS,
+                CommandResult.APPLIED,
+            ):
+                raise HomeAssistantError(
+                    f"Narwal dock light command failed: {result_name} "
+                    f"({resp.result_code})"
+                )
+            await coordinator.async_request_refresh()
+        if not command_sent:
+            raise HomeAssistantError("Target does not support the Narwal dock light")
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_CLEAN_ROOMS,
         async_clean_rooms,
         schema=CLEAN_ROOMS_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_DOCK_LIGHT,
+        async_set_dock_light,
+        schema=SET_DOCK_LIGHT_SCHEMA,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_SET_LED,
+        async_set_dock_light,
+        schema=SET_DOCK_LIGHT_SCHEMA,
     )
 
 
@@ -287,7 +383,9 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
         if CONF_MODEL not in new_data:
             new_data[CONF_MODEL] = "Narwal Flow"
         hass.config_entries.async_update_entry(
-            config_entry, data=new_data, version=2,
+            config_entry,
+            data=new_data,
+            version=2,
         )
         _LOGGER.info("Migration complete: product_key=%s", new_data[CONF_PRODUCT_KEY])
     return True

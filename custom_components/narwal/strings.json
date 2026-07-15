@@ -117,6 +117,9 @@
       },
       "passes": {
         "name": "Passes"
+      },
+      "dock_light": {
+        "name": "Dock light"
       }
     },
     "button": {
@@ -137,6 +140,11 @@
       },
       "dry_dock_bag": {
         "name": "Dry and disinfect dock bag"
+      }
+    },
+    "light": {
+      "dock_light": {
+        "name": "Dock light"
       }
     }
   }

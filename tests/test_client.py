@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from narwal_client.client import NarwalClient, NarwalConnectionError
-from narwal_client.const import CommandResult, WorkingStatus
+from narwal_client.const import AmbientLightCtrlType, CommandResult, WorkingStatus
 from narwal_client.models import CommandResponse, MapData, RoomInfo
 
 
@@ -142,9 +142,7 @@ class TestNarwalClientInit:
     def test_send_raw_without_connection_raises(self) -> None:
         client = NarwalClient("10.0.0.1")
         with pytest.raises(NarwalConnectionError):
-            asyncio.run(
-                client.send_raw("test/topic", b"\x08\x01")
-            )
+            asyncio.run(client.send_raw("test/topic", b"\x08\x01"))
 
 
 class TestBuildCleanPayloadV2:
@@ -231,9 +229,7 @@ class TestStartLegacyAndV2Fallback:
         client = self._connected_client()
         success = CommandResponse(result_code=CommandResult.SUCCESS)
 
-        with patch.object(
-            client, "send_command", new_callable=AsyncMock
-        ) as mock_send:
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = success
             result = asyncio.run(client.start())
 
@@ -243,17 +239,17 @@ class TestStartLegacyAndV2Fallback:
     def test_start_falls_back_to_v2_on_not_applicable(self) -> None:
         """NOT_APPLICABLE from legacy triggers v2 retry with cached rooms."""
         client = self._connected_client()
-        client.state.map_data = MapData(rooms=[
-            RoomInfo(room_id=11),
-            RoomInfo(room_id=14),
-        ])
+        client.state.map_data = MapData(
+            rooms=[
+                RoomInfo(room_id=11),
+                RoomInfo(room_id=14),
+            ]
+        )
 
         not_applicable = CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
         success = CommandResponse(result_code=CommandResult.SUCCESS)
 
-        with patch.object(
-            client, "send_command", new_callable=AsyncMock
-        ) as mock_send:
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
             mock_send.side_effect = [not_applicable, success]
             result = asyncio.run(client.start())
 
@@ -272,14 +268,35 @@ class TestStartLegacyAndV2Fallback:
 
         not_applicable = CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
 
-        with patch.object(
-            client, "send_command", new_callable=AsyncMock
-        ) as mock_send:
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = not_applicable
             result = asyncio.run(client.start())
 
         mock_send.assert_awaited_once()  # no v2 retry without rooms
         assert result.result_code == CommandResult.NOT_APPLICABLE
+
+
+class TestAmbientLight:
+    """Tests for ambient light commands."""
+
+    def _connected_client(self) -> NarwalClient:
+        client = NarwalClient("127.0.0.1")
+        client._ws = AsyncMock()
+        client._connected = True
+        return client
+
+    def test_applied_result_code_is_returned_without_retry(self) -> None:
+        """Dock light command code 6 is a known applied response."""
+        client = self._connected_client()
+        applied = CommandResponse(result_code=CommandResult.APPLIED)
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = applied
+            result = asyncio.run(client.set_ambient_light_mode(AmbientLightCtrlType.NIGHT_LIGHT))
+
+        assert result is applied
+        assert not result.success
+        mock_send.assert_awaited_once()
 
     def test_start_skips_v2_when_map_has_no_room_ids(self) -> None:
         """Map present but every room_id is 0 — don't send junk."""
@@ -288,9 +305,7 @@ class TestStartLegacyAndV2Fallback:
 
         not_applicable = CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
 
-        with patch.object(
-            client, "send_command", new_callable=AsyncMock
-        ) as mock_send:
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = not_applicable
             result = asyncio.run(client.start())
 

@@ -83,6 +83,7 @@ TOPIC_CMD_FORCE_END = "task/force_end"
 TOPIC_CMD_CANCEL = "task/cancel"
 
 # Supply/dock
+TOPIC_CMD_AMBIENT_LIGHT_CTRL = "supply/ambient_light_ctrl"
 TOPIC_CMD_RECALL = "supply/recall"
 TOPIC_CMD_WASH_MOP = "supply/wash_mop"
 TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS = "supply/wash_mop_by_robot_status"
@@ -156,6 +157,16 @@ class CommandResult(IntEnum):
     NOT_APPLICABLE = 2  # e.g., set_fan_level when not cleaning
     CONFLICT = 3  # e.g., recall when already recalling
     NOT_READY = 4  # clean/start_clean while not docked (robot in STANDBY)
+    APPLIED = 6  # observed on ambient light commands after the dock light changes
+
+
+class AmbientLightCtrlType(IntEnum):
+    """Base station ambient light mode."""
+
+    OFF = 0
+    NIGHT_LIGHT = 1
+    WINTER_WARMTH = 2
+    PURPLE_LIGHT = 3
 
 
 class WorkingStatus(IntEnum):
