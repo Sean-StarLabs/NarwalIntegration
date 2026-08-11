@@ -79,6 +79,7 @@ MAP_ROTATION_DEFAULT = 0  # degrees clockwise; renderer accepts 0/90/180/270
 MAP_ZOOM_DEFAULT = 1.0  # renderer clamps to 1.0–2.0
 
 CONF_DOCK_LIGHT_SUPPORTED = "dock_light_supported"
+SERVICE_CLEAN_ROOMS = "clean_rooms"
 
 DOCK_LIGHT_PRODUCT_KEYS = {"QxMSPG6VSO", "iSuVlI1If2"}
 
