@@ -107,11 +107,32 @@ Shipped in v1.0.2 ([#50](https://github.com/sjmotew/NarwalIntegration/pull/50)) 
 
 ### Setup
 
+Home Assistant discovers Narwal robots on the local network, so in most cases the
+robot appears on its own under **Settings > Devices & Services** as a discovered
+device — click **Configure**, pick your model, and you're done. The IP is filled in
+for you.
+
+To add one by hand, or if discovery doesn't find it:
+
 1. **Settings > Devices & Services > Add Integration** > search "Narwal"
 2. Enter your vacuum's IP address and select your model
 3. Entities are created automatically
 
-> **Tip:** Assign a static IP to your vacuum in your router.
+> **Tip:** Assign a static IP to your vacuum in your router. Discovery re-points an
+> existing entry when the address changes, but a static lease avoids the round trip.
+
+<details>
+<summary>How discovery finds the robot</summary>
+
+The robot advertises `_narwal_sweeper._tcp.local.` over mDNS, as an instance named
+`_app_wss_server_<6hex>` with hostname `NARWAL_<6hex>.local.` on port 9002. Those six
+hex characters are the tail of the robot's device ID, which is how a discovery is
+matched to a robot you already added manually.
+
+Some networks drop multicast between VLANs or under wireless client isolation, and
+mDNS then never arrives. DHCP hostname matching on `NARWAL_*` covers that case.
+
+</details>
 
 ### Room cleaning setup (required before `vacuum.clean_area` works)
 

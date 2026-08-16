@@ -1,5 +1,6 @@
 {
   "config": {
+    "flow_title": "Aspirateur Narwal ({host})",
     "step": {
       "user": {
         "title": "Connexion à l’aspirateur Narwal",

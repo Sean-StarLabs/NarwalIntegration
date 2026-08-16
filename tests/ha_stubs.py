@@ -139,6 +139,31 @@ def install() -> None:
     ha_ep = _mod("homeassistant.helpers.entity_platform", ha_helpers)
     ha_ep.AddConfigEntryEntitiesCallback = MagicMock  # type: ignore[attr-defined]
 
+    # homeassistant.helpers.service_info.* — discovery payloads (zeroconf, DHCP)
+    ha_si = _mod("homeassistant.helpers.service_info", ha_helpers)
+
+    class _ZeroconfServiceInfo:
+        """Stub for ZeroconfServiceInfo (only the fields the flow reads)."""
+
+        def __init__(self, host: str = "", hostname: str = "", port: int = 0) -> None:
+            self.host = host
+            self.hostname = hostname
+            self.port = port
+
+    class _DhcpServiceInfo:
+        """Stub for DhcpServiceInfo (only the fields the flow reads)."""
+
+        def __init__(self, ip: str = "", hostname: str = "", macaddress: str = "") -> None:
+            self.ip = ip
+            self.hostname = hostname
+            self.macaddress = macaddress
+
+    ha_si_zc = _mod("homeassistant.helpers.service_info.zeroconf", ha_si)
+    ha_si_zc.ZeroconfServiceInfo = _ZeroconfServiceInfo  # type: ignore[attr-defined]
+
+    ha_si_dhcp = _mod("homeassistant.helpers.service_info.dhcp", ha_si)
+    ha_si_dhcp.DhcpServiceInfo = _DhcpServiceInfo  # type: ignore[attr-defined]
+
     ha_rs = _mod("homeassistant.helpers.restore_state", ha_helpers)
 
     class _RestoreEntity:

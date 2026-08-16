@@ -4,10 +4,15 @@
   "codeowners": ["@sjmotew"],
   "config_flow": true,
   "dependencies": [],
+  "dhcp": [
+    { "hostname": "narwal_*" },
+    { "hostname": "NARWAL_*" }
+  ],
   "documentation": "https://github.com/sjmotew/NarwalIntegration",
   "integration_type": "device",
   "iot_class": "local_push",
   "issue_tracker": "https://github.com/sjmotew/NarwalIntegration/issues",
   "requirements": ["bbpb>=1.4.0", "Pillow>=9.0.0"],
-  "version": "1.0.3"
+  "version": "1.0.3",
+  "zeroconf": ["_narwal_sweeper._tcp.local."]
 }
