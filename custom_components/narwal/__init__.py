@@ -8,8 +8,15 @@ from typing import TypeAlias
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import device_registry as dr
 
-from .const import CONF_MODEL, CONF_PRODUCT_KEY, PLATFORMS
+from .const import (
+    CONF_MODEL,
+    CONF_PRODUCT_KEY,
+    DOMAIN,
+    PLATFORMS,
+    configured_model_name,
+)
 from .coordinator import NarwalCoordinator
 from .narwal_client import NarwalConnectionError
 
@@ -50,6 +57,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bo
     entry.runtime_data = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+
+    device_registry = dr.async_get(hass)
+    device = device_registry.async_get_device(
+        identifiers={(DOMAIN, entry.data["device_id"])}
+    )
+    if device is not None:
+        device_registry.async_update_device(
+            device.id,
+            model=configured_model_name(entry.data),
+            sw_version=coordinator.client.state.firmware_version or None,
+        )
 
     return True
 

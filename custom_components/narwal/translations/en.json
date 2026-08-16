@@ -9,6 +9,13 @@
           "port": "Port",
           "model": "Model"
         }
+      },
+      "device_id": {
+        "title": "Enter Device ID",
+        "description": "Automatic discovery is unavailable. Enter the vacuum's 32-character cloud-assigned Device ID. See the integration documentation for retrieval options.",
+        "data": {
+          "device_id": "Device ID"
+        }
       }
     },
     "error": {
