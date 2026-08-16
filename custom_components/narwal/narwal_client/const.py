@@ -29,8 +29,9 @@ KNOWN_PRODUCT_KEYS = [
     # AX26 — sold as both "Freo Z10 Turbo" (@romedtino, #40) and "Freo Z10 Pro"
     # (@shin906710, #70); same key, same FW v01.02.00.15, so one platform.
     "qV6BujoYLz",   # AX26 — Freo Z10 Pro / Turbo (confirmed local WebSocket)
-    # Confirmed cloud-only (port 9002 open but no local broadcasts)
-    "BYWBPqSxeC",   # CX7  — Freo Z Ultra (cloud-only, confirmed by @gabrielozcomidi)
+    # CX7 answers addressed local queries but emits no broadcasts.
+    "hEA7OEshlx",   # CX7/J5 — Freo Z Ultra (confirmed local WebSocket)
+    "BYWBPqSxeC",   # Previously attributed to CX7; retained for discovery coverage
     # Confirmed cloud-only (ZeroMQ port 6789, no WebSocket)
     "LnugwMG9ss",   # AX18 — Freo X Ultra (cloud-only, confirmed by @ManivannanBA)
     "5OMbqk58Sc",   # AX19 — Freo X Ultra
@@ -50,7 +51,6 @@ KNOWN_PRODUCT_KEYS = [
     "pcbfh2ldvx",   # X31
     "EHf6cRNRGT",   # J4 / J4Pure (APK, contributed by @northwestsupra)
     "6NjIDYxBXb",   # J4Lite (APK, contributed by @northwestsupra)
-    "hEA7OEshlx",   # J5  (APK, contributed by @northwestsupra)
     "CGjuB6dzq7",   # JX — Narwal JX (APK, contributed by @ciaoly, #42)
     "cUlfJN5JYP",   # Unknown model (APK, contributed by @northwestsupra)
 ]

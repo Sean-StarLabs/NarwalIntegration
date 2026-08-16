@@ -41,10 +41,10 @@ This integration uses a **local WebSocket connection on port 9002**. Only models
 | **Freo Z10 Pro / Turbo** (AX26) | **Working** | Same product key and firmware (v01.02.00.15) reported under both names ([#40](https://github.com/sjmotew/NarwalIntegration/issues/40), [#70](https://github.com/sjmotew/NarwalIntegration/issues/70)). Room cleaning confirmed working with [#49](https://github.com/sjmotew/NarwalIntegration/pull/49). |
 | **Freo X10 Pro** (AX15) | **Working** | Community confirmed ([#12](https://github.com/sjmotew/NarwalIntegration/issues/12)) |
 | **Narwal JX** | **Unconfirmed** | Product key known, no working report yet — testers welcome ([#42](https://github.com/sjmotew/NarwalIntegration/issues/42)) |
-| **Freo Z Ultra** (CX7) | **Not Compatible** | Port 9002 open but no local broadcasts; cloud-only ([#5](https://github.com/sjmotew/NarwalIntegration/issues/5), confirmed by @Folg0re) |
+| **Freo Z Ultra** (hardware CX7, cloud identity J5) | **Working on tested variant** | Confirmed with product key `hEA7OEshlx` on firmware `v01.13.11.02`. Requires the cloud-assigned Device ID because this model does not broadcast. Base status, maps, consumables, and commands work locally; live cleaning position/progress is unavailable. See the variant note below. |
 | **Freo X Ultra** (AX18/AX19) | **Not Compatible** | Uses ZeroMQ (port 6789) + Tuya cloud, not WebSocket ([#4](https://github.com/sjmotew/NarwalIntegration/issues/4)) |
 | **Freo X Plus** | **Not Compatible** | Cloud-only — no local API |
-| **Narwal J-series** (J1/J4/J5) | **Not Compatible** | J1: HTTP-only (port 8080); J4/J5: cloud-only (Tuya) |
+| **Narwal J-series** (J1/J4) | **Not Compatible** | J1: HTTP-only (port 8080); J4: cloud-only (Tuya). J5 is the cloud identity of the supported global CX7 listed above. |
 
 Models marked **Not Compatible** use a different protocol or are cloud-only. This is a hardware/firmware limitation.
 
@@ -86,7 +86,7 @@ Shipped in v1.0.2 ([#50](https://github.com/sjmotew/NarwalIntegration/pull/50)) 
 - **Ambient light** — off, fireplace, nightlight, purple, on models with a dock light ([#61](https://github.com/sjmotew/NarwalIntegration/pull/61), v1.0.2)
 
 ### Connectivity
-- Real-time WebSocket push updates
+- Real-time WebSocket push updates on broadcasting models
 - Auto-reconnect with exponential backoff
 - Wake system for sleeping robots + keepalive heartbeat
 - 60-second polling fallback
@@ -135,6 +135,39 @@ lowercases hostnames before matching, so the declared pattern is `narwal_*`.
 
 </details>
 
+The Freo Z Ultra (CX7) also requires its 32-character cloud-assigned Device ID. Selecting that
+model opens a dedicated Device ID page; other models use automatic discovery. The integration
+itself never contacts the cloud.
+
+#### Finding the Device ID
+
+The Narwal app does not currently display this value. It is the 32-character hexadecimal
+identifier used as the second component of a Narwal MQTT topic:
+
+```text
+/<product_key>/<device_id>/status/working_status
+```
+
+You can obtain it from one of these sources:
+
+- The `deviceId` field returned by Narwal's authenticated account endpoint
+  `/user-device-platform-server/device-info/getDeviceInfoList`.
+- A Narwal MQTT capture, where it appears in the topic position shown above.
+- The stored device identifier or diagnostics from an existing Narwal cloud integration.
+
+Account and MQTT tooling is deliberately kept separate from this integration so Home Assistant
+never receives your Narwal credentials. Do not post the Device ID publicly; treat it as a device
+identifier even though it is not an account password or access token.
+
+#### CX7 variants
+
+Local control is currently verified on one global Freo Z Ultra whose cloud identity is J5,
+product key is `hEA7OEshlx`, and firmware is `v01.13.11.02`. Issue
+[#5](https://github.com/sjmotew/NarwalIntegration/issues/5) also contains reports of firmware
+`1.12.10.02` and a `BYWBPqSxeC` identity. That key remains in discovery coverage, but has not
+been proven to accept addressed local commands. Reports from additional regions and firmware
+versions are needed before support can be considered universal.
+
 ### Room cleaning setup (required before `vacuum.clean_area` works)
 
 Home Assistant's room cleaning targets **HA areas**, not the robot's own rooms, so there is a one-time mapping step. Without it the service fails with *"Area mapping is not configured for vacuum.&lt;entity&gt;"*.
@@ -177,6 +210,7 @@ Room names come from the robot's map — rooms you named in the Narwal app keep 
 
 - **Wake from deep sleep is unreliable** — robot may not respond after long idle periods. Opening the Narwal app briefly can help.
 - **Single connection** — close the Narwal app before using HA to avoid conflicts.
+- **CX7 has no live stream** — it never broadcasts, so cleaning position and progress do not update live. Polled base status, battery, dock state, maps, consumables, and commands remain available. State follows the 60-second poll, so the vacuum entity reaches `cleaning` up to a minute after the robot starts (31 s in a recorded run), and `cleaning_time`, `cleaning_area` and `current_room` stay `unknown` throughout a clean because they are only carried in broadcasts.
 - **Fan speed is set-only** — robot doesn't broadcast its current level.
 - **All cleaning requires the dock** — `clean/start_clean` returns `NOT_READY` if the robot is not docked when the command is sent. This applies to whole-house `vacuum.start` as well as room cleans.
 - **Room cleaning needs a segment-to-area mapping** — `vacuum.clean_area` targets Home Assistant *areas*, not robot rooms, and the mapping editor is on the **entity**, not the integration or device page. See [Room cleaning setup](#room-cleaning-setup-required-before-vacuumclean_area-works). Without it the service fails with "Area mapping is not configured".

@@ -48,13 +48,17 @@ the hardware, not a setting:
 
 | Transport | Port | Models observed | Local control? |
 |---|---|---|---|
-| WebSocket | 9002 | Flow (AX12), Flow 2, Freo Z10 Pro/Turbo (AX26), Freo X10 Pro (AX15), Freo Z10 Ultra (CX4) | Yes — this document |
+| WebSocket | 9002 | Flow (AX12), Flow 2, Freo Z10 Pro/Turbo (AX26), Freo X10 Pro (AX15), Freo Z10 Ultra (CX4), Freo Z Ultra (hardware CX7, cloud identity J5) | Yes — this document |
 | ZeroMQ (ZMTP 2.0) | 6789 | Freo X Ultra (AX18/AX19) | No — cloud-mediated |
-| Cloud only | 9002 open, no local broadcasts | Freo Z Ultra (CX7) | No |
 
-`nmap -p 9002 <robot_ip>` is the fastest triage. An open 9002 that never broadcasts is the
-cloud-only case, which looks identical to a working robot until you wait for data that never
-arrives. See the README's compatibility table for the current per-model state.
+`nmap -p 9002 <robot_ip>` is the fastest triage. Most supported models broadcast when awake,
+but the CX7 is an exception: it only responds to topics containing product key `hEA7OEshlx`
+and its real cloud-assigned device ID. See the README's compatibility table for the current
+per-model state.
+
+This identity is verified for one global CX7/J5 on firmware `v01.13.11.02`. Earlier reports in
+issue #5 associated CX7 with `BYWBPqSxeC` and firmware `1.12.10.02`; that key did not answer
+addressed probes on the verified robot, and remains an unresolved regional or platform variant.
 
 ---
 
@@ -132,7 +136,9 @@ The product key identifies the model (`QoEsI5qYXO` = AX12 Narwal Flow); the devi
 per-robot. Both are returned by `common/get_device_info`, but there's a bootstrap problem —
 you need the device ID to build a topic, and you need a topic to ask for the device ID. This
 integration resolves it by cycling known product-key prefixes during the wake burst and
-reading the device ID out of the first broadcast topic the robot emits.
+reading the device ID out of the first broadcast topic the robot emits. The CX7 never
+broadcasts and ignores incorrectly addressed requests, so its cloud-assigned device ID must
+be supplied before connecting.
 
 ### Result codes
 
@@ -153,9 +159,12 @@ so treat a non-integer field 1 as a successful data response.
 
 ## 4. Sleep, wake, and keepalive
 
-The robot sleeps aggressively. While awake it broadcasts status every ~1.5 s; while asleep it
-sends nothing and ignores most commands — including map requests, which is the usual reason
-rooms fail to appear in a fresh install.
+Most robots sleep aggressively. While awake they broadcast status every ~1.5 s; while asleep
+they send nothing and ignore most commands — including map requests, which is the usual reason
+rooms fail to appear in a fresh install. The CX7 never broadcasts and instead relies on
+addressed polling, including `status/get_device_base_status`. Clients must treat successful
+field5 responses as reachability for such models rather than waiting for a broadcast, renewing
+broadcast subscriptions, or reconnecting when broadcasts do not arrive.
 
 Working model:
 

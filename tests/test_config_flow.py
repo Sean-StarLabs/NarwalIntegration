@@ -17,6 +17,10 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from custom_components.narwal.config_flow import NarwalConfigFlow  # noqa: E402
+from custom_components.narwal.const import (  # noqa: E402
+    NARWAL_MODELS,
+    NO_BROADCAST_PRODUCT_KEYS,
+)
 from custom_components.narwal.narwal_client import NarwalConnectionError  # noqa: E402
 
 AbortFlow = sys.modules["homeassistant.data_entry_flow"].AbortFlow
@@ -165,6 +169,94 @@ class TestNarwalConfigFlow:
         entry_kwargs = flow.async_create_entry.call_args.kwargs
         assert entry_kwargs["data"]["product_key"] == "DrzDKQ0MU8"
         assert "Narwal DrzDKQ0MU8" in entry_kwargs["title"]
+
+    async def test_non_broadcast_model_opens_device_id_step(self) -> None:
+        """A non-broadcast model requests its identity without connecting."""
+        flow = self._make_flow()
+        model = next(
+            label
+            for label, product_key in NARWAL_MODELS.items()
+            if product_key in NO_BROADCAST_PRODUCT_KEYS
+        )
+
+        with patch("custom_components.narwal.config_flow.NarwalClient") as client_class:
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.70",
+                    "port": 9002,
+                    "model": model,
+                }
+            )
+
+        client_class.assert_not_called()
+        call_kwargs = flow.async_show_form.call_args.kwargs
+        assert call_kwargs["step_id"] == "device_id"
+        assert call_kwargs["errors"] == {}
+
+    async def test_non_broadcast_device_id_skips_discovery(self) -> None:
+        """A non-broadcast model validates an exactly addressed request."""
+        flow = self._make_flow()
+        device_id = "0123456789abcdef0123456789abcdef"
+        model, product_key = next(
+            (label, key)
+            for label, key in NARWAL_MODELS.items()
+            if key in NO_BROADCAST_PRODUCT_KEYS
+        )
+        mock_client = AsyncMock()
+        mock_client.topic_prefix = f"/{product_key}"
+        mock_device_info = MagicMock()
+        mock_device_info.device_id = device_id
+        mock_client.get_device_info.return_value = mock_device_info
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient",
+            return_value=mock_client,
+        ) as client_class:
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.70",
+                    "port": 9002,
+                    "model": model,
+                }
+            )
+            await flow.async_step_device_id(user_input={"device_id": f" {device_id} "})
+
+        client_class.assert_called_once_with(
+            host="10.0.0.70",
+            port=9002,
+            device_id=device_id,
+            topic_prefix=f"/{product_key}",
+        )
+        mock_client.connect.assert_awaited_once()
+        mock_client.discover_device_id.assert_not_awaited()
+        mock_client.drain_ws_buffer.assert_not_awaited()
+        mock_client.get_device_info.assert_awaited_once()
+        entry_kwargs = flow.async_create_entry.call_args.kwargs
+        assert entry_kwargs["data"]["device_id"] == device_id
+        assert entry_kwargs["data"]["product_key"] == product_key
+        mock_client.disconnect.assert_awaited_once()
+
+    async def test_failed_auto_discovery_opens_device_id_step(self) -> None:
+        """Any model can fall back to an exactly addressed setup request."""
+        flow = self._make_flow()
+        mock_client = AsyncMock()
+        mock_client.discover_device_id.side_effect = TimeoutError
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient",
+            return_value=mock_client,
+        ):
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.80",
+                    "port": 9002,
+                    "model": "Narwal Flow",
+                }
+            )
+
+        call_kwargs = flow.async_show_form.call_args.kwargs
+        assert call_kwargs["step_id"] == "device_id"
+        mock_client.disconnect.assert_awaited_once()
 
 
 class TestDiscovery:

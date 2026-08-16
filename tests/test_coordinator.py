@@ -17,6 +17,7 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
+from custom_components.narwal.const import NO_BROADCAST_PRODUCT_KEYS  # noqa: E402
 from custom_components.narwal.coordinator import (
     TOPIC_RESUBSCRIBE_AFTER,
     TOPIC_SUBSCRIPTION_TTL,
@@ -25,6 +26,29 @@ from custom_components.narwal.coordinator import (
 from custom_components.narwal.narwal_client import NarwalConnectionError, NarwalState  # noqa: E402
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
+
+
+def test_non_broadcast_product_key_configures_polling_client() -> None:
+    """Coordinator propagates the product capability to the client."""
+    product_key = next(iter(NO_BROADCAST_PRODUCT_KEYS))
+    entry = MagicMock()
+    entry.data = {
+        "host": "10.0.0.70",
+        "port": 9002,
+        "device_id": "device-id",
+        "product_key": product_key,
+    }
+
+    with patch("custom_components.narwal.coordinator.NarwalClient") as client_class:
+        NarwalCoordinator(MagicMock(), entry)
+
+    client_class.assert_called_once_with(
+        host="10.0.0.70",
+        port=9002,
+        device_id="device-id",
+        topic_prefix=f"/{product_key}",
+        supports_broadcasts=False,
+    )
 
 
 class TestCoordinatorResilience:
@@ -195,6 +219,7 @@ class TestTopicSubscriptionRenewal:
         c.client.get_map = AsyncMock()
         c.client.get_consumable_info = AsyncMock()
         c.client.subscribe_to_topics = AsyncMock()
+        c.client.supports_broadcasts = True
         c.client.state.map_data = MagicMock()  # skip the map-retry branch
         c._consecutive_failures = 0
         c._max_failures = 5
@@ -220,6 +245,16 @@ class TestTopicSubscriptionRenewal:
         """A fresh subscription is not re-sent on every poll."""
         c = self._coordinator(time.monotonic())
         await c._async_update_data()
+        c.client.subscribe_to_topics.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_broadcast_model_does_not_subscribe(self) -> None:
+        """Polling-only models never renew an unsupported broadcast subscription."""
+        c = self._coordinator(time.monotonic() - (TOPIC_RESUBSCRIBE_AFTER + 30))
+        c.client.supports_broadcasts = False
+
+        await c._async_update_data()
+
         c.client.subscribe_to_topics.assert_not_awaited()
 
     @pytest.mark.asyncio

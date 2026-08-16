@@ -23,7 +23,7 @@ from .narwal_client import (
 )
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
 
-from .const import DOMAIN
+from .const import DOMAIN, NO_BROADCAST_PRODUCT_KEYS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -82,11 +82,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         )
         product_key = entry.data.get("product_key")
         topic_prefix = f"/{product_key}" if product_key else None
+        supports_broadcasts = product_key not in NO_BROADCAST_PRODUCT_KEYS
         self.client = NarwalClient(
             host=entry.data["host"],
             port=entry.data["port"],
             device_id=entry.data.get("device_id", ""),
             topic_prefix=topic_prefix,
+            supports_broadcasts=supports_broadcasts,
         )
         self.clean_settings = CleanSettings()
         self._listen_task: asyncio.Task[None] | None = None
@@ -134,11 +136,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         # Subscribe to broadcast topics (display_map, working_status, etc.)
         # Must be sent before listener starts so display_map flows during cleaning.
-        try:
-            await self.client.subscribe_to_topics()
-            self._last_topic_subscribe = time.monotonic()
-        except Exception:
-            _LOGGER.debug("Could not send topic subscription at startup")
+        if self.client.supports_broadcasts:
+            try:
+                await self.client.subscribe_to_topics()
+                self._last_topic_subscribe = time.monotonic()
+            except Exception:
+                _LOGGER.debug("Could not send topic subscription at startup")
 
         self.async_set_updated_data(self.client.state)
 
@@ -245,15 +248,18 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             _LOGGER.debug("Map fetch failed — will retry on next broadcast")
             self._map_fetch_pending = False
             return
-        try:
-            await self.client.subscribe_to_topics()
-            self._last_topic_subscribe = time.monotonic()
-        except Exception:
-            _LOGGER.debug("Topic subscription failed after map load")
+        if self.client.supports_broadcasts:
+            try:
+                await self.client.subscribe_to_topics()
+                self._last_topic_subscribe = time.monotonic()
+            except Exception:
+                _LOGGER.debug("Topic subscription failed after map load")
         self.async_set_updated_data(self.client.state)
 
     async def _resub_topics(self) -> None:
         """Re-send topic subscription to recover display_map during cleaning."""
+        if not self.client.supports_broadcasts:
+            return
         try:
             await self.client.subscribe_to_topics()
             self._last_topic_subscribe = time.monotonic()
@@ -312,7 +318,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         # us we are cleaning, so gating renewal on that state deadlocks — the
         # subscription expires, the robot goes quiet, the entity stays "docked", and
         # nothing ever re-subscribes (#73).
-        if time.monotonic() - self._last_topic_subscribe > TOPIC_RESUBSCRIBE_AFTER:
+        if (
+            self.client.supports_broadcasts
+            and time.monotonic() - self._last_topic_subscribe > TOPIC_RESUBSCRIBE_AFTER
+        ):
             try:
                 await self.client.subscribe_to_topics()
                 self._last_topic_subscribe = time.monotonic()

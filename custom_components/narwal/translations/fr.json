@@ -10,6 +10,13 @@
           "port": "Port",
           "model": "Modèle"
         }
+      },
+      "device_id": {
+        "title": "Saisir l’identifiant de l’appareil",
+        "description": "La découverte automatique n’est pas disponible. Saisissez l’identifiant de 32 caractères attribué à l’aspirateur dans le cloud. Consultez la documentation de l’intégration pour savoir comment l’obtenir.",
+        "data": {
+          "device_id": "Identifiant de l’appareil"
+        }
       }
     },
     "error": {

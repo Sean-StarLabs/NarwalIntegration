@@ -27,11 +27,26 @@ NARWAL_MODELS: dict[str, str] = {
     # "Z10 Turbo" (@romedtino, #40) and "Z10 Pro" (@shin906710, #70), same product_key.
     "Narwal Freo Z10 Pro / Turbo": "qV6BujoYLz",
     "Narwal Freo X10 Pro": "CNbforyZWI",
+    "Narwal Freo Z Ultra (CX7)": "hEA7OEshlx",
     "Other / Auto-detect": "auto",
 }
 
+CONF_DEVICE_ID = "device_id"
 CONF_MODEL = "model"
 CONF_PRODUCT_KEY = "product_key"
+
+NO_BROADCAST_PRODUCT_KEYS = {"hEA7OEshlx"}
+
+
+def configured_model_name(data: dict) -> str:
+    """Return device-registry model metadata for a config entry."""
+    model = data.get(CONF_MODEL)
+    if not model or model == "Narwal Flow":
+        return MODEL
+    if model == "Other / Auto-detect":
+        product_key = data.get(CONF_PRODUCT_KEY)
+        return f"Unknown ({product_key})" if product_key else "Unknown"
+    return model.removeprefix("Narwal ")
 
 PLATFORMS: list[Platform] = [
     Platform.VACUUM,

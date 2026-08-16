@@ -10,6 +10,9 @@ from custom_components.narwal.const import (  # noqa: E402
     CONF_DOCK_LIGHT_SUPPORTED,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
+    NARWAL_MODELS,
+    NO_BROADCAST_PRODUCT_KEYS,
+    configured_model_name,
     is_dock_light_supported,
 )
 
@@ -44,3 +47,25 @@ def test_dock_light_option_override() -> None:
         {CONF_PRODUCT_KEY: "QxMSPG6VSO"},
         {CONF_DOCK_LIGHT_SUPPORTED: False},
     )
+
+
+def test_cx7_uses_j5_product_key_and_requires_addressed_setup() -> None:
+    """CX7 uses the live-tested J5 key and cannot use broadcast discovery."""
+    product_key = NARWAL_MODELS["Narwal Freo Z Ultra (CX7)"]
+    assert product_key == "hEA7OEshlx"
+    assert product_key in NO_BROADCAST_PRODUCT_KEYS
+
+
+def test_configured_model_name_uses_selected_cx7_model() -> None:
+    """Device metadata reflects the configured model instead of always showing Flow."""
+    assert configured_model_name(
+        {
+            CONF_MODEL: "Narwal Freo Z Ultra (CX7)",
+            CONF_PRODUCT_KEY: "hEA7OEshlx",
+        }
+    ) == "Freo Z Ultra (CX7)"
+
+
+def test_configured_model_name_preserves_legacy_flow_name() -> None:
+    """Existing Flow entries retain their hardware model identifier."""
+    assert configured_model_name({CONF_MODEL: "Narwal Flow"}) == "Flow (AX12)"

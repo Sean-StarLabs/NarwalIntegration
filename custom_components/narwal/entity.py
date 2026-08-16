@@ -5,7 +5,7 @@ from __future__ import annotations
 from homeassistant.helpers.device_registry import DeviceInfo
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .const import DOMAIN, MANUFACTURER, MODEL
+from .const import DOMAIN, MANUFACTURER, configured_model_name
 from .coordinator import NarwalCoordinator
 
 
@@ -21,7 +21,7 @@ class NarwalEntity(CoordinatorEntity[NarwalCoordinator]):
         self._attr_device_info = DeviceInfo(
             identifiers={(DOMAIN, device_id)},
             manufacturer=MANUFACTURER,
-            model=MODEL,
+            model=configured_model_name(coordinator.config_entry.data),
             sw_version=coordinator.client.state.firmware_version or None,
             name=coordinator.config_entry.title,
         )

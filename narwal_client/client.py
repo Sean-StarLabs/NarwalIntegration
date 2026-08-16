@@ -149,12 +149,14 @@ class NarwalClient:
         port: int = DEFAULT_PORT,
         device_id: str = "",
         topic_prefix: str | None = None,
+        supports_broadcasts: bool = True,
     ) -> None:
         self.host = host
         self.port = port
         self.device_id = device_id
         self.url = f"ws://{host}:{port}"
         self.topic_prefix = topic_prefix or DEFAULT_TOPIC_PREFIX
+        self.supports_broadcasts = supports_broadcasts
         self.state = NarwalState()
         self.on_state_update: Callable[[NarwalState], None] | None = None
         self.on_message: Callable[[NarwalMessage], None] | None = None
@@ -166,8 +168,9 @@ class NarwalClient:
         self._connected = asyncio.Event()
         self._should_reconnect = True
         self._listener_active = False  # True when start_listening() is running recv loop
-        self._robot_awake = False  # True once we receive a broadcast
+        self._robot_awake = False  # True after a broadcast or addressed response
         self._last_broadcast_time: float = 0.0  # monotonic time of last broadcast
+        self._last_response_time: float = 0.0  # monotonic time of last addressed response
         self._last_display_map_time: float = 0.0  # monotonic time of last display_map
         # Queue for field5 command responses
         self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
@@ -185,8 +188,14 @@ class NarwalClient:
 
     @property
     def robot_awake(self) -> bool:
-        """Return True if the robot is actively broadcasting."""
+        """Return True if the robot has confirmed local reachability."""
         return self._robot_awake
+
+    def _mark_response_received(self) -> None:
+        """Record an addressed response as reachability for non-broadcast models."""
+        self._last_response_time = time.monotonic()
+        if not self.supports_broadcasts:
+            self._robot_awake = True
 
     @property
     def last_broadcast_age(self) -> float:
@@ -412,7 +421,8 @@ class NarwalClient:
                     # interrupt, but only if we send commands before it
                     # expires.  Don't wait for the keepalive loop's first
                     # tick (15s delay would be too late).
-                    await self._send_wake_burst()
+                    if self.supports_broadcasts:
+                        await self._send_wake_burst()
 
                 retry_delay = RECONNECT_INITIAL_DELAY  # reset on success
                 self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
@@ -465,6 +475,7 @@ class NarwalClient:
 
         # Field5 (0x2a) messages are command responses
         if msg.field_tag == PROTOBUF_FIELD5_TAG:
+            self._mark_response_received()
             _LOGGER.debug("Field5 response routed to queue: %s", msg.short_topic)
             await self._response_queue.put(msg)
             return
@@ -668,8 +679,10 @@ class NarwalClient:
                 been reset yet.
 
         Returns:
-            True if the robot is awake (received broadcasts), False otherwise.
+            True if the robot has confirmed local reachability, False otherwise.
         """
+        if not self.supports_broadcasts:
+            return self.connected
         if self._robot_awake and not force:
             return True
 
@@ -738,6 +751,9 @@ class NarwalClient:
                 await asyncio.sleep(KEEPALIVE_INTERVAL)
                 if not self.connected or not self._ws:
                     break
+
+                if not self.supports_broadcasts:
+                    continue
 
                 # Check if broadcasts have gone stale (robot fell back asleep)
                 if (
@@ -873,6 +889,8 @@ class NarwalClient:
             else:
                 # No listener — read directly from websocket
                 msg = await self._wait_for_field5_response(timeout)
+
+            self._mark_response_received()
 
         # Decode response
         try:
@@ -1374,6 +1392,7 @@ class NarwalClient:
             firmware_version=_clean_bytes(data.get("3", "")),
         )
         self.state.device_info = info
+        self.state.firmware_version = info.firmware_version
 
         # Update topic prefix to match this device's product key
         if info.product_key:
