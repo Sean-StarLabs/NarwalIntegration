@@ -122,8 +122,9 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         """Pick up robots by DHCP hostname — a backup for when mDNS is filtered.
 
         Plenty of home networks drop multicast across VLANs or on wireless
-        isolation, and the robot is then invisible to zeroconf. The `NARWAL_*`
-        hostname match in manifest.json still catches it.
+        isolation, and the robot is then invisible to zeroconf. The `narwal_*`
+        hostname match in manifest.json still catches it — the robot announces
+        itself as `NARWAL_<6hex>`, and HA lowercases hostnames before matching.
         """
         host = str(discovery_info.ip)
         return await self._async_discovered(host, discovery_info.hostname or host)

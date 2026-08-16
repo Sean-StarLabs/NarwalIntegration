@@ -5,8 +5,7 @@
   "config_flow": true,
   "dependencies": [],
   "dhcp": [
-    { "hostname": "narwal_*" },
-    { "hostname": "NARWAL_*" }
+    { "hostname": "narwal_*" }
   ],
   "documentation": "https://github.com/sjmotew/NarwalIntegration",
   "integration_type": "device",

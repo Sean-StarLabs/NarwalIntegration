@@ -130,7 +130,8 @@ hex characters are the tail of the robot's device ID, which is how a discovery i
 matched to a robot you already added manually.
 
 Some networks drop multicast between VLANs or under wireless client isolation, and
-mDNS then never arrives. DHCP hostname matching on `NARWAL_*` covers that case.
+mDNS then never arrives. DHCP hostname matching covers that case — Home Assistant
+lowercases hostnames before matching, so the declared pattern is `narwal_*`.
 
 </details>
 
