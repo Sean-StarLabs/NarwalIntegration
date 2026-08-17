@@ -306,13 +306,21 @@ Field names from the decompiled `BuilderInfo`; values live-validated where noted
 | 2 | Battery %, **float32** |
 | 3 | Nested task status — see below |
 | 13 | Bound account UUID (string) |
+| 20 | Dust box state (enum) |
+| 21 | Dust bag state (enum) — *absent on AX12 v01.08.03.07* |
 | 23 | Clean-water tank state (enum) |
 | 24 | Sewage tank state (enum) |
 | 25 | Device status code list |
 | 26 | Active fan level |
 | 29 | Active mop humidity |
-| 35 | Station bag health %, float32 |
+| 35 | Station bag health %, float32 — *absent on AX12 v01.08.03.07* |
+| 36 | Station bag health reset time (Unix seconds) — **unverified** |
+| 38 | **Disputed** — `100` on every observation. Read as battery *design capacity* in one place and as curing-agent consumption % in another; see §11 |
+| 39 | Station bag state (enum) |
+| 41 | Detergent remaining % (`heavyDetergentRemainPercent`) — **unverified**, `100` on every observation; see §11 |
 | 47 | Charging status (enum) |
+
+Fields 20/21/35/36/38/39/41 are the consumables group — see [Consumables and station wear](#consumables-and-station-wear).
 
 Field 3 sub-fields:
 
@@ -387,6 +395,51 @@ it is the signature of a job about to abort, not a robot at the origin.
 A robot mid-OTA refuses commands it would normally accept. If `upgrade_status` and
 `download_status` are chattering, `NOT_APPLICABLE` may mean "busy updating" rather than
 anything about your payload.
+
+### Consumables and station wear
+
+Two sources, and they answer different questions.
+
+**`consumable/get_consumable_info`** (queried, never broadcast) returns which parts want
+attention — not how worn they are:
+
+```
+{1: ConsumableInfoPayload{
+     1: maintainItems[],   // clean / check these
+     2: replaceItems[]     // replace these
+}}
+```
+
+Both lists are **packed repeated varints**. That matters more than it sounds: a decoder that
+treats a repeated field as "an int, or a list of ints" gets neither — blackboxprotobuf hands
+back a `str` whose code points are the values. A live capture from an AX12:
+
+```
+{'1': {'1': '\x04\x06\x08\n', '2': '\x03\x14'}}
+   maintainItems = [4, 6, 8, 10]   wash ribs, universal wheel, side distance sensor, anti-winding brush
+   replaceItems  = [3, 20]         side brush, station bag
+```
+
+An empty payload means nothing needs attention. **Do not confuse "parsed to nothing" with
+"nothing to report"** — this project shipped exactly that bug, silently reporting healthy
+consumables on a robot asking for six parts (§10).
+
+`ConsumableMaintainItem`: 1 dust box, 2 dust filter, 4 wash ribs, 6 universal wheel,
+7 cliff sensor, 8 side distance sensor, 9 water-tank sponge, 10 anti-winding brush,
+11 smart-module sponge, 20 dust container.
+
+`ConsumableReplaceItem`: 1 dust filter, 2 mop, 3 side brush, 4 clear-water filter,
+5 roller brush, 6 detergent, 7 smart-module filter, 8 dust bag, 20 station bag,
+21 silver ions, 22 curing agent, 23 heavy detergent, 24 inner dust box.
+
+**Per-consumable remaining life % is believed cloud-only** — no local topic has produced it.
+That claim is inherited rather than tested, and is listed in §11.
+
+**`status/robot_base_status`** carries the numeric/station side: fields 20, 21, 23, 24, 35,
+36, 38, 39, 41. Which of them a robot sends varies by model and firmware, and absence is
+normal rather than an error — an AX12 on v01.08.03.07 omits 21 and 35 entirely, so a client
+that assumes a dust-bag health score exists will render a permanently empty gauge. Report
+absent fields as unknown; do not substitute zero.
 
 ---
 
@@ -592,6 +645,19 @@ value — every discovery shipped after someone hit it. `ERROR` remains a placeh
 contributors holding an APK decode for the *complete* enum rather than mapping values
 reactively.
 
+### A parse failure that looked exactly like good news
+
+`consumable/get_consumable_info` returns its `maintainItems` / `replaceItems` lists as packed
+repeated varints, which blackboxprotobuf surfaces as a `str`. The parser accepted "an int, or a
+list of ints", so `int('\x04\x06\x08\n')` raised, the exception was swallowed per-item, and both
+lists came back empty. Empty means "nothing needs attention" — so a robot asking for six parts
+was reported as perfectly healthy, for as long as the feature had existed.
+
+Nothing looked broken from the outside, which is the point: the failure mode of a `try/except
+continue` inside a decoder is a confident wrong answer. Two habits fall out of it —
+**distinguish "parsed to nothing" from "reported nothing"**, and **check a decoder against a
+device in a known-bad state**, since anything that returns empty looks correct on a healthy one.
+
 ---
 
 ## 11. Open questions
@@ -613,9 +679,26 @@ a robot error cannot be represented at all.
 **Whether pass count is one field or two.** The app splits it by mode (vacuum passes, mop
 passes); we expose one control.
 
-**Unexplored topics.** `/consumable/get_consumable_info`, `/schedule/clean_schedule/get`,
-`/config/get`, `/config/volume/set` and `/info/get_clean_time_line` are all known to exist and
-have never been probed locally.
+**Consumables — several, tracked together in
+[#79](https://github.com/sjmotew/NarwalIntegration/issues/79).**
+
+- *What is `base_status` field 38?* It reads `100` on every observation, and this project
+  describes it as battery design capacity in one place and curing-agent consumption % in
+  another. Both survive the data; one is wrong.
+- *Is field 41 really detergent remaining?* The name `heavyDetergentRemainPercent` comes from
+  the decompiled app. It has only ever been observed as `100`, on a robot whose battery also
+  reads `100`. A capture taken side by side with a visibly low cartridge settles it.
+- *Are per-consumable life percentages truly cloud-only?* The app shows them; no local topic
+  has produced them. The claim is inherited, not tested.
+- *Which models send fields 21 and 35?* Absent on AX12 v01.08.03.07. One data point is not a
+  rule, and clients currently render a permanently empty dust-bag gauge because of it.
+- *Are the tank/box/bag enum thresholds right?* We treat `1` as OK and `>= 2` as attention by
+  inference from enum ordering. [#77](https://github.com/sjmotew/NarwalIntegration/issues/77)
+  suggests at least one model disagrees.
+
+**Unexplored topics.** `/schedule/clean_schedule/get`, `/config/get`, `/config/volume/set` and
+`/info/get_clean_time_line` are all known to exist and have never been probed locally.
+`/consumable/get_consumable_info` **has** now been probed — see §7.
 
 ---
 
