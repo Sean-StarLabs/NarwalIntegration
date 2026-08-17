@@ -337,6 +337,48 @@ class TestNarwalState:
         assert state.maintain_items == []
         assert state.replace_items == []
 
+    def test_consumable_info_packed_varints(self) -> None:
+        """The wire shape: protobuf packs repeated scalars, bbp yields str (#79).
+
+        Verbatim capture from a Flow (AX12, v01.08.03.07). The list-and-int shapes
+        above are what a hand-written payload looks like, not what a robot sends —
+        which is how this went unnoticed while every alert was dropped.
+        """
+        state = NarwalState()
+        state.update_from_consumable_info({"1": {"1": "\x04\x06\x08\n", "2": "\x03\x14"}})
+        # wash ribs, universal wheel, side distance sensor, anti-winding brush
+        assert state.maintain_items == [4, 6, 8, 10]
+        assert state.replace_items == [3, 20]  # side brush, station bag
+
+    def test_consumable_info_single_packed_item(self) -> None:
+        """A one-item packed list is where an off-by-one decoder still looks right."""
+        state = NarwalState()
+        state.update_from_consumable_info({"1": {"1": "\x02", "2": "\x08"}})
+        assert state.maintain_items == [2]  # dust filter
+        assert state.replace_items == [8]  # dust bag
+
+    def test_consumable_info_accepts_bytes(self) -> None:
+        """Same blob as bytes rather than str — decoder version shouldn't matter."""
+        state = NarwalState()
+        state.update_from_consumable_info({"1": {"1": b"\x04\x06", "2": b"\x14"}})
+        assert state.maintain_items == [4, 6]
+        assert state.replace_items == [20]
+
+    def test_consumable_info_multibyte_varint(self) -> None:
+        """Values above 127 span bytes; a byte-per-value shortcut would misread them."""
+        state = NarwalState()
+        state.update_from_consumable_info({"1": {"1": "\xac\x02", "2": "\x01"}})
+        assert state.maintain_items == [300]
+        assert state.replace_items == [1]
+
+    def test_consumable_info_empty_blob_is_healthy(self) -> None:
+        """An empty packed field still means nothing needs attention."""
+        state = NarwalState()
+        state.update_from_consumable_info({"1": {"1": [4], "2": [20]}})
+        state.update_from_consumable_info({"1": {"1": "", "2": ""}})
+        assert state.maintain_items == []
+        assert state.replace_items == []
+
     def test_base_status_dock_light_mode(self) -> None:
         """Field 50 exposes the base station ambient light mode."""
         state = NarwalState()

@@ -183,9 +183,39 @@ def _to_float32(val: Any) -> float | None:
     return None
 
 
+def _packed_varints(raw: bytes) -> list[int]:
+    """Decode a protobuf packed repeated varint field."""
+    out: list[int] = []
+    acc = shift = 0
+    for byte in raw:
+        acc |= (byte & 0x7F) << shift
+        if byte & 0x80:
+            shift += 7
+        else:
+            out.append(acc)
+            acc = shift = 0
+    return out  # a trailing unterminated varint is incomplete data; drop it
+
+
 def _enum_int_list(val: Any) -> list[int]:
-    """Coerce a bbp repeated field (int, list, or absent) to a list of non-zero ints."""
-    items = val if isinstance(val, list) else [val] if val is not None else []
+    """Coerce a bbp repeated field to a list of non-zero ints.
+
+    protobuf packs repeated scalars, and blackboxprotobuf surfaces a packed field as
+    str/bytes rather than a list — the code points are the encoded bytes. Feeding that
+    to int() raises, and an alert list that fails to parse is indistinguishable from a
+    robot reporting nothing wrong, so this silently reported healthy consumables on a
+    robot asking for six parts (#79).
+    """
+    if isinstance(val, (bytes, bytearray)):
+        items: Any = _packed_varints(bytes(val))
+    elif isinstance(val, str):
+        # bbp decodes the blob as latin-1, so each code point is one byte.
+        items = _packed_varints(val.encode("latin-1", "ignore"))
+    elif isinstance(val, list):
+        items = val
+    else:
+        items = [val] if val is not None else []
+
     out: list[int] = []
     for item in items:
         try:
