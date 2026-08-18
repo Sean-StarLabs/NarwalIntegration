@@ -59,6 +59,16 @@ class CleanSettings:
     passes: int = 1
 
 
+def is_active_clean_session(state: NarwalState | None) -> bool:
+    """Return True while clean parameters are locked to the current task."""
+    if state is None:
+        return False
+    return (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.has_recent_active_working_status
+    ) and not state.is_returning
+
+
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     """Push-mode coordinator for Narwal vacuum.
 

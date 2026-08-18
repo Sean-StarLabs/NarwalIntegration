@@ -23,7 +23,7 @@ from .const import (
     WATER_MAP,
     WORK_MODE_MAP,
 )
-from .coordinator import NarwalCoordinator
+from .coordinator import NarwalCoordinator, is_active_clean_session
 from .entity import NarwalEntity
 from .narwal_client import (
     CommandResult,
@@ -32,7 +32,6 @@ from .narwal_client import (
     MopStrengthLevel,
     WorkMode,
 )
-from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -107,6 +106,8 @@ LEGACY_SCRUB_MAP: dict[str, MopStrengthLevel] = {
 LEGACY_MOP_MODES = {"Mop", "Vacuum then mop", "Vacuum and mop"}
 LEGACY_VACUUM_MODES = {"Vacuum", "Vacuum then mop", "Vacuum and mop"}
 LEGACY_START_ONLY_SETTINGS = {"mode", "passes", "route", "scrub"}
+LEGACY_UNSUPPORTED_SETTINGS = {"route"}
+START_ONLY_CLEAN_SETTING_ATTRS = {"work_mode", "mop_strength"}
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -222,8 +223,13 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
 
     @property
     def available(self) -> bool:
-        """Editable even while the robot sleeps — these are pending settings."""
-        return True
+        """Return True when this clean parameter can be changed now."""
+        if not super().available:
+            return False
+        return (
+            self.entity_description.attr not in START_ONLY_CLEAN_SETTING_ATTRS
+            or not is_active_clean_session(self.coordinator.data)
+        )
 
     @property
     def current_option(self) -> str | None:
@@ -274,8 +280,22 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
 
     @property
     def available(self) -> bool:
-        """Return True while the underlying robot entity is available."""
-        return super().available
+        """Return True when this legacy setting can be changed now."""
+        return super().available and self._setting_available()
+
+    @property
+    def options(self) -> list[str]:
+        """Return selectable options, trimming options that are invalid live."""
+        if (
+            self.entity_description.setting_key == "suction"
+            and self._is_cleaning_or_paused
+        ):
+            return [
+                option
+                for option in self.entity_description.setting_options
+                if option != "AI"
+            ]
+        return list(self.entity_description.setting_options)
 
     @property
     def current_option(self) -> str | None:
@@ -292,13 +312,20 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
     @property
     def _is_cleaning_or_paused(self) -> bool:
         """Return True while the robot is in an active clean session."""
-        state = self.coordinator.data
-        if state is None:
+        return is_active_clean_session(self.coordinator.data)
+
+    def _setting_available(self) -> bool:
+        """Return whether this setting is currently meaningful and actionable."""
+        key = self.entity_description.setting_key
+        if key in LEGACY_UNSUPPORTED_SETTINGS:
             return False
-        return (
-            state.working_status in ACTIVE_CLEANING_STATUSES
-            or state.has_recent_active_working_status
-        ) and not state.is_returning
+        if key == "water" and self._selected_mode not in LEGACY_MOP_MODES:
+            return False
+        if key == "scrub" and self._selected_mode not in LEGACY_MOP_MODES:
+            return False
+        if key == "suction" and self._selected_mode not in LEGACY_VACUUM_MODES:
+            return False
+        return key not in LEGACY_START_ONLY_SETTINGS or not self._is_cleaning_or_paused
 
     def _apply_option(self, option: str) -> None:
         """Store a legacy option and mirror it into clean settings."""
@@ -339,6 +366,10 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             raise HomeAssistantError(f"Unsupported Narwal option: {requested_option}")
 
         key = self.entity_description.setting_key
+        if key in LEGACY_UNSUPPORTED_SETTINGS:
+            raise HomeAssistantError(
+                "This Narwal setting is not supported by the current local API"
+            )
         if key == "water" and self._selected_mode not in LEGACY_MOP_MODES:
             raise HomeAssistantError("Water level is not available in vacuum-only mode")
         if key == "scrub" and self._selected_mode not in LEGACY_MOP_MODES:
@@ -376,3 +407,4 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
 
         self._apply_option(option)
         self.async_write_ha_state()
+        self.coordinator.async_update_listeners()

@@ -16,15 +16,28 @@ tests.ha_stubs.install()
 from homeassistant.components.select import SelectEntity  # noqa: E402
 from homeassistant.helpers.restore_state import RestoreEntity  # noqa: E402
 
-from narwal_client.const import MopHumidity, MopStrengthLevel, WorkMode  # noqa: E402
+from narwal_client.const import (  # noqa: E402
+    MopHumidity,
+    MopStrengthLevel,
+    WorkMode,
+    WorkingStatus,
+)
 from custom_components.narwal.coordinator import CleanSettings  # noqa: E402
 from custom_components.narwal.number import NarwalPassesNumber  # noqa: E402
-from custom_components.narwal.select import NarwalSelect, SELECT_DESCRIPTIONS  # noqa: E402
+from custom_components.narwal.select import (  # noqa: E402
+    LEGACY_SELECT_DESCRIPTIONS,
+    LegacyNarwalSettingSelect,
+    NarwalSelect,
+    SELECT_DESCRIPTIONS,
+)
 
 _DESCS = {d.key: d for d in SELECT_DESCRIPTIONS}
+_LEGACY_DESCS = {d.setting_key: d for d in LEGACY_SELECT_DESCRIPTIONS}
 
 
-def _coordinator(*, settings: CleanSettings | None = None, state: object | None = None) -> MagicMock:
+def _coordinator(
+    *, settings: CleanSettings | None = None, state: object | None = None
+) -> MagicMock:
     coord = MagicMock()
     coord.config_entry = MagicMock()
     coord.config_entry.data = {"device_id": "dev1"}
@@ -35,7 +48,22 @@ def _coordinator(*, settings: CleanSettings | None = None, state: object | None 
     coord.last_update_success = True
     coord.clean_settings = settings or CleanSettings()
     coord.data = state
+    coord._legacy_mode_option = "Vacuum and mop"
     return coord
+
+
+def _state(
+    working_status: WorkingStatus = WorkingStatus.DOCKED,
+    *,
+    recent: bool = False,
+    returning: bool = False,
+) -> MagicMock:
+    state = MagicMock()
+    state.working_status = working_status
+    state.has_recent_active_working_status = recent
+    state.is_returning = returning
+    state.is_cleaning = working_status == WorkingStatus.CLEANING and not returning
+    return state
 
 
 def test_select_bases_use_restore_entity() -> None:
@@ -75,22 +103,74 @@ class TestNarwalSelect:
     async def test_restore_from_last_state(self) -> None:
         coord = _coordinator()
         sel = NarwalSelect(coord, _DESCS["work_mode"])
-        with patch.object(sel, "async_get_last_state", AsyncMock(return_value=MagicMock(state="mop"))):
+        with patch.object(
+            sel, "async_get_last_state", AsyncMock(return_value=MagicMock(state="mop"))
+        ):
             await sel.async_added_to_hass()
         assert coord.clean_settings.work_mode == WorkMode.MOP
 
     async def test_restore_ignores_unknown_option(self) -> None:
         coord = _coordinator(settings=CleanSettings(work_mode=WorkMode.VACUUM))
         sel = NarwalSelect(coord, _DESCS["work_mode"])
-        with patch.object(sel, "async_get_last_state", AsyncMock(return_value=MagicMock(state="bogus"))):
+        with patch.object(
+            sel, "async_get_last_state", AsyncMock(return_value=MagicMock(state="bogus"))
+        ):
             await sel.async_added_to_hass()
         assert coord.clean_settings.work_mode == WorkMode.VACUUM
+
+    def test_start_only_selects_unavailable_during_active_clean(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        assert not NarwalSelect(coord, _DESCS["work_mode"]).available
+        assert not NarwalSelect(coord, _DESCS["mop_strength"]).available
+        assert NarwalSelect(coord, _DESCS["water"]).available
+
+
+class TestLegacyNarwalSettingSelect:
+    def test_start_only_settings_unavailable_during_active_clean(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        for key in ("mode", "passes", "scrub"):
+            assert not LegacyNarwalSettingSelect(coord, _LEGACY_DESCS[key]).available
+
+    def test_live_settings_remain_available_during_active_clean(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        assert LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"]).available
+        assert LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["water"]).available
+
+    def test_suction_removes_ai_while_cleaning(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+        assert "AI" not in sel.options
+        assert "Standard" in sel.options
+
+    def test_route_is_hidden_until_supported_by_payload(self) -> None:
+        coord = _coordinator(state=_state())
+        assert not LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["route"]).available
+
+    def test_mode_specific_settings_unavailable_when_not_applicable(self) -> None:
+        coord = _coordinator(state=_state())
+        coord._legacy_mode_option = "Vacuum"
+        assert not LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["water"]).available
+        assert not LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["scrub"]).available
+
+        coord._legacy_mode_option = "Mop"
+        assert not LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"]).available
+
+    async def test_select_option_refreshes_related_setting_entities(self) -> None:
+        coord = _coordinator(state=_state())
+        coord.async_update_listeners = MagicMock()
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["mode"])
+        await sel.async_select_option("Vacuum")
+        coord.async_update_listeners.assert_called_once()
 
 
 class TestNarwalPassesNumber:
     def test_native_value_reflects_settings(self) -> None:
         coord = _coordinator(settings=CleanSettings(passes=2))
         assert NarwalPassesNumber(coord).native_value == 2
+
+    def test_unavailable_during_active_clean(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        assert not NarwalPassesNumber(coord).available
 
     async def test_set_native_value_stores_int(self) -> None:
         coord = _coordinator()
