@@ -274,18 +274,8 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
 
     @property
     def available(self) -> bool:
-        """Return True when the setting can be changed."""
-        if not super().available:
-            return False
-        mode = self._selected_mode
-        key = self.entity_description.setting_key
-        if key == "water" and mode not in LEGACY_MOP_MODES:
-            return False
-        if key == "scrub" and mode not in LEGACY_MOP_MODES:
-            return False
-        if key == "suction" and mode not in LEGACY_VACUUM_MODES:
-            return False
-        return not (key in LEGACY_START_ONLY_SETTINGS and self._is_cleaning_or_paused)
+        """Return True while the underlying robot entity is available."""
+        return super().available
 
     @property
     def current_option(self) -> str | None:
