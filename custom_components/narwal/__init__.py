@@ -33,6 +33,7 @@ from .const import (
 )
 from .coordinator import NarwalCoordinator
 from .narwal_client import (
+    CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
@@ -51,6 +52,7 @@ FIELD_SUCTION = "suction"
 FIELD_WATER = "water"
 FIELD_MOP_STRENGTH = "mop_strength"
 FIELD_PASSES = "passes"
+FIELD_ROUTE = "route"
 
 WORK_MODE_OPTIONS: dict[str, WorkMode] = {
     "vacuum": WorkMode.VACUUM,
@@ -77,6 +79,10 @@ MOP_STRENGTH_OPTIONS: dict[str, MopStrengthLevel] = {
     "normal": MopStrengthLevel.NORMAL,
     "high": MopStrengthLevel.HIGH,
 }
+ROUTE_OPTIONS: dict[str, CleaningRoute] = {
+    "standard": CleaningRoute.STANDARD,
+    "meticulous": CleaningRoute.METICULOUS,
+}
 
 CLEAN_ROOMS_SCHEMA = vol.Schema(
     {
@@ -94,6 +100,7 @@ CLEAN_ROOMS_SCHEMA = vol.Schema(
             vol.Coerce(int),
             vol.Range(min=1, max=3),
         ),
+        vol.Optional(FIELD_ROUTE): vol.In(ROUTE_OPTIONS),
     }
 )
 
@@ -250,11 +257,15 @@ def _async_register_services(hass: HomeAssistant) -> None:
             water = WATER_OPTIONS[call.data[FIELD_WATER]]
             mop_strength = MOP_STRENGTH_OPTIONS[call.data[FIELD_MOP_STRENGTH]]
             passes = call.data[FIELD_PASSES]
+            route = ROUTE_OPTIONS.get(
+                call.data.get(FIELD_ROUTE), coordinator.clean_settings.route
+            )
             coordinator.clean_settings.work_mode = work_mode
             coordinator.clean_settings.fan = fan
             coordinator.clean_settings.water = water
             coordinator.clean_settings.mop_strength = mop_strength
             coordinator.clean_settings.passes = passes
+            coordinator.clean_settings.route = route
 
             resp = await client.start_rooms(
                 room_ids,
@@ -263,6 +274,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 water=water,
                 mop_strength=mop_strength,
                 passes=passes,
+                route=route,
             )
             if resp.result_code == 0:
                 result_name = "ACCEPTED"

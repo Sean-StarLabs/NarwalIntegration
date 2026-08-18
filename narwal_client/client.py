@@ -54,6 +54,7 @@ from .const import (
     DEFAULT_TOPIC_PREFIX,
     WAKE_TIMEOUT,
     AmbientLightCtrlType,
+    CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
@@ -1183,13 +1184,14 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.NORMAL,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
     ) -> bytes:
         """Build a clean/start_clean request for the given rooms.
 
         StartClean_Request{1: CleanTask{1: map_id, 2: [CleanItem...], 3: {} (TaskOption),
         5: taskType}}; CleanItem{1: ZoneOption{1: 1 (room zone), 2: room_id}, 2: CleanParam,
         3: order}. taskType (the execution-mode carrier) and CleanParam.mode/pass-tag are
-        derived from work_mode. overlapLevel is omitted — live-validated as ignored here.
+        derived from work_mode. overlapLevel is CleanParam tag 8 when supplied.
 
         Args:
             room_ids: Robot room IDs (RoomInfo.room_id).
@@ -1199,6 +1201,7 @@ class NarwalClient:
             water: Mop water volume (tag 4).
             mop_strength: Mop scrub intensity (tag 3).
             passes: Clean count, routed to the pass tag(s) for the mode.
+            route: Optional route overlap level (tag 8).
         """
         import blackboxprotobuf
 
@@ -1209,6 +1212,8 @@ class NarwalClient:
             "3": int(mop_strength),
             "4": int(water),
         }
+        if route is not None:
+            param["8"] = int(route)
         for tag in pass_tags:
             param[tag] = int(passes)
 
@@ -1254,6 +1259,7 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.NORMAL,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
     ) -> CommandResponse:
         """Start cleaning the given rooms via clean/start_clean.
 
@@ -1269,7 +1275,7 @@ class NarwalClient:
 
         Args:
             room_ids: Robot room IDs (RoomInfo.room_id), mapped from HA areas.
-            work_mode, fan, water, mop_strength, passes: CleanParam settings —
+            work_mode, fan, water, mop_strength, passes, route: CleanParam settings —
                 see _build_start_clean_payload.
         """
         if not room_ids:
@@ -1289,7 +1295,7 @@ class NarwalClient:
 
         payload = self._build_start_clean_payload(
             room_ids, map_id, work_mode=work_mode, fan=fan, water=water,
-            mop_strength=mop_strength, passes=passes,
+            mop_strength=mop_strength, passes=passes, route=route,
         )
         resp = await self.send_command(
             TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,

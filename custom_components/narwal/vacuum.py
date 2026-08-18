@@ -179,6 +179,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 water=settings.water,
                 mop_strength=settings.mop_strength,
                 passes=settings.passes,
+                route=settings.route,
             )
         else:
             # No map rooms known — best-effort fall back to the saved-plan start.
@@ -300,9 +301,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         settings = self.coordinator.clean_settings
         _LOGGER.info(
             "Starting room-specific clean: rooms=%s mode=%s fan=%s water=%s "
-            "mop_strength=%s passes=%s",
+            "mop_strength=%s passes=%s route=%s",
             room_ids, settings.work_mode.name, settings.fan.name,
             settings.water.name, settings.mop_strength.name, settings.passes,
+            settings.route.name,
         )
         resp = await self.coordinator.client.start_rooms(
             room_ids,
@@ -311,6 +313,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             water=settings.water,
             mop_strength=settings.mop_strength,
             passes=settings.passes,
+            route=settings.route,
         )
         try:
             result_name = CommandResult(resp.result_code).name

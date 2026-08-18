@@ -26,6 +26,7 @@ from .const import (
 from .coordinator import NarwalCoordinator, is_active_clean_session
 from .entity import NarwalEntity
 from .narwal_client import (
+    CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
@@ -103,10 +104,13 @@ LEGACY_SCRUB_MAP: dict[str, MopStrengthLevel] = {
     "Normal": MopStrengthLevel.NORMAL,
     "High": MopStrengthLevel.HIGH,
 }
+LEGACY_ROUTE_MAP: dict[str, CleaningRoute] = {
+    "Standard": CleaningRoute.STANDARD,
+    "Meticulous": CleaningRoute.METICULOUS,
+}
 LEGACY_MOP_MODES = {"Mop", "Vacuum then mop", "Vacuum and mop"}
 LEGACY_VACUUM_MODES = {"Vacuum", "Vacuum then mop", "Vacuum and mop"}
 LEGACY_START_ONLY_SETTINGS = {"mode", "passes", "route", "scrub"}
-LEGACY_UNSUPPORTED_SETTINGS = {"route"}
 START_ONLY_CLEAN_SETTING_ATTRS = {"work_mode", "mop_strength"}
 
 
@@ -317,8 +321,6 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
     def _setting_available(self) -> bool:
         """Return whether this setting is currently meaningful and actionable."""
         key = self.entity_description.setting_key
-        if key in LEGACY_UNSUPPORTED_SETTINGS:
-            return False
         if key == "water" and self._selected_mode not in LEGACY_MOP_MODES:
             return False
         if key == "scrub" and self._selected_mode not in LEGACY_MOP_MODES:
@@ -341,6 +343,8 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             settings.water = LEGACY_WATER_MAP[option]
         elif key == "scrub":
             settings.mop_strength = LEGACY_SCRUB_MAP[option]
+        elif key == "route":
+            settings.route = LEGACY_ROUTE_MAP[option]
         elif key == "passes":
             settings.passes = int(option)
 
@@ -366,10 +370,6 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             raise HomeAssistantError(f"Unsupported Narwal option: {requested_option}")
 
         key = self.entity_description.setting_key
-        if key in LEGACY_UNSUPPORTED_SETTINGS:
-            raise HomeAssistantError(
-                "This Narwal setting is not supported by the current local API"
-            )
         if key == "water" and self._selected_mode not in LEGACY_MOP_MODES:
             raise HomeAssistantError("Water level is not available in vacuum-only mode")
         if key == "scrub" and self._selected_mode not in LEGACY_MOP_MODES:

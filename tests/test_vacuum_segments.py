@@ -187,6 +187,7 @@ class TestAsyncCleanSegments:
             water=settings.water,
             mop_strength=settings.mop_strength,
             passes=settings.passes,
+            route=settings.route,
         )
 
 

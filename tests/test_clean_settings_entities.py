@@ -17,6 +17,7 @@ from homeassistant.components.select import SelectEntity  # noqa: E402
 from homeassistant.helpers.restore_state import RestoreEntity  # noqa: E402
 
 from narwal_client.const import (  # noqa: E402
+    CleaningRoute,
     MopHumidity,
     MopStrengthLevel,
     WorkMode,
@@ -142,8 +143,12 @@ class TestLegacyNarwalSettingSelect:
         assert "AI" not in sel.options
         assert "Standard" in sel.options
 
-    def test_route_is_hidden_until_supported_by_payload(self) -> None:
+    def test_route_is_available_when_idle(self) -> None:
         coord = _coordinator(state=_state())
+        assert LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["route"]).available
+
+    def test_route_is_unavailable_during_active_clean(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         assert not LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["route"]).available
 
     def test_mode_specific_settings_unavailable_when_not_applicable(self) -> None:
@@ -161,6 +166,12 @@ class TestLegacyNarwalSettingSelect:
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["mode"])
         await sel.async_select_option("Vacuum")
         coord.async_update_listeners.assert_called_once()
+
+    async def test_route_select_stores_clean_setting(self) -> None:
+        coord = _coordinator(state=_state())
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["route"])
+        await sel.async_select_option("Standard")
+        assert coord.clean_settings.route == CleaningRoute.STANDARD
 
 
 class TestNarwalPassesNumber:
