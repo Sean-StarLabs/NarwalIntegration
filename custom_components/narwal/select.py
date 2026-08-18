@@ -289,16 +289,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
 
     @property
     def options(self) -> list[str]:
-        """Return selectable options, trimming options that are invalid live."""
-        if (
-            self.entity_description.setting_key == "suction"
-            and self._is_cleaning_or_paused
-        ):
-            return [
-                option
-                for option in self.entity_description.setting_options
-                if option != "AI"
-            ]
+        """Return the static option list for Home Assistant capabilities."""
         return list(self.entity_description.setting_options)
 
     @property

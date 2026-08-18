@@ -14,6 +14,7 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from homeassistant.components.select import SelectEntity  # noqa: E402
+from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 from homeassistant.helpers.restore_state import RestoreEntity  # noqa: E402
 
 from narwal_client.const import (  # noqa: E402
@@ -137,11 +138,23 @@ class TestLegacyNarwalSettingSelect:
         assert LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"]).available
         assert LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["water"]).available
 
-    def test_suction_removes_ai_while_cleaning(self) -> None:
+    def test_suction_options_stay_stable_while_cleaning(self) -> None:
         coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
-        assert "AI" not in sel.options
+        assert "AI" in sel.options
         assert "Standard" in sel.options
+
+    async def test_ai_suction_rejected_while_cleaning(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.client.set_fan_speed = AsyncMock()
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+        try:
+            await sel.async_select_option("AI")
+        except HomeAssistantError:
+            pass
+        else:
+            raise AssertionError("AI suction should not be selectable mid-clean")
+        coord.client.set_fan_speed.assert_not_awaited()
 
     def test_route_is_available_when_idle(self) -> None:
         coord = _coordinator(state=_state())
