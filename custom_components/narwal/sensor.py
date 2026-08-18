@@ -30,6 +30,11 @@ class NarwalSensorEntityDescription(SensorEntityDescription):
     value_fn: Callable[[NarwalState], float | str | None]
 
 
+def _has_base_status_field(state: NarwalState, field: str) -> bool:
+    """Return whether the latest base-status payload contains a field."""
+    return isinstance(state.raw_base_status, dict) and field in state.raw_base_status
+
+
 SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
     NarwalSensorEntityDescription(
         key="battery",
@@ -69,7 +74,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         # base_status field 35 stationBagHealthScore (float32 %); present only with a station.
         value_fn=lambda state: round(state.dust_bag_health, 1)
-        if "35" in state.raw_base_status
+        if _has_base_status_field(state, "35")
         else None,
     ),
     NarwalSensorEntityDescription(
@@ -80,7 +85,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         entity_category=EntityCategory.DIAGNOSTIC,
         # base_status field 41 heavyDetergentRemainPercent.
         value_fn=lambda state: state.detergent_remaining
-        if "41" in state.raw_base_status
+        if _has_base_status_field(state, "41")
         else None,
     ),
     NarwalSensorEntityDescription(
