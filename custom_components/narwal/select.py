@@ -1,7 +1,7 @@
 """Clean-parameter select entities for Narwal vacuum.
 
-These hold pending values applied at the next room clean (CleanParam is only sent in the
-start payload). water additionally writes live via clean/set_mop_humidity while cleaning.
+These hold pending values applied at the next room clean. Water additionally writes
+live via clean/set_mop_humidity while cleaning.
 """
 
 from __future__ import annotations
@@ -10,16 +10,28 @@ from dataclasses import dataclass
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, State
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import NarwalConfigEntry
-from .const import FAN_SPEED_LIST, FAN_SPEED_MAP, WORK_MODE_MAP, MOP_STRENGTH_MAP, WATER_MAP
+from .const import (
+    FAN_SPEED_LIST,
+    FAN_SPEED_MAP,
+    MOP_STRENGTH_MAP,
+    WATER_MAP,
+    WORK_MODE_MAP,
+)
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import CommandResult, FanLevel, MopHumidity, MopStrengthLevel, WorkMode
+from .narwal_client import (
+    CommandResult,
+    FanLevel,
+    MopHumidity,
+    MopStrengthLevel,
+    WorkMode,
+)
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 
@@ -75,7 +87,13 @@ LEGACY_MODE_MAP: dict[str, WorkMode] = {
 }
 LEGACY_SUCTION_MAP: dict[str, FanLevel] = {
     "AI": FanLevel.UNSPECIFIED,
+    "Super powerful": FanLevel.DEEP,
+    "Ultra powerful": FanLevel.SUPER,
     **{option: FAN_SPEED_MAP[option] for option in FAN_SPEED_LIST},
+}
+LEGACY_SUCTION_LABELS: dict[FanLevel, str] = {
+    FanLevel.UNSPECIFIED: "AI",
+    **{FAN_SPEED_MAP[option]: option for option in FAN_SPEED_LIST},
 }
 LEGACY_WATER_MAP: dict[str, MopHumidity] = {
     "Dry": MopHumidity.DRY,
@@ -115,7 +133,7 @@ LEGACY_SELECT_DESCRIPTIONS: tuple[LegacyNarwalSelectEntityDescription, ...] = (
         setting_key="suction",
         name="Suction",
         setting_options=LEGACY_SUCTION_OPTIONS,
-        default_option="Super powerful",
+        default_option="Super",
         icon="mdi:fan",
     ),
     LegacyNarwalSelectEntityDescription(
@@ -162,7 +180,10 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     async_add_entities(
         [
-            *(NarwalSelect(coordinator, description) for description in SELECT_DESCRIPTIONS),
+            *(
+                NarwalSelect(coordinator, description)
+                for description in SELECT_DESCRIPTIONS
+            ),
             *(
                 LegacyNarwalSettingSelect(coordinator, description)
                 for description in LEGACY_SELECT_DESCRIPTIONS
@@ -172,7 +193,7 @@ async def async_setup_entry(
 
 
 class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
-    """A clean-parameter select backed by coordinator.clean_settings; restored across restarts."""
+    """Clean-parameter select backed by coordinator.clean_settings."""
 
     entity_description: NarwalSelectEntityDescription
 
@@ -216,8 +237,14 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
         setattr(self.coordinator.clean_settings, self.entity_description.attr, value)
         self.async_write_ha_state()
         state = self.coordinator.data
-        if self.entity_description.live_setter and state is not None and state.is_cleaning:
-            await getattr(self.coordinator.client, self.entity_description.live_setter)(value)
+        if (
+            self.entity_description.live_setter
+            and state is not None
+            and state.is_cleaning
+        ):
+            await getattr(self.coordinator.client, self.entity_description.live_setter)(
+                value
+            )
 
 
 class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
@@ -242,12 +269,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
     async def async_added_to_hass(self) -> None:
         """Restore the last valid selected option."""
         await super().async_added_to_hass()
-        last = await self.async_get_last_state()
-        option = (
-            last.state
-            if last is not None and last.state in self.entity_description.setting_options
-            else self.entity_description.default_option
-        )
+        option = self._restored_option(await self.async_get_last_state())
         self._apply_option(option)
 
     @property
@@ -305,10 +327,26 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         elif key == "passes":
             settings.passes = int(option)
 
+    def _normalise_option(self, option: str) -> str | None:
+        """Return a current option, accepting old hidden suction aliases."""
+        if option in self.entity_description.setting_options:
+            return option
+        if self.entity_description.setting_key != "suction":
+            return None
+        return LEGACY_SUCTION_LABELS.get(LEGACY_SUCTION_MAP.get(option))
+
+    def _restored_option(self, state: State | None) -> str:
+        """Return a current option, accepting old hidden aliases from restore state."""
+        if state is None:
+            return self.entity_description.default_option
+        return self._normalise_option(state.state) or self.entity_description.default_option
+
     async def async_select_option(self, option: str) -> None:
         """Apply a legacy setting option."""
-        if option not in self.entity_description.setting_options:
-            raise HomeAssistantError(f"Unsupported Narwal option: {option}")
+        requested_option = option
+        option = self._normalise_option(option) or ""
+        if not option:
+            raise HomeAssistantError(f"Unsupported Narwal option: {requested_option}")
 
         key = self.entity_description.setting_key
         if key == "water" and self._selected_mode not in LEGACY_MOP_MODES:

@@ -32,8 +32,8 @@ clean_rooms:
             - quiet
             - standard
             - strong
-            - super_powerful
-            - ultra_powerful
+            - super
+            - ultra
     water:
       name: Water
       default: normal

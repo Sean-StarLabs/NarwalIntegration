@@ -63,6 +63,8 @@ SUCTION_OPTIONS: dict[str, FanLevel] = {
     "quiet": FanLevel.MUTE,
     "standard": FanLevel.NORMAL,
     "strong": FanLevel.STRONG,
+    "super": FanLevel.DEEP,
+    "ultra": FanLevel.SUPER,
     "super_powerful": FanLevel.DEEP,
     "ultra_powerful": FanLevel.SUPER,
 }
