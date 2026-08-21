@@ -107,11 +107,65 @@ Shipped in v1.0.2 ([#50](https://github.com/sjmotew/NarwalIntegration/pull/50)) 
 
 ### Setup
 
+Home Assistant discovers Narwal robots on the local network, so in most cases the
+robot appears on its own under **Settings > Devices & Services** as a discovered
+device — click **Configure**, pick your model, and you're done. The IP is filled in
+for you.
+
+To add one by hand, or if discovery doesn't find it:
+
 1. **Settings > Devices & Services > Add Integration** > search "Narwal"
 2. Enter your vacuum's IP address and select your model
 3. Entities are created automatically
 
-> **Tip:** Assign a static IP to your vacuum in your router.
+> **Tip:** Assign a static IP to your vacuum in your router. Discovery re-points an
+> existing entry when the address changes, but a static lease avoids the round trip.
+
+<details>
+<summary>How discovery finds the robot</summary>
+
+The robot advertises `_narwal_sweeper._tcp.local.` over mDNS, as an instance named
+`_app_wss_server_<6hex>` with hostname `NARWAL_<6hex>.local.` on port 9002. Those six
+hex characters are the tail of the robot's device ID, which is how a discovery is
+matched to a robot you already added manually.
+
+Some networks drop multicast between VLANs or under wireless client isolation, and
+mDNS then never arrives. DHCP hostname matching covers that case — Home Assistant
+lowercases hostnames before matching, so the declared pattern is `narwal_*`.
+
+</details>
+
+<details>
+<summary>If Home Assistant and the robot are on different VLANs</summary>
+
+Robots have been reported not to answer connections whose source address is outside
+their own subnet, even when 9002/TCP is explicitly permitted through the firewall and
+other devices on the same VLAN are reachable. Both ICMP and the WebSocket handshake
+time out, so the symptom is a plain connection failure rather than an integration
+error:
+
+```text
+Failed to connect to ws://<robot-ip>:9002: timed out during opening handshake
+```
+
+**Workaround:** source-NAT the traffic from Home Assistant so it reaches the robot
+with an address on the robot's own subnet. This is confirmed working by a user running
+Home Assistant on a separate VLAN from an IoT network ([#81]).
+
+The underlying cause is not yet pinned down — it is either the robot filtering by
+source subnet, or the robot ignoring the default gateway it was handed by DHCP and so
+having no route back. If you can capture on the robot's own switch port and tell us
+whether the robot *replies* to an off-subnet SYN, that distinguishes the two, and in
+the second case a static route on the robot's side would be a cleaner fix than SNAT.
+Please add what you find to [#81].
+
+Note that mDNS discovery is separately affected: most networks do not forward
+multicast between VLANs, so the robot will usually need to be added by IP in this
+setup regardless.
+
+[#81]: https://github.com/sjmotew/NarwalIntegration/issues/81
+
+</details>
 
 The Freo Z Ultra (CX7) also requires its 32-character cloud-assigned Device ID. Selecting that
 model opens a dedicated Device ID page; other models use automatic discovery. The integration
