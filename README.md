@@ -2,7 +2,7 @@
 
 A fully **local, cloud-independent** [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Communicates directly with your vacuum over your local network via WebSocket — no cloud account or internet connection required.
 
-> **Latest release: [v1.0.3](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.3)** (HACS) — room cleaning works and the vacuum entity tracks it live. **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first.** On v1.0.2? [Upgrade](docs/RELEASE-NOTES-v1.0.3.md) — v1.0.2 froze at `docked` mid-clean.
+> **Latest release: [v1.0.4](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.4)** (HACS) — **consumable alerts never worked before this release** and always reported "no problem"; check those two entities after upgrading ([notes](docs/RELEASE-NOTES-v1.0.4.md)). Adds Freo Z Ultra (CX7) support and renames the fan tiers to Quiet/Standard/Strong/Super/Ultra. **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first.**
 
 > ### ✅ Room cleaning is fixed — shipped in v1.0.2, verified on hardware in v1.0.3
 >
@@ -244,9 +244,16 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 ## Project Status
 
-**Where things stand — updated 2026-08-08, at the v1.0.3 release.**
+**Where things stand — updated 2026-08-17, at the v1.0.4 release.**
 
-**v1.0.3 is released** — everything below is shipped to HACS. 230 tests passing, CI green, and the integration verified on a live Home Assistant instance driving a real room clean end to end. **The merge queue is empty apart from [#35](https://github.com/sjmotew/NarwalIntegration/pull/35).**
+**v1.0.4 is released** — everything below is shipped to HACS. 255 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. **Open PRs: [#78](https://github.com/sjmotew/NarwalIntegration/pull/78) (network discovery, awaiting review) and [#35](https://github.com/sjmotew/NarwalIntegration/pull/35).**
+
+| Merged in v1.0.4 | What it does |
+|---|---|
+| [#80](https://github.com/sjmotew/NarwalIntegration/pull/80) | **Consumable alerts actually report** — the lists were packed varints and had always been discarded, so both alert sensors said "no problem" on every robot, always. See [#79](https://github.com/sjmotew/NarwalIntegration/issues/79) |
+| [#76](https://github.com/sjmotew/NarwalIntegration/pull/76) | **Freo Z Ultra (CX7) local control**, via a pasted Device ID — still no cloud. Polling only; no live map position |
+| — | Fan tiers renamed to Quiet/Standard/Strong/Super/Ultra; Ultra withheld on AX26, where it silently applied Strong ([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)) |
+| — | `CleanParam` tag 8 identified as the coverage-precision toggle; consumables documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
 
 | Merged since v1.0.1 | What it does |
 |---|---|
