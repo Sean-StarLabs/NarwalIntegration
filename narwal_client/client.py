@@ -1811,7 +1811,15 @@ class NarwalClient:
     async def get_map(self) -> MapData:
         """Download the full map data."""
         resp = await self.send_command(TOPIC_CMD_GET_MAP, timeout=15.0)
-        map_data = MapData.from_response(resp.data)
+        if not resp.success:
+            _LOGGER.debug(
+                "Map query failed; preserving existing map data (code=%s)",
+                resp.result_code,
+            )
+            if self.state.map_data is not None:
+                return self.state.map_data
+            raise NarwalCommandError(f"Map query failed with code {resp.result_code}")
+        map_data = await asyncio.to_thread(MapData.from_response, resp.data)
         self.state.map_data = map_data
         return map_data
 

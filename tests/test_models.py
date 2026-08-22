@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import struct
+import zlib
 
 from narwal_client.const import (
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
@@ -18,6 +19,25 @@ from narwal_client.models import (
     RoomInfo,
     _parse_obstacles,
 )
+
+
+def _make_compressed_grid(width: int, height: int, fill_value: int = 0) -> bytes:
+    """Create a zlib-compressed protobuf-packed map grid."""
+    raw_varints = bytearray()
+    for _ in range(width * height):
+        value = fill_value
+        while value > 0x7F:
+            raw_varints.append((value & 0x7F) | 0x80)
+            value >>= 7
+        raw_varints.append(value & 0x7F)
+
+    length_varint = bytearray()
+    value = len(raw_varints)
+    while value > 0x7F:
+        length_varint.append((value & 0x7F) | 0x80)
+        value >>= 7
+    length_varint.append(value & 0x7F)
+    return zlib.compress(bytes([0x0A]) + bytes(length_varint) + bytes(raw_varints))
 
 
 class TestCommandResponse:
@@ -779,20 +799,28 @@ class TestMapData:
 
     def test_dock_position_from_field8_uint32(self) -> None:
         """Dock parsed from field 8 (dm coords as uint32, same as display_map field 5)."""
-        decoded = {"2": {
-            "3": 60,
-            "4": 341,
-            "5": 494,
-            "6": {"1": -341, "2": 152, "3": -280, "4": 60},
-            "8": {"1": {"1": _float_to_uint32(-8.0188), "2": _float_to_uint32(0.221)}, "2": _float_to_uint32(0.036)},
-            "17": b"",
-        }}
+        decoded = {
+            "2": {
+                "3": 60,
+                "4": 341,
+                "5": 494,
+                "6": {"1": -341, "2": 152, "3": -280, "4": 60},
+                "8": {
+                    "1": {
+                        "1": _float_to_uint32(-8.0188),
+                        "2": _float_to_uint32(0.221),
+                    },
+                    "2": _float_to_uint32(0.036),
+                },
+                "17": b"",
+            }
+        }
         m = MapData.from_response(decoded)
-        # factor 1.0: -8.0188 - (-280) = 271.98, 0.221 - (-341) = 341.22
+        # factor 100 / 60: -8.0188 * 1.667 - (-280) = 266.64
         assert m.dock_x is not None
         assert m.dock_y is not None
-        assert abs(m.dock_x - 272.0) < 1.0
-        assert abs(m.dock_y - 341.2) < 1.0
+        assert abs(m.dock_x - 266.6) < 1.0
+        assert abs(m.dock_y - 341.4) < 1.0
 
     def test_dock_position_from_field8_float(self) -> None:
         """bbp may return fixed32 fields as Python floats directly."""
@@ -805,11 +833,11 @@ class TestMapData:
             "17": b"",
         }}
         m = MapData.from_response(decoded)
-        # factor 1.0: -8.0188 - (-280) = 271.98, 0.221 - (-341) = 341.22
+        # factor 100 / 60: -8.0188 * 1.667 - (-280) = 266.64
         assert m.dock_x is not None
         assert m.dock_y is not None
-        assert abs(m.dock_x - 272.0) < 1.0
-        assert abs(m.dock_y - 341.2) < 1.0
+        assert abs(m.dock_x - 266.6) < 1.0
+        assert abs(m.dock_y - 341.4) < 1.0
 
     def test_dock_position_missing_field8(self) -> None:
         """No dock position when field 8 is missing."""
@@ -877,6 +905,49 @@ class TestMapData:
         decoded = {"2": {"3": 60, "4": 10, "5": 10, "17": b""}}
         m = MapData.from_response(decoded)
         assert m.obstacles == []
+
+    def test_field26_room_boundaries_are_not_reported_as_carpets(self) -> None:
+        """Map field 26 is room-boundary geometry, not rug/carpet metadata."""
+        decoded = {
+            "2": {
+                "3": 60,
+                "4": 10,
+                "5": 10,
+                "12": [{"1": 1, "2": 0, "3": b"Kitchen"}],
+                "17": b"",
+                "26": {
+                    "1": 1,
+                    "2": [
+                        {"1": 0, "2": 0},
+                        {"1": 0, "2": 9},
+                        {"1": 9, "2": 9},
+                        {"1": 9, "2": 0},
+                    ],
+                },
+            }
+        }
+
+        m = MapData.from_response(decoded)
+
+        assert m.carpets == []
+        assert m.room_surfaces == {}
+
+    def test_room_surfaces_unknown_without_confirmed_carpet_source(self) -> None:
+        """Room pixels alone must not label every room as hard floor."""
+        decoded = {
+            "2": {
+                "3": 60,
+                "4": 4,
+                "5": 4,
+                "12": [{"1": 1, "2": 0, "3": b"Kitchen"}],
+                "17": _make_compressed_grid(4, 4, fill_value=1 << 8),
+            }
+        }
+
+        m = MapData.from_response(decoded)
+
+        assert m.room_bounds == {1: (0, 0, 3, 3)}
+        assert m.room_surfaces == {}
 
 
 class TestObstacleInfo:

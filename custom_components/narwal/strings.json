@@ -100,6 +100,9 @@
       "dry_mop_remaining_time": {
         "name": "Drying time left"
       },
+      "map_metadata": {
+        "name": "Map metadata"
+      },
       "task_status": {
         "name": "Status",
         "state": {

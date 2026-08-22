@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -23,6 +25,8 @@ from .const import TASK_RESULT_OPTIONS
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
 
+_MAX_MAP_METADATA_ATTRIBUTE_BYTES = 16 * 1024
+
 
 @dataclass(frozen=True, kw_only=True)
 class NarwalSensorEntityDescription(SensorEntityDescription):
@@ -38,6 +42,70 @@ def _has_active_cleaning_metrics(state: NarwalState) -> bool:
         or state.has_recent_active_working_status
         or state.is_paused
     )
+
+
+def _json_size_bytes(value: dict[str, Any]) -> int:
+    """Return a compact JSON byte-size estimate for Home Assistant attributes."""
+    return len(
+        json.dumps(
+            value,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    )
+
+
+def _fit_map_metadata_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
+    """Drop bulky geometry if map metadata would exceed HA's attribute limit."""
+    if _json_size_bytes(attributes) <= _MAX_MAP_METADATA_ATTRIBUTE_BYTES:
+        return attributes
+
+    compact = dict(attributes)
+    compact["rooms"] = [
+        {
+            key: value
+            for key, value in room.items()
+            if key != "polygons"
+        }
+        for room in attributes.get("rooms", [])
+    ]
+    compact["rugs"] = [
+        {
+            key: value
+            for key, value in rug.items()
+            if key != "points"
+        }
+        for rug in attributes.get("rugs", [])
+    ]
+    compact["geometry_omitted"] = True
+    compact["geometry_omitted_reason"] = "attribute_size"
+    if _json_size_bytes(compact) <= _MAX_MAP_METADATA_ATTRIBUTE_BYTES:
+        return compact
+
+    compact["rooms"] = [
+        {
+            key: value
+            for key, value in room.items()
+            if key in {"id", "name", "room_type", "surface"}
+        }
+        for room in compact.get("rooms", [])
+    ]
+    compact["rugs"] = [
+        {
+            key: value
+            for key, value in rug.items()
+            if key in {"id", "room_id", "room_name", "behavior"}
+        }
+        for rug in compact.get("rugs", [])
+    ]
+    compact["metadata_truncated"] = True
+    compact["metadata_truncated_reason"] = "attribute_size"
+    if _json_size_bytes(compact) <= _MAX_MAP_METADATA_ATTRIBUTE_BYTES:
+        return compact
+
+    compact["rooms"] = []
+    compact["rugs"] = []
+    return compact
 
 
 def _station_task(state: NarwalState) -> str | None:
@@ -149,7 +217,9 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         icon="mdi:map-marker",
         # working_status field 6: room_id of the room currently being cleaned.
         # Resolved to a display name via the cached room map from get_map.
-        value_fn=lambda state: state.current_room_name,
+        value_fn=lambda state: state.current_room_name
+        if _has_active_cleaning_metrics(state)
+        else None,
         available_fn=lambda state: (
             state.current_room_name is not None and _has_active_cleaning_metrics(state)
         ),
@@ -200,6 +270,7 @@ async def async_setup_entry(
     ]
     entities.append(NarwalChargingStateSensor(coordinator))
     entities.append(NarwalTaskStatusSensor(coordinator))
+    entities.append(NarwalMapMetadataSensor(coordinator))
     async_add_entities(entities)
 
 
@@ -238,6 +309,103 @@ class NarwalSensor(NarwalEntity, SensorEntity):
         if self.entity_description.available_fn is None:
             return True
         return self.entity_description.available_fn(state)
+
+
+class NarwalMapMetadataSensor(NarwalEntity, SensorEntity):
+    """Static room geometry from the active Narwal map."""
+
+    _attr_translation_key = "map_metadata"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:map-outline"
+
+    def __init__(self, coordinator: NarwalCoordinator) -> None:
+        """Initialize the map metadata sensor."""
+        super().__init__(coordinator)
+        device_id = coordinator.config_entry.data["device_id"]
+        self._attr_unique_id = f"{device_id}_map_metadata"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the active map identifier."""
+        state = self.coordinator.data
+        if state is None or state.map_data is None:
+            return None
+        map_id = state.map_data.map_id
+        return None if map_id in (None, "", 0, "0") else map_id
+
+    @property
+    def available(self) -> bool:
+        """Return False until map metadata has been loaded."""
+        return super().available and self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return room masks and rug geometry."""
+        state = self.coordinator.data
+        if state is None or state.map_data is None:
+            return None
+        map_data = state.map_data
+        room_names = {room.room_id: room.display_name for room in map_data.rooms}
+        rooms = []
+        for room in map_data.rooms:
+            bounds = map_data.room_bounds.get(room.room_id)
+            polygons = map_data.room_polygons.get(room.room_id, [])
+            if bounds is None or not polygons:
+                continue
+            center = map_data.room_centers.get(room.room_id)
+            room_attrs = {
+                "id": room.room_id,
+                "name": room.display_name,
+                "room_type": room.room_sub_type,
+                "bounds": {
+                    "x": bounds[0],
+                    "y": bounds[1],
+                    "width": bounds[2] - bounds[0] + 1,
+                    "height": bounds[3] - bounds[1] + 1,
+                },
+                "label": (
+                    {"x": round(center[0], 2), "y": round(center[1], 2)}
+                    if center is not None
+                    else None
+                ),
+                "polygons": [
+                    [{"x": round(x, 2), "y": round(y, 2)} for x, y in polygon]
+                    for polygon in polygons
+                ],
+            }
+            surface = map_data.room_surfaces.get(room.room_id)
+            if surface is not None:
+                room_attrs["surface"] = surface
+            rooms.append(room_attrs)
+        rugs = [
+            {
+                "id": carpet.id,
+                "room_id": carpet.room_id,
+                "room_name": room_names.get(carpet.room_id),
+                "behavior": carpet.behavior,
+                "points": [
+                    {"x": round(x, 2), "y": round(y, 2)}
+                    for x, y in carpet.to_grid_polygon(
+                        map_data.origin_x,
+                        map_data.origin_y,
+                    )
+                ],
+            }
+            for carpet in map_data.carpets
+            if not carpet.is_flooring
+        ]
+        attributes: dict[str, Any] = {
+            "map_size": {"width": map_data.width, "height": map_data.height},
+            "map_resolution": map_data.resolution,
+            "rooms": rooms,
+            "rugs": rugs,
+        }
+        if map_data.dock_x is not None and map_data.dock_y is not None:
+            attributes["dock_position"] = {
+                "x": round(map_data.dock_x, 2),
+                "y": round(map_data.dock_y, 2),
+            }
+        return _fit_map_metadata_attributes(attributes)
 
 
 class NarwalChargingStateSensor(NarwalEntity, SensorEntity):

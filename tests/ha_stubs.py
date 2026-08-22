@@ -43,6 +43,9 @@ def install() -> None:
     # homeassistant.const
     ha_const = _mod("homeassistant.const", ha)
     ha_const.Platform = MagicMock()  # type: ignore[attr-defined]
+    ha_const.PERCENTAGE = "%"  # type: ignore[attr-defined]
+    ha_const.UnitOfArea = MagicMock()  # type: ignore[attr-defined]
+    ha_const.UnitOfTime = MagicMock()  # type: ignore[attr-defined]
 
     class _EntityCategory:
         CONFIG = "config"
@@ -331,28 +334,6 @@ def install() -> None:
 
     ha_sensor = _mod("homeassistant.components.sensor", ha_comp)
 
-    @dataclass(frozen=True, kw_only=True)
-    class _SensorEntityDescription:
-        """Stub for SensorEntityDescription."""
-
-        key: str
-        name: str | None = None
-        translation_key: str | None = None
-        icon: str | None = None
-        device_class: object | None = None
-        native_unit_of_measurement: str | None = None
-        state_class: object | None = None
-        entity_category: object | None = None
-        options: list | None = None
-
-    class _SensorDeviceClass:
-        BATTERY = "battery"
-        DURATION = "duration"
-        ENUM = "enum"
-
-    class _SensorStateClass:
-        MEASUREMENT = "measurement"
-
     class _SensorEntity:
         """Stub for SensorEntity base class."""
 
@@ -363,9 +344,33 @@ def install() -> None:
             pass
 
     ha_sensor.SensorEntity = _SensorEntity  # type: ignore[attr-defined]
-    ha_sensor.SensorEntityDescription = _SensorEntityDescription  # type: ignore[attr-defined]
+
+    class _SensorDeviceClass:
+        BATTERY = "battery"
+        DURATION = "duration"
+        ENUM = "enum"
+
+    class _SensorStateClass:
+        MEASUREMENT = "measurement"
+
     ha_sensor.SensorDeviceClass = _SensorDeviceClass  # type: ignore[attr-defined]
     ha_sensor.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
+
+    @dataclass(frozen=True, kw_only=True)
+    class _SensorEntityDescription:
+        """Stub for SensorEntityDescription fields used by Narwal sensors."""
+
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        entity_category: object | None = None
+        device_class: object | None = None
+        icon: str | None = None
+        native_unit_of_measurement: str | None = None
+        state_class: object | None = None
+        options: list | None = None
+
+    ha_sensor.SensorEntityDescription = _SensorEntityDescription  # type: ignore[attr-defined]
 
     ha_bs = _mod("homeassistant.components.binary_sensor", ha_comp)
 

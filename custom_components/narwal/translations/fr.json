@@ -100,6 +100,9 @@
       "dry_mop_remaining_time": {
         "name": "Temps de séchage restant"
       },
+      "map_metadata": {
+        "name": "Métadonnées de la carte"
+      },
       "task_status": {
         "name": "État",
         "state": {

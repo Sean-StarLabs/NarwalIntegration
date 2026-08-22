@@ -19,6 +19,7 @@ from narwal_client.const import (
     TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_CLEAN_TASK,
     TOPIC_CMD_GET_CONSUMABLE_INFO,
+    TOPIC_CMD_GET_MAP,
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_BASE_STATUS,
     TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
@@ -749,6 +750,88 @@ class TestTaskDetailQueries:
             wait_if_busy=False,
         )
         assert client.state.task_progress_percent == 72
+
+    @pytest.mark.asyncio
+    async def test_optional_task_query_skips_when_command_channel_busy(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        client._ws = AsyncMock()
+        client._connected.set()
+
+        await client._command_lock.acquire()
+        try:
+            with pytest.raises(NarwalCommandError):
+                await client.get_clean_progress_info()
+        finally:
+            client._command_lock.release()
+
+        client._ws.send.assert_not_awaited()
+
+
+class TestMapQueries:
+    """Tests for map download behavior."""
+
+    @pytest.mark.asyncio
+    async def test_get_map_parses_response_off_event_loop(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        data = {"2": {"1": 7}}
+        expected = MapData(map_id=7)
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch(
+                "narwal_client.client.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as to_thread,
+        ):
+            mock_send.return_value = CommandResponse(data=data)
+            to_thread.return_value = expected
+
+            result = await client.get_map()
+
+        mock_send.assert_awaited_once_with(TOPIC_CMD_GET_MAP, timeout=15.0)
+        to_thread.assert_awaited_once_with(MapData.from_response, data)
+        assert result is expected
+        assert client.state.map_data is expected
+
+    @pytest.mark.asyncio
+    async def test_get_map_failure_preserves_existing_map(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        previous = MapData(map_id=3, rooms=[RoomInfo(room_id=4)])
+        client.state.map_data = previous
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch(
+                "narwal_client.client.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as to_thread,
+        ):
+            mock_send.return_value = CommandResponse(
+                result_code=CommandResult.NOT_READY,
+                data={},
+            )
+
+            result = await client.get_map()
+
+        mock_send.assert_awaited_once_with(TOPIC_CMD_GET_MAP, timeout=15.0)
+        to_thread.assert_not_awaited()
+        assert result is previous
+        assert client.state.map_data is previous
+
+    @pytest.mark.asyncio
+    async def test_get_map_failure_without_previous_map_raises(self) -> None:
+        client = NarwalClient("127.0.0.1")
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(
+                result_code=CommandResult.NOT_READY,
+                data={},
+            )
+
+            with pytest.raises(NarwalCommandError, match="Map query failed"):
+                await client.get_map()
+
+        assert client.state.map_data is None
 
 
 class TestBuildCleanPayloadV2:
