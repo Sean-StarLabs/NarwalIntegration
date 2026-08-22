@@ -3,20 +3,34 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+import time
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from narwal_client.client import NarwalClient, NarwalConnectionError
+from narwal_client.client import (
+    NarwalClient,
+    NarwalCommandError,
+    NarwalConnectionError,
+    _QueuedResponse,
+)
 from narwal_client.const import (
+    TOPIC_CMD_ACTIVE_ROBOT,
+    TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_CLEAN_TASK,
+    TOPIC_CMD_GET_CONSUMABLE_INFO,
+    TOPIC_CMD_GET_BASE_STATUS,
+    TOPIC_CMD_FORCE_END,
+    TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PLAN_START,
+    TOPIC_CMD_TAKE_PICTURE,
     AmbientLightCtrlType,
     CommandResult,
     FanLevel,
     WorkingStatus,
 )
 from narwal_client.models import CommandResponse, MapData, RoomInfo
+from narwal_client.protocol import PROTOBUF_FIELD5_TAG, NarwalMessage, build_frame, parse_frame
 
 
 class TestNarwalClientInit:
@@ -126,6 +140,16 @@ class TestNarwalClientInit:
         assert client._last_response_time > 0
 
     @pytest.mark.asyncio
+    async def test_unmatched_field5_does_not_mark_non_broadcast_model_awake(self) -> None:
+        """Only routed responses count as reachability evidence."""
+        client = NarwalClient("10.0.0.1", supports_broadcasts=False)
+
+        await client._handle_message(bytes([0x01, 0x02, PROTOBUF_FIELD5_TAG, 0x00]))
+
+        assert not client.robot_awake
+        assert client._last_response_time == 0
+
+    @pytest.mark.asyncio
     async def test_non_broadcast_wake_returns_without_waiting(self) -> None:
         """A connected non-broadcast model does not wait for impossible broadcasts."""
         client = NarwalClient("10.0.0.1", supports_broadcasts=False)
@@ -136,6 +160,498 @@ class TestNarwalClientInit:
             assert await client.wake(timeout=10.0)
 
         wake_burst.assert_not_awaited()
+
+
+class TestCommandResponseRouting:
+    """Command responses must be matched to their command topic."""
+
+    @staticmethod
+    def _message(short_topic: str, payload: bytes = b"\x08\x01") -> NarwalMessage:
+        full_topic = f"/mock/device/{short_topic}"
+        return NarwalMessage(
+            topic=full_topic,
+            payload=payload,
+            header_byte=len(full_topic) + 2,
+            field_tag=PROTOBUF_FIELD5_TAG,
+            raw=b"",
+        )
+
+    @staticmethod
+    def _field5_frame(full_topic: str, payload: bytes = b"\x08\x01") -> bytes:
+        frame = bytearray(build_frame(full_topic, payload))
+        frame[2] = PROTOBUF_FIELD5_TAG
+        return bytes(frame)
+
+    @staticmethod
+    def _field5_frame_with_empty_topic(payload: bytes = b"\x08\x01") -> bytes:
+        return bytes([0x01, 0x02, PROTOBUF_FIELD5_TAG, 0x00]) + payload
+
+    @staticmethod
+    def _broadcast_frame(full_topic: str, payload: bytes = b"") -> bytes:
+        return build_frame(full_topic, payload)
+
+    @pytest.mark.asyncio
+    async def test_listener_mode_uses_matching_response_topic(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = True
+        await client._response_queue_for(TOPIC_CMD_GET_BASE_STATUS).put(
+            _QueuedResponse(
+                time.monotonic(),
+                self._message(TOPIC_CMD_GET_BASE_STATUS, b"\x08\x03"),
+            )
+        )
+
+        async def enqueue_expected() -> None:
+            await asyncio.sleep(0)
+            await client._response_queue_for(TOPIC_CMD_FORCE_END).put(
+                _QueuedResponse(time.monotonic(), self._message(TOPIC_CMD_FORCE_END))
+            )
+
+        task = asyncio.create_task(enqueue_expected())
+        result = await client.send_command(TOPIC_CMD_FORCE_END)
+        await task
+
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_listener_mode_accepts_empty_response_topic(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = True
+
+        async def enqueue_expected() -> None:
+            await asyncio.sleep(0)
+            await client._handle_message(self._field5_frame_with_empty_topic())
+
+        task = asyncio.create_task(enqueue_expected())
+        result = await client.send_command(TOPIC_CMD_FORCE_END)
+        await task
+
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_listener_mode_rejects_empty_response_topic_for_data_query(self) -> None:
+        """Delayed fire-and-forget ACKs must not satisfy query commands."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = True
+
+        async def enqueue_responses() -> None:
+            await asyncio.sleep(0)
+            await client._handle_message(self._field5_frame_with_empty_topic())
+            await client._handle_message(
+                self._field5_frame(client._full_topic(TOPIC_CMD_GET_CONSUMABLE_INFO))
+            )
+
+        task = asyncio.create_task(enqueue_responses())
+        result = await client.send_command(TOPIC_CMD_GET_CONSUMABLE_INFO)
+        await task
+
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_late_optional_topicless_ack_does_not_satisfy_next_command(self) -> None:
+        """A delayed optional wake ACK must not complete a following user command."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = True
+
+        with patch("narwal_client.client._TOPICLESS_ACK_QUARANTINE_SECONDS", 0.01):
+            assert not await client._send_optional_ack_command(
+                TOPIC_CMD_NOTIFY_APP_EVENT,
+                timeout=0.001,
+                label="Wake burst",
+            )
+
+            async def enqueue_responses() -> None:
+                await asyncio.sleep(0)
+                await client._handle_message(self._field5_frame_with_empty_topic())
+                await asyncio.sleep(0.02)
+                await client._handle_message(
+                    self._field5_frame(
+                        client._full_topic(TOPIC_CMD_FORCE_END),
+                        b"\x08\x03",
+                    )
+                )
+
+            task = asyncio.create_task(enqueue_responses())
+            result = await client.send_command(TOPIC_CMD_FORCE_END)
+            await task
+
+        assert result.result_code == CommandResult.CONFLICT
+
+    @pytest.mark.asyncio
+    async def test_late_user_action_topicless_ack_does_not_satisfy_next_command(self) -> None:
+        """A timed-out user command's late ACK must not complete the next command."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = True
+
+        with patch("narwal_client.client._TOPICLESS_ACK_QUARANTINE_SECONDS", 0.01):
+            with pytest.raises(NarwalCommandError):
+                await client.send_command(TOPIC_CMD_FORCE_END, timeout=0.001)
+
+            async def enqueue_responses() -> None:
+                await asyncio.sleep(0)
+                await client._handle_message(self._field5_frame_with_empty_topic())
+                await asyncio.sleep(0.02)
+                await client._handle_message(
+                    self._field5_frame(
+                        client._full_topic(TOPIC_CMD_FORCE_END),
+                        b"\x08\x03",
+                    )
+                )
+
+            task = asyncio.create_task(enqueue_responses())
+            result = await client.send_command(TOPIC_CMD_FORCE_END)
+            await task
+
+        assert result.result_code == CommandResult.CONFLICT
+
+    @pytest.mark.asyncio
+    async def test_timeout_sized_barrier_rejects_later_topicless_ack(self) -> None:
+        """The ambiguity barrier follows the command timeout, not a short fixed delay."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = True
+
+        with patch("narwal_client.client._TOPICLESS_ACK_QUARANTINE_SECONDS", 0.01):
+            with pytest.raises(NarwalCommandError):
+                await client.send_command(TOPIC_CMD_FORCE_END, timeout=0.03)
+
+            async def enqueue_responses() -> None:
+                await asyncio.sleep(0.02)
+                await client._handle_message(self._field5_frame_with_empty_topic())
+                await asyncio.sleep(0.02)
+                await client._handle_message(
+                    self._field5_frame(
+                        client._full_topic(TOPIC_CMD_FORCE_END),
+                        b"\x08\x03",
+                    )
+                )
+
+            task = asyncio.create_task(enqueue_responses())
+            result = await client.send_command(TOPIC_CMD_FORCE_END)
+            await task
+
+        assert result.result_code == CommandResult.CONFLICT
+
+    @pytest.mark.asyncio
+    async def test_listener_barrier_preserves_next_topicless_ack(self) -> None:
+        """The barrier must drop the stale ACK, not the next command's ACK."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = True
+
+        with patch("narwal_client.client._TOPICLESS_ACK_QUARANTINE_SECONDS", 0.01):
+            with pytest.raises(NarwalCommandError):
+                await client.send_command(TOPIC_CMD_FORCE_END, timeout=0.001)
+
+            async def enqueue_responses() -> None:
+                await asyncio.sleep(0)
+                await client._handle_message(self._field5_frame_with_empty_topic())
+                await asyncio.sleep(0.02)
+                await client._handle_message(self._field5_frame_with_empty_topic())
+
+            task = asyncio.create_task(enqueue_responses())
+            result = await client.send_command(TOPIC_CMD_FORCE_END)
+            await task
+
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_direct_recv_barrier_preserves_next_topicless_ack(self) -> None:
+        """Direct receive mode drains the stale ACK before sending again."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = False
+        frames: asyncio.Queue[bytes] = asyncio.Queue()
+
+        async def recv() -> bytes:
+            return await frames.get()
+
+        client._ws.recv = recv
+
+        with patch("narwal_client.client._TOPICLESS_ACK_QUARANTINE_SECONDS", 0.01):
+            with pytest.raises(NarwalCommandError):
+                await client.send_command(TOPIC_CMD_FORCE_END, timeout=0.001)
+
+            async def enqueue_responses() -> None:
+                await asyncio.sleep(0)
+                await frames.put(self._field5_frame_with_empty_topic())
+                await frames.put(
+                    self._broadcast_frame(
+                        client._full_topic("status/download_status"),
+                        b"\x18\x01",
+                    )
+                )
+                await asyncio.sleep(0.02)
+                await frames.put(self._field5_frame_with_empty_topic())
+
+            client.on_state_update = MagicMock()
+            task = asyncio.create_task(enqueue_responses())
+            result = await client.send_command(TOPIC_CMD_FORCE_END)
+            await task
+
+        assert result.success
+        assert client.state.download_status == 1
+        client.on_state_update.assert_called_once_with(client.state)
+
+    def test_topicless_ack_does_not_match_picture_query(self) -> None:
+        """Image-producing commands must wait for their own field5 response."""
+        msg = parse_frame(self._field5_frame_with_empty_topic())
+
+        assert not NarwalClient._field5_response_matches(msg, TOPIC_CMD_TAKE_PICTURE)
+
+    @pytest.mark.asyncio
+    async def test_listener_mode_discards_unmatched_empty_response_topic(self) -> None:
+        """Empty-topic responses are useful only while a command is pending."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+
+        await client._handle_message(self._field5_frame_with_empty_topic())
+        await client._handle_message(self._field5_frame(client._full_topic("response")))
+
+        assert client._response_queues == {}
+
+    @pytest.mark.asyncio
+    async def test_listener_mode_accepts_response_suffix_topic(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = True
+
+        async def enqueue_expected() -> None:
+            await asyncio.sleep(0)
+            await client._handle_message(
+                self._field5_frame(client._full_topic(f"{TOPIC_CMD_FORCE_END}/response"))
+            )
+
+        task = asyncio.create_task(enqueue_expected())
+        result = await client.send_command(TOPIC_CMD_FORCE_END)
+        await task
+
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_wake_burst_sends_passive_frames_without_ack_waits(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        send_command = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        with (
+            patch.object(client, "send_command", send_command),
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            assert await client._send_wake_burst()
+
+        assert client._ws.send.await_count == 4
+        sent_topics = [
+            parse_frame(call.args[0]).short_topic
+            for call in client._ws.send.await_args_list
+        ]
+        assert sent_topics == [
+            TOPIC_CMD_NOTIFY_APP_EVENT,
+            TOPIC_CMD_ACTIVE_ROBOT,
+            TOPIC_CMD_ACTIVE_ROBOT,
+            TOPIC_CMD_APP_HEARTBEAT,
+        ]
+        send_command.assert_awaited_once_with(
+            TOPIC_CMD_GET_BASE_STATUS,
+            timeout=2.0,
+            wait_if_busy=False,
+        )
+        assert client._topicless_ack_quarantine_until > 0
+
+    @pytest.mark.asyncio
+    async def test_subscribe_to_topics_uses_command_channel(self) -> None:
+        """Subscription ACKs must be owned instead of racing the next query."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            assert await client.subscribe_to_topics(duration=123)
+
+        mock_send.assert_awaited_once()
+        assert mock_send.await_args.args[0] == TOPIC_CMD_ACTIVE_ROBOT
+        assert mock_send.await_args.kwargs == {
+            "timeout": 2.0,
+            "wait_if_busy": False,
+        }
+
+    @pytest.mark.asyncio
+    async def test_subscribe_to_topics_rejects_failed_ack(self) -> None:
+        """A rejected subscription ACK must leave retry timing unchanged."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(result_code=CommandResult.NOT_READY)
+            assert not await client.subscribe_to_topics(duration=123)
+
+    @pytest.mark.asyncio
+    async def test_wake_burst_reports_failed_full_subscription_send(self) -> None:
+        """Only the full active_robot subscription frame counts as a renewal."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._ws.send.side_effect = [
+            None,
+            RuntimeError("subscription failed"),
+            None,
+            None,
+        ]
+
+        with (
+            patch.object(
+                client,
+                "send_command",
+                new_callable=AsyncMock,
+                return_value=CommandResponse(result_code=CommandResult.SUCCESS),
+            ),
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            assert not await client._send_wake_burst()
+
+    @pytest.mark.asyncio
+    async def test_wake_burst_sends_frames_when_command_busy(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+
+        await client._command_lock.acquire()
+        try:
+            with patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock):
+                assert await client._send_wake_burst()
+        finally:
+            client._command_lock.release()
+
+        assert client._ws.send.await_count == 4
+
+    @pytest.mark.asyncio
+    async def test_direct_recv_ignores_field5_for_other_topic(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = False
+        client._ws.recv = AsyncMock(
+            side_effect=[
+                self._field5_frame(
+                    client._full_topic(TOPIC_CMD_GET_BASE_STATUS),
+                    b"\x08\x03",
+                ),
+                self._field5_frame(client._full_topic(TOPIC_CMD_FORCE_END)),
+            ]
+        )
+
+        result = await client.send_command(TOPIC_CMD_FORCE_END)
+
+        assert result.success
+        assert client._ws.recv.await_count == 2
+        queued = client._response_queue_for(TOPIC_CMD_GET_BASE_STATUS).get_nowait()
+        assert queued.message.short_topic == TOPIC_CMD_GET_BASE_STATUS
+
+    @pytest.mark.asyncio
+    async def test_direct_recv_accepts_empty_response_topic(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = False
+        client._ws.recv = AsyncMock(return_value=self._field5_frame_with_empty_topic())
+
+        result = await client.send_command(TOPIC_CMD_FORCE_END)
+
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_direct_recv_accepts_response_suffix_topic(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = False
+        client._ws.recv = AsyncMock(
+            return_value=self._field5_frame(client._full_topic(f"{TOPIC_CMD_FORCE_END}/response"))
+        )
+
+        result = await client.send_command(TOPIC_CMD_FORCE_END)
+
+        assert result.success
+
+    @pytest.mark.asyncio
+    async def test_malformed_command_response_raises(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = False
+        client._ws.recv = AsyncMock(
+            return_value=self._field5_frame(client._full_topic(TOPIC_CMD_FORCE_END))
+        )
+
+        with (
+            patch.object(client, "_decode_protobuf", side_effect=ValueError("bad")),
+            pytest.raises(NarwalCommandError, match="Could not decode response"),
+        ):
+            await client.send_command(TOPIC_CMD_FORCE_END)
+
+    @pytest.mark.asyncio
+    async def test_direct_recv_preserves_expected_topic_after_broadcast(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = False
+        client._ws.recv = AsyncMock(
+            side_effect=[
+                self._broadcast_frame(
+                    client._full_topic("status/download_status"),
+                    b"\x18\x01",
+                ),
+                self._field5_frame(client._full_topic(TOPIC_CMD_FORCE_END)),
+            ]
+        )
+
+        client.on_state_update = MagicMock()
+        result = await client.send_command(TOPIC_CMD_FORCE_END)
+
+        assert result.success
+        assert client._ws.recv.await_count == 2
+        assert client.state.download_status == 1
+        client.on_state_update.assert_called_once_with(client.state)
+        assert client.robot_awake
+
+
+class TestConsumableInfoQuery:
+    """Tests for local consumable-info polling."""
+
+    @pytest.mark.asyncio
+    async def test_failed_consumable_info_query_preserves_existing_alerts(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        client.state.maintain_items = [4]
+        client.state.replace_items = [20]
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(
+                result_code=CommandResult.NOT_READY,
+                data={},
+            )
+
+            await client.get_consumable_info()
+
+        mock_send.assert_awaited_once()
+        assert client.state.maintain_items == [4]
+        assert client.state.replace_items == [20]
 
 
 class TestBuildCleanPayloadV2:

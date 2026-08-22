@@ -19,10 +19,11 @@ from narwal_client.models import (
 class TestCommandResponse:
     """Tests for Narwal command responses."""
 
-    def test_success_accepts_success_code(self) -> None:
-        """Narwal reports successful commands with the success enum."""
+    def test_success_accepts_zero_and_success_code(self) -> None:
+        """Narwal uses several success codes for accepted commands."""
+        assert CommandResponse(result_code=0).success
         assert CommandResponse(result_code=CommandResult.SUCCESS).success
-        assert not CommandResponse(result_code=0).success
+        assert CommandResponse(result_code=CommandResult.APPLIED).success
         assert not CommandResponse(result_code=CommandResult.CONFLICT).success
 
 

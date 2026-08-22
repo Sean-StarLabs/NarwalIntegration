@@ -189,6 +189,14 @@ class NarwalBinarySensor(NarwalEntity, BinarySensorEntity):
         return self.entity_description.value_fn(state)
 
     @property
+    def available(self) -> bool:
+        """Return False when this model has not reported the backing field."""
+        if not super().available:
+            return False
+        state = self.coordinator.data
+        return state is not None and self.entity_description.value_fn(state) is not None
+
+    @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Optional per-sensor attributes (e.g. fault code detail)."""
         state = self.coordinator.data

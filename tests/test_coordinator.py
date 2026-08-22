@@ -267,6 +267,18 @@ class TestTopicSubscriptionRenewal:
         c.client.subscribe_to_topics.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_skipped_renewal_keeps_retry_window_open(self) -> None:
+        """A busy command channel should not mark a subscription as renewed."""
+        last_subscribe = time.monotonic() - (TOPIC_RESUBSCRIBE_AFTER + 30)
+        c = self._coordinator(last_subscribe)
+        c.client.subscribe_to_topics = AsyncMock(return_value=False)
+
+        await c._async_update_data()
+
+        c.client.subscribe_to_topics.assert_awaited_once()
+        assert c._last_topic_subscribe == last_subscribe
+
+    @pytest.mark.asyncio
     async def test_does_not_renew_while_subscription_is_fresh(self) -> None:
         """A fresh subscription is not re-sent on every poll."""
         c = self._coordinator(time.monotonic())

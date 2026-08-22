@@ -55,6 +55,17 @@ def install() -> None:
     ha_core.HomeAssistant = MagicMock  # type: ignore[attr-defined]
     ha_core.callback = lambda f: f  # type: ignore[attr-defined]
 
+    ha_util = _mod("homeassistant.util", ha)
+    ha_util.slugify = lambda value: str(value).lower().replace(" ", "_")  # type: ignore[attr-defined]
+
+    # homeassistant.auth.permissions.const
+    ha_auth = _mod("homeassistant.auth", ha)
+    ha_auth_permissions = _mod("homeassistant.auth.permissions", ha_auth)
+    ha_auth_permissions_const = _mod(
+        "homeassistant.auth.permissions.const", ha_auth_permissions
+    )
+    ha_auth_permissions_const.POLICY_CONTROL = "control"  # type: ignore[attr-defined]
+
     # homeassistant.exceptions
     ha_exc = _mod("homeassistant.exceptions", ha)
     ha_exc.ConfigEntryNotReady = type("ConfigEntryNotReady", (Exception,), {})  # type: ignore[attr-defined]
@@ -259,6 +270,29 @@ def install() -> None:
             pass
 
     ha_select.SelectEntity = _SelectEntity  # type: ignore[attr-defined]
+
+    ha_button = _mod("homeassistant.components.button", ha_comp)
+
+    class _ButtonEntity:
+        """Stub for ButtonEntity base class."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+        def async_write_ha_state(self) -> None:
+            pass
+
+    @dataclass(frozen=True, kw_only=True)
+    class _ButtonEntityDescription:
+        """Stub for ButtonEntityDescription."""
+
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        entity_category: object | None = None
+
+    ha_button.ButtonEntity = _ButtonEntity  # type: ignore[attr-defined]
+    ha_button.ButtonEntityDescription = _ButtonEntityDescription  # type: ignore[attr-defined]
 
     ha_number = _mod("homeassistant.components.number", ha_comp)
 

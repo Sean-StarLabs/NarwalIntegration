@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import tests.ha_stubs
 
 tests.ha_stubs.install()
@@ -9,9 +11,20 @@ tests.ha_stubs.install()
 from narwal_client.models import NarwalState  # noqa: E402
 from custom_components.narwal.binary_sensor import (  # noqa: E402
     BINARY_SENSOR_DESCRIPTIONS,
+    NarwalBinarySensor,
 )
 
 _DESCS = {d.key: d for d in BINARY_SENSOR_DESCRIPTIONS}
+
+
+def _binary_sensor(state: NarwalState, key: str) -> NarwalBinarySensor:
+    coordinator = MagicMock()
+    coordinator.data = state
+    coordinator.last_update_success = True
+    coordinator.config_entry.data = {"device_id": "dev1", "product_key": "QoEsI5qYXO"}
+    coordinator.config_entry.title = "Narwal Test"
+    coordinator.client.state.firmware_version = "1.0.0"
+    return NarwalBinarySensor(coordinator, _DESCS[key])
 
 
 def test_error_gated_on_base_status_seen() -> None:
@@ -84,6 +97,20 @@ def test_tank_problem_states() -> None:
     s.update_from_base_status({"23": 2, "39": 3})  # EMPTY / SUGGEST_REPLACE
     assert cw(s) is True
     assert sb(s) is True
+
+
+def test_unreported_problem_sensor_is_unavailable() -> None:
+    """Field-dependent diagnostics are unavailable until their backing field appears."""
+    state = NarwalState()
+    sensor = _binary_sensor(state, "clean_water_tank")
+
+    assert not sensor.available
+    assert sensor.is_on is None
+
+    state.update_from_base_status({"23": 1})
+
+    assert sensor.available
+    assert sensor.is_on is False
 
 
 def test_unspecified_is_not_a_problem() -> None:

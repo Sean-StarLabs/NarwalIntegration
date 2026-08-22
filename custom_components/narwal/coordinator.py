@@ -138,8 +138,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         # Must be sent before listener starts so display_map flows during cleaning.
         if self.client.supports_broadcasts:
             try:
-                await self.client.subscribe_to_topics()
-                self._last_topic_subscribe = time.monotonic()
+                if await self.client.subscribe_to_topics():
+                    self._last_topic_subscribe = time.monotonic()
             except Exception:
                 _LOGGER.debug("Could not send topic subscription at startup")
 
@@ -254,8 +254,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return
         if self.client.supports_broadcasts:
             try:
-                await self.client.subscribe_to_topics()
-                self._last_topic_subscribe = time.monotonic()
+                if await self.client.subscribe_to_topics():
+                    self._last_topic_subscribe = time.monotonic()
             except Exception:
                 _LOGGER.debug("Topic subscription failed after map load")
         self.async_set_updated_data(self.client.state)
@@ -265,8 +265,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if not self.client.supports_broadcasts:
             return
         try:
-            await self.client.subscribe_to_topics()
-            self._last_topic_subscribe = time.monotonic()
+            if await self.client.subscribe_to_topics():
+                self._last_topic_subscribe = time.monotonic()
         except Exception:
             _LOGGER.debug("Topic re-subscription failed")
 
@@ -327,9 +327,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             and time.monotonic() - self._last_topic_subscribe > TOPIC_RESUBSCRIBE_AFTER
         ):
             try:
-                await self.client.subscribe_to_topics()
-                self._last_topic_subscribe = time.monotonic()
-                _LOGGER.debug("Renewed topic subscription")
+                if await self.client.subscribe_to_topics():
+                    self._last_topic_subscribe = time.monotonic()
+                    _LOGGER.debug("Renewed topic subscription")
             except Exception:
                 _LOGGER.debug("Topic subscription renewal failed")
 

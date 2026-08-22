@@ -502,7 +502,7 @@ class CommandResponse:
 
     @property
     def success(self) -> bool:
-        return self.result_code == CommandResult.SUCCESS
+        return self.result_code in (0, CommandResult.SUCCESS, CommandResult.APPLIED)
 
     @property
     def not_applicable(self) -> bool:

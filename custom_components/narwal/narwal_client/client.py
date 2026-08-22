@@ -7,6 +7,7 @@ import logging
 import random
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 import websockets
@@ -26,7 +27,9 @@ from .const import (
     TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_AMBIENT_LIGHT_CTRL,
     TOPIC_CMD_CANCEL,
+    TOPIC_CMD_DRY_DUST_BAG,
     TOPIC_CMD_DRY_MOP,
+    TOPIC_CMD_DRY_STATION_BAG,
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_EASY_CLEAN,
     TOPIC_CMD_FORCE_END,
@@ -50,6 +53,7 @@ from .const import (
     TOPIC_CMD_GET_DEBUG_IMAGE,
     TOPIC_CMD_SET_LED,
     TOPIC_CMD_WASH_MOP,
+    TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
     DEFAULT_TOPIC_PREFIX,
     WAKE_TIMEOUT,
@@ -79,6 +83,41 @@ _STALE_DOCK_BASE_STATUSES = {
     WorkingStatus.CHARGED,
     WorkingStatus.DOCKED_V2,
 }
+
+_FIELD5_RESPONSE_SUFFIX = "/response"
+_TOPICLESS_ACK_QUARANTINE_SECONDS = COMMAND_RESPONSE_TIMEOUT
+
+_TOPICLESS_ACK_TOPICS = {
+    TOPIC_CMD_ACTIVE_ROBOT,
+    TOPIC_CMD_AMBIENT_LIGHT_CTRL,
+    TOPIC_CMD_APP_HEARTBEAT,
+    TOPIC_CMD_CANCEL,
+    TOPIC_CMD_CLEAN_TASK,
+    TOPIC_CMD_DRY_DUST_BAG,
+    TOPIC_CMD_DRY_MOP,
+    TOPIC_CMD_DRY_STATION_BAG,
+    TOPIC_CMD_DUST_GATHERING,
+    TOPIC_CMD_EASY_CLEAN,
+    TOPIC_CMD_FORCE_END,
+    TOPIC_CMD_NOTIFY_APP_EVENT,
+    TOPIC_CMD_PAUSE,
+    TOPIC_CMD_PLAN_START,
+    TOPIC_CMD_RECALL,
+    TOPIC_CMD_RESUME,
+    TOPIC_CMD_SET_FAN_LEVEL,
+    TOPIC_CMD_SET_LED,
+    TOPIC_CMD_SET_MOP_HUMIDITY,
+    TOPIC_CMD_WASH_MOP,
+    TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
+    TOPIC_CMD_YELL,
+}
+
+@dataclass(frozen=True)
+class _QueuedResponse:
+    """A command response with the time it reached the listener."""
+
+    received_at: float
+    message: NarwalMessage
 
 
 def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStatus | None:
@@ -172,14 +211,125 @@ class NarwalClient:
         self._last_broadcast_time: float = 0.0  # monotonic time of last broadcast
         self._last_response_time: float = 0.0  # monotonic time of last addressed response
         self._last_display_map_time: float = 0.0  # monotonic time of last display_map
-        # Queue for field5 command responses
-        self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
+        # Queues for field5 command responses, keyed by command topic.
+        self._response_queues: dict[str, asyncio.Queue[_QueuedResponse]] = {}
+        self._pending_response_topic: str | None = None
+        self._topicless_ack_quarantine_until: float = 0.0
         # Lock to prevent concurrent send_command calls from racing on the queue
         self._command_lock = asyncio.Lock()
 
     def _full_topic(self, short_topic: str) -> str:
         """Build the full topic path."""
         return f"{self.topic_prefix}/{self.device_id}/{short_topic}"
+
+    def _response_queue_for(self, short_topic: str) -> asyncio.Queue[_QueuedResponse]:
+        """Return the field5 response queue for one command topic."""
+        if short_topic not in self._response_queues:
+            self._response_queues[short_topic] = asyncio.Queue()
+        return self._response_queues[short_topic]
+
+    @staticmethod
+    def _field5_response_matches(msg: NarwalMessage, short_topic: str) -> bool:
+        """Return True when a field5 frame can satisfy a command wait.
+
+        Most robot responses echo the command topic, but captured ACK frames may
+        also use an empty topic or append /response. Empty-topic frames are only
+        accepted for known ACK-style commands so delayed fire-and-forget replies
+        cannot satisfy data queries.
+        """
+        if msg.field_tag != PROTOBUF_FIELD5_TAG:
+            return False
+        if NarwalClient._is_topicless_field5_response(msg):
+            return short_topic in _TOPICLESS_ACK_TOPICS
+        response_topic = msg.short_topic.strip("/")
+        if response_topic == short_topic:
+            return True
+        return response_topic == f"{short_topic}{_FIELD5_RESPONSE_SUFFIX}"
+
+    @staticmethod
+    def _is_topicless_field5_response(msg: NarwalMessage) -> bool:
+        """Return True for ACK frames that do not identify their command topic."""
+        if msg.field_tag != PROTOBUF_FIELD5_TAG:
+            return False
+        response_topic = msg.short_topic.strip("/")
+        return not response_topic or response_topic == "response"
+
+    def _topicless_ack_is_quarantined(self, msg: NarwalMessage) -> bool:
+        """Return True when a late optional ACK should be discarded."""
+        return (
+            self._is_topicless_field5_response(msg)
+            and time.monotonic() < self._topicless_ack_quarantine_until
+        )
+
+    def _quarantine_topicless_acks(self, timeout: float) -> None:
+        """Reject topicless ACKs after an ambiguous command timeout."""
+        self._topicless_ack_quarantine_until = max(
+            self._topicless_ack_quarantine_until,
+            time.monotonic() + timeout,
+        )
+
+    async def _wait_for_topicless_ack_barrier(self, short_topic: str) -> None:
+        """Drain ambiguous topicless ACKs before sending another ACK command."""
+        if short_topic not in _TOPICLESS_ACK_TOPICS:
+            return
+        deadline = self._topicless_ack_quarantine_until
+        now = time.monotonic()
+        if deadline <= now:
+            self._topicless_ack_quarantine_until = 0.0
+            return
+
+        if self._listener_active:
+            await asyncio.sleep(deadline - now)
+            self._topicless_ack_quarantine_until = 0.0
+            return
+
+        drained = 0
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                data = await asyncio.wait_for(
+                    self._ws.recv(), timeout=min(remaining, 0.05)
+                )
+            except asyncio.TimeoutError:
+                continue
+            except Exception:
+                break
+
+            if not isinstance(data, bytes) or len(data) < 4:
+                continue
+            try:
+                msg = parse_frame(data)
+            except ProtocolError:
+                continue
+
+            if self._is_topicless_field5_response(msg):
+                drained += 1
+                continue
+
+            await self._handle_message(data)
+
+        self._topicless_ack_quarantine_until = 0.0
+        if drained:
+            _LOGGER.debug("Drained %d ambiguous topicless ACKs", drained)
+
+    def _field5_response_queue_topic(self, msg: NarwalMessage) -> str | None:
+        """Return the queue topic for a field5 response frame."""
+        if self._topicless_ack_is_quarantined(msg):
+            _LOGGER.debug(
+                "Discarding quarantined topicless field5 ACK during command wait"
+            )
+            return None
+        pending = self._pending_response_topic
+        if pending is not None and self._field5_response_matches(msg, pending):
+            return pending
+        response_topic = msg.short_topic.strip("/")
+        if not response_topic or response_topic == "response":
+            return None
+        if response_topic.endswith(_FIELD5_RESPONSE_SUFFIX):
+            return response_topic[: -len(_FIELD5_RESPONSE_SUFFIX)]
+        return response_topic
 
     @property
     def connected(self) -> bool:
@@ -475,9 +625,21 @@ class NarwalClient:
 
         # Field5 (0x2a) messages are command responses
         if msg.field_tag == PROTOBUF_FIELD5_TAG:
+            queue_topic = self._field5_response_queue_topic(msg)
+            if queue_topic is None:
+                _LOGGER.debug(
+                    "Discarding unmatched field5 response with frame topic=%s",
+                    msg.short_topic,
+                )
+                return
+            queue = self._response_queue_for(queue_topic)
+            _LOGGER.debug(
+                "Field5 response routed to queue: %s (frame topic=%s)",
+                queue_topic,
+                msg.short_topic,
+            )
+            await queue.put(_QueuedResponse(time.monotonic(), msg))
             self._mark_response_received()
-            _LOGGER.debug("Field5 response routed to queue: %s", msg.short_topic)
-            await self._response_queue.put(msg)
             return
 
         # Any broadcast means the robot is awake
@@ -595,31 +757,81 @@ class NarwalClient:
             payload += self._encode_bytes_field(1, inner)
         return payload
 
-    async def subscribe_to_topics(self, duration: int = 600) -> None:
+    async def _send_optional_ack_command(
+        self,
+        short_topic: str,
+        payload: bytes = b"",
+        *,
+        timeout: float = 1.0,
+        label: str,
+    ) -> bool:
+        """Send an optional ACK-style command while owning the command queue."""
+        if not self.connected:
+            return False
+        try:
+            response = await self.send_command(
+                short_topic,
+                payload,
+                timeout=timeout,
+                wait_if_busy=False,
+            )
+        except NarwalCommandError as err:
+            if "Command channel busy" not in str(err):
+                self._quarantine_topicless_acks(_TOPICLESS_ACK_QUARANTINE_SECONDS)
+            _LOGGER.debug("%s skipped/failed for %s: %s", label, short_topic, err)
+            return False
+        except Exception:
+            _LOGGER.debug("%s failed for %s", label, short_topic, exc_info=True)
+            return False
+        if not response.success:
+            _LOGGER.debug(
+                "%s rejected for %s: result_code=%s",
+                label,
+                short_topic,
+                response.result_code,
+            )
+            return False
+        return True
+
+    async def _send_wake_frame(self, short_topic: str, payload: bytes) -> bool:
+        """Send one fire-and-forget wake candidate frame."""
+        if not self.connected or not self._ws:
+            return False
+        full_topic = self._full_topic(short_topic)
+        frame = build_frame(full_topic, payload)
+        try:
+            await self._ws.send(frame)
+        except Exception:
+            _LOGGER.debug("Wake burst failed for %s", short_topic, exc_info=True)
+            return False
+        _LOGGER.debug("Wake burst sent %s (%d bytes)", short_topic, len(frame))
+        return True
+
+    async def subscribe_to_topics(self, duration: int = 600) -> bool:
         """Send topic subscription to the robot.
 
         This tells the robot to broadcast display_map, working_status, etc.
         Must be called after connecting, especially if the robot is already
         awake (wake() skips the burst when robot_awake is True).
         """
-        if not self.connected or not self._ws:
-            return
         payload = self._build_topic_subscription(duration)
-        frame = build_frame(
-            self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload
-        )
-        await self._ws.send(frame)
-        _LOGGER.info("Topic subscription sent (duration=%ds)", duration)
+        if not await self._send_optional_ack_command(
+            TOPIC_CMD_ACTIVE_ROBOT,
+            payload,
+            timeout=2.0,
+            label="Topic subscription",
+        ):
+            return False
+        _LOGGER.info("Topic subscription refreshed (duration=%ds)", duration)
+        return True
 
     def _build_wake_commands(self) -> list[tuple[str, bytes]]:
         """Build the sequence of wake commands to try.
 
-        Returns list of (short_topic, payload) tuples.  The first four
-        commands are passive (subscription / heartbeat).  The final
-        command is a query (get_device_base_status) that forces the
-        robot's main processor to fully wake and enter command-ready
-        mode.  Its field5 response ends up in _response_queue and is
-        harmlessly drained by send_command() before real commands.
+        Returns list of wake candidate (short_topic, payload) tuples.  The
+        get_device_base_status query is sent separately through send_command()
+        so any field5 response owns the command lock instead of racing user
+        commands with an empty response topic.
         """
         cmds: list[tuple[str, bytes]] = []
 
@@ -635,34 +847,40 @@ class NarwalClient:
         # 4. app heartbeat — field 1 = 1
         cmds.append((TOPIC_CMD_APP_HEARTBEAT, self._encode_varint_field(1, 1)))
 
-        # 5. get_device_base_status — forces robot CPU into command-ready
-        #    state; passive commands alone only wake the WS server, not the
-        #    application processor.  The field5 response is drained by
-        #    send_command() before it processes real user commands.
-        cmds.append((TOPIC_CMD_GET_BASE_STATUS, b""))
-
         return cmds
 
-    async def _send_wake_burst(self) -> None:
+    async def _send_wake_burst(self) -> bool:
         """Send all wake candidate commands in quick succession.
 
-        Fire-and-forget: sends each command with a short delay between them.
-        Does not wait for responses (the listener loop handles those).
+        Wake commands are passive probes: sleeping robots often do not ACK them,
+        so waiting on each candidate can consume the whole wake timeout. Send the
+        burst directly, then quarantine any late topicless ACK before running the
+        addressed base-status probe.
         """
         if not self.connected or not self._ws:
-            return
+            return False
 
         commands = self._build_wake_commands()
-        for short_topic, payload in commands:
-            try:
-                full_topic = self._full_topic(short_topic)
-                frame = build_frame(full_topic, payload)
-                await self._ws.send(frame)
-                _LOGGER.debug("Wake burst: sent %s (%d bytes)", short_topic, len(payload))
-            except Exception:
-                _LOGGER.debug("Wake burst: failed to send %s", short_topic)
-                return  # connection probably lost
+        subscription_sent = False
+        for index, (short_topic, payload) in enumerate(commands):
+            sent = await self._send_wake_frame(short_topic, payload)
+            if index == 1 and sent:
+                subscription_sent = True
             await asyncio.sleep(0.2)
+        self._quarantine_topicless_acks(_TOPICLESS_ACK_QUARANTINE_SECONDS)
+
+        try:
+            await self.send_command(
+                TOPIC_CMD_GET_BASE_STATUS,
+                timeout=2.0,
+                wait_if_busy=False,
+            )
+            _LOGGER.debug("Wake burst: base status probe completed")
+        except NarwalCommandError as err:
+            _LOGGER.debug("Wake burst: base status probe skipped/failed: %s", err)
+        except Exception:
+            _LOGGER.debug("Wake burst: base status probe failed", exc_info=True)
+        return subscription_sent
 
     async def wake(self, timeout: float = WAKE_TIMEOUT, force: bool = False) -> bool:
         """Attempt to wake the robot from sleep.
@@ -773,32 +991,20 @@ class NarwalClient:
                     consecutive_wake_failures = 0
                     # Re-subscribe to topics before the subscription expires
                     if time.monotonic() - last_resub_time > self._TOPIC_RESUB_INTERVAL:
-                        try:
-                            payload = self._build_topic_subscription(
-                                self._TOPIC_SUB_DURATION
-                            )
-                            frame = build_frame(
-                                self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload
-                            )
-                            await self._ws.send(frame)
+                        if await self.subscribe_to_topics(self._TOPIC_SUB_DURATION):
                             last_resub_time = time.monotonic()
                             _LOGGER.debug("Topic subscription renewed")
-                        except Exception:
-                            _LOGGER.debug("Topic re-subscribe failed")
 
                     # Send lightweight heartbeat to keep robot awake.
                     # The Narwal app sends this continuously regardless of
                     # robot state — it's safe during cleaning.
-                    try:
-                        payload = self._encode_varint_field(1, 1)
-                        frame = build_frame(
-                            self._full_topic(TOPIC_CMD_APP_HEARTBEAT), payload
-                        )
-                        await self._ws.send(frame)
+                    if await self._send_optional_ack_command(
+                        TOPIC_CMD_APP_HEARTBEAT,
+                        self._encode_varint_field(1, 1),
+                        timeout=1.0,
+                        label="Keepalive heartbeat",
+                    ):
                         _LOGGER.debug("Keepalive heartbeat sent")
-                    except Exception:
-                        _LOGGER.debug("Keepalive send failed")
-                        break
                 else:
                     # Robot appears asleep — send full wake burst
                     # (wake burst includes topic subscription)
@@ -809,8 +1015,8 @@ class NarwalClient:
                         consecutive_wake_failures,
                         self._WAKE_RECONNECT_THRESHOLD,
                     )
-                    await self._send_wake_burst()
-                    last_resub_time = time.monotonic()
+                    if await self._send_wake_burst():
+                        last_resub_time = time.monotonic()
 
                     # Escalation: after repeated failures, force a fresh
                     # WebSocket connection. Close the socket — the listener
@@ -838,6 +1044,8 @@ class NarwalClient:
         short_topic: str,
         payload: bytes = b"",
         timeout: float = COMMAND_RESPONSE_TIMEOUT,
+        *,
+        wait_if_busy: bool = True,
     ) -> CommandResponse:
         """Send a command and wait for the field5 response.
 
@@ -848,6 +1056,9 @@ class NarwalClient:
             short_topic: Command topic without prefix/device_id.
             payload: Protobuf-encoded payload (empty for most commands).
             timeout: Seconds to wait for response.
+            wait_if_busy: If false, raise immediately when another command is in
+                flight. This is for optional background commands only; user
+                actions should keep the default and wait their turn.
 
         Returns:
             CommandResponse with result code and decoded data.
@@ -858,45 +1069,71 @@ class NarwalClient:
         """
         if not self.connected:
             raise NarwalConnectionError("Not connected to vacuum")
+        if not wait_if_busy and self._command_lock.locked():
+            raise NarwalCommandError(
+                f"Command channel busy; skipping optional command '{short_topic}'"
+            )
 
         async with self._command_lock:
-            # Drain any stale responses (e.g. from fire-and-forget wake burst)
-            drained = 0
-            while not self._response_queue.empty():
-                try:
-                    self._response_queue.get_nowait()
-                    drained += 1
-                except asyncio.QueueEmpty:
-                    break
-            if drained:
-                _LOGGER.debug("Drained %d stale field5 responses", drained)
-
-            full_topic = self._full_topic(short_topic)
-            frame = build_frame(full_topic, payload)
-            await self._ws.send(frame)
-            _LOGGER.debug("Sent command: %s (%d bytes)", short_topic, len(frame))
-
-            # If listener is running, wait on the queue (avoid concurrent recv)
-            if self._listener_active:
-                try:
-                    msg = await asyncio.wait_for(
-                        self._response_queue.get(), timeout=timeout
+            await self._wait_for_topicless_ack_barrier(short_topic)
+            response_queue = self._response_queue_for(short_topic)
+            self._pending_response_topic = short_topic
+            try:
+                # Drain stale responses for this command topic only. Other pending
+                # wake/status responses must not satisfy this command.
+                drained = 0
+                while not response_queue.empty():
+                    try:
+                        response_queue.get_nowait()
+                        drained += 1
+                    except asyncio.QueueEmpty:
+                        break
+                if drained:
+                    _LOGGER.debug(
+                        "Drained %d stale field5 responses for %s",
+                        drained,
+                        short_topic,
                     )
-                except asyncio.TimeoutError:
-                    raise NarwalCommandError(
-                        f"No response for command '{short_topic}' within {timeout}s"
-                    ) from None
-            else:
-                # No listener — read directly from websocket
-                msg = await self._wait_for_field5_response(timeout)
+
+                full_topic = self._full_topic(short_topic)
+                frame = build_frame(full_topic, payload)
+                sent_at = time.monotonic()
+                await self._ws.send(frame)
+                _LOGGER.debug("Sent command: %s (%d bytes)", short_topic, len(frame))
+
+                # If listener is running, wait on the queue (avoid concurrent recv)
+                try:
+                    if self._listener_active:
+                        msg = await self._wait_for_queued_response(
+                            short_topic,
+                            response_queue,
+                            sent_at,
+                            timeout,
+                        )
+                    else:
+                        # No listener — read directly from websocket
+                        msg = await self._wait_for_field5_response(
+                            short_topic,
+                            timeout,
+                        )
+                except NarwalCommandError:
+                    if short_topic in _TOPICLESS_ACK_TOPICS:
+                        self._quarantine_topicless_acks(
+                            max(_TOPICLESS_ACK_QUARANTINE_SECONDS, timeout)
+                        )
+                    raise
+            finally:
+                self._pending_response_topic = None
 
             self._mark_response_received()
 
         # Decode response
         try:
             decoded = self._decode_protobuf(msg.payload)
-        except Exception:
-            decoded = {}
+        except Exception as err:
+            raise NarwalCommandError(
+                f"Could not decode response for command '{short_topic}'"
+            ) from err
 
         # Field 1 is a result code for action commands (int),
         # but data for some query commands (string/bytes/dict).
@@ -913,10 +1150,37 @@ class NarwalClient:
             raw_payload=msg.payload,
         )
 
-    async def _wait_for_field5_response(
-        self, timeout: float
+    async def _wait_for_queued_response(
+        self,
+        short_topic: str,
+        response_queue: asyncio.Queue[_QueuedResponse],
+        sent_at: float,
+        timeout: float,
     ) -> NarwalMessage:
-        """Read from WebSocket until a field5 response arrives."""
+        """Wait for the matching field5 response routed by the listener."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                queued = await asyncio.wait_for(
+                    response_queue.get(), timeout=remaining
+                )
+            except asyncio.TimeoutError:
+                break
+            if queued.received_at < sent_at:
+                _LOGGER.debug("Ignoring pre-send response for %s", short_topic)
+                continue
+            return queued.message
+        raise NarwalCommandError(
+            f"No response for command '{short_topic}' within {timeout}s"
+        )
+
+    async def _wait_for_field5_response(
+        self, short_topic: str, timeout: float
+    ) -> NarwalMessage:
+        """Read from WebSocket until the expected field5 response arrives."""
         import time
 
         deadline = time.monotonic() + timeout
@@ -940,25 +1204,26 @@ class NarwalClient:
                 continue
 
             if msg.field_tag == PROTOBUF_FIELD5_TAG:
-                return msg
-
-            # Process broadcast messages while waiting
-            short_topic = msg.short_topic
-            try:
-                decoded = self._decode_protobuf(msg.payload)
-            except Exception:
+                if self._topicless_ack_is_quarantined(msg):
+                    _LOGGER.debug(
+                        "Ignoring quarantined topicless field5 response while waiting for %s",
+                        short_topic,
+                    )
+                    continue
+                if self._field5_response_matches(msg, short_topic):
+                    return msg
+                _LOGGER.debug(
+                    "Ignoring field5 response for %s while waiting for %s",
+                    msg.short_topic,
+                    short_topic,
+                )
+                queue_topic = self._field5_response_queue_topic(msg)
+                if queue_topic is not None:
+                    queue = self._response_queue_for(queue_topic)
+                    await queue.put(_QueuedResponse(time.monotonic(), msg))
                 continue
 
-            if short_topic == "status/working_status":
-                self._update_from_working_status_broadcast(decoded)
-            elif short_topic == "status/robot_base_status":
-                self._update_from_base_status_broadcast(decoded)
-            elif short_topic == "upgrade/upgrade_status":
-                self.state.update_from_upgrade_status(decoded)
-            elif short_topic == "status/download_status":
-                self.state.update_from_download_status(decoded)
-            elif short_topic == "map/display_map":
-                self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
+            await self._handle_message(data)
 
         raise NarwalCommandError(
             f"No field5 response within {timeout}s"
@@ -1363,9 +1628,21 @@ class NarwalClient:
         """Wash the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_WASH_MOP)
 
+    async def wash_mop_by_robot_status(self) -> CommandResponse:
+        """Wash mop pads using the app's status-gated station command."""
+        return await self.send_command(TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS)
+
     async def dry_mop(self) -> CommandResponse:
         """Dry the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_DRY_MOP)
+
+    async def dry_dust_bag(self) -> CommandResponse:
+        """Dry or disinfect the robot dust bin at the station."""
+        return await self.send_command(TOPIC_CMD_DRY_DUST_BAG)
+
+    async def dry_station_bag(self) -> CommandResponse:
+        """Dry or disinfect the dock dust bag at the station."""
+        return await self.send_command(TOPIC_CMD_DRY_STATION_BAG)
 
     async def empty_dustbin(self) -> CommandResponse:
         """Empty the dustbin at the station."""
@@ -1443,7 +1720,13 @@ class NarwalClient:
     async def get_consumable_info(self) -> CommandResponse:
         """Query consumable maintain/replace alert lists (not broadcast)."""
         resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE_INFO, timeout=15.0)
-        self.state.update_from_consumable_info(resp.data)
+        if resp.success:
+            self.state.update_from_consumable_info(resp.data)
+        else:
+            _LOGGER.debug(
+                "Consumable info query failed; preserving existing alerts (code=%s)",
+                resp.result_code,
+            )
         return resp
 
     async def get_map(self) -> MapData:
