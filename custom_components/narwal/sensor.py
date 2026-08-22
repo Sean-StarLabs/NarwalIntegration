@@ -22,7 +22,7 @@ from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 from . import NarwalConfigEntry
 from .const import TASK_RESULT_OPTIONS
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity
+from .entity import NarwalEntity, is_dock_consumable_name
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -30,6 +30,7 @@ class NarwalSensorEntityDescription(SensorEntityDescription):
     """Describes a Narwal sensor entity."""
 
     value_fn: Callable[[NarwalState], float | int | str | None]
+    dock_device: bool = False
 
 
 def _has_active_cleaning_metrics(state: NarwalState) -> bool:
@@ -42,9 +43,9 @@ def _station_task(state: NarwalState) -> str | None:
         return None
     if state.station_activity == 1:
         return "emptying_dustbin"
-    if state.station_activity in (2, 3):
+    if state.is_washing_mop:
         return "washing_mop"
-    if state.dry_mop_remaining_time is not None and state.dry_mop_remaining_time > 0:
+    if state.is_drying_mop:
         return "drying_mop"
     if state.station_activity == 4:
         return "drying_or_disinfecting"
@@ -102,6 +103,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         # base_status field 35 stationBagHealthScore (float32 %); present only with a station.
         value_fn=lambda state: round(state.dust_bag_health, 1)
         if _has_base_status_field(state, "35")
@@ -113,6 +115,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         # base_status field 41 heavyDetergentRemainPercent.
         value_fn=lambda state: state.detergent_remaining
         if _has_base_status_field(state, "41")
@@ -139,7 +142,9 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         icon="mdi:map-marker",
         # working_status field 6: room_id of the room currently being cleaned.
         # Resolved to a display name via the cached room map from get_map.
-        value_fn=lambda state: state.current_room_name,
+        value_fn=lambda state: state.current_room_name
+        if _has_active_cleaning_metrics(state)
+        else None,
     ),
     NarwalSensorEntityDescription(
         key="station_task",
@@ -152,6 +157,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
             "drying_or_disinfecting",
             "station_active",
         ],
+        dock_device=True,
         value_fn=_station_task,
     ),
     NarwalSensorEntityDescription(
@@ -160,6 +166,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         device_class=SensorDeviceClass.DURATION,
         native_unit_of_measurement=UnitOfTime.SECONDS,
         state_class=SensorStateClass.MEASUREMENT,
+        dock_device=True,
         value_fn=lambda state: state.dry_mop_remaining_time
         if state.is_station_active
         and state.dry_mop_remaining_time is not None
@@ -198,6 +205,8 @@ class NarwalSensor(NarwalEntity, SensorEntity):
         """Initialize the sensor."""
         super().__init__(coordinator)
         self.entity_description = description
+        if description.dock_device:
+            self._use_dock_device_info()
         device_id = coordinator.config_entry.data["device_id"]
         self._attr_unique_id = f"{device_id}_{description.key}"
 
@@ -322,6 +331,8 @@ class NarwalChargingStateSensor(NarwalEntity, SensorEntity):
         state = self.coordinator.data
         if state is None:
             return None
+        if state.is_charging_to_resume:
+            return "charging"
         if not state.is_docked:
             return "not_charging"
         if state.battery_level >= 100:
@@ -347,6 +358,7 @@ class NarwalTaskStatusSensor(NarwalEntity, SensorEntity):
     _attr_translation_key = "task_status"
     _attr_options = [
         "cleaning",
+        "charging_to_resume",
         "returning",
         "paused",
         "station_active",
@@ -378,6 +390,8 @@ class NarwalTaskStatusSensor(NarwalEntity, SensorEntity):
             return "paused"
         if state.is_returning:
             return "returning"
+        if state.is_charging_to_resume:
+            return "charging_to_resume"
         if state.is_station_active:
             return "station_active"
         if state.is_cleaning:
@@ -394,6 +408,8 @@ class NarwalTaskStatusSensor(NarwalEntity, SensorEntity):
         value = self.native_value
         if value == "station_active":
             return "mdi:home-automation"
+        if value == "charging_to_resume":
+            return "mdi:battery-charging-medium"
         if value == "cleaning":
             return "mdi:robot-vacuum"
         if value == "returning":

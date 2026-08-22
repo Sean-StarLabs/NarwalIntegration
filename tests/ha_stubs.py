@@ -96,8 +96,15 @@ def install() -> None:
         def __init_subclass__(cls, domain: str = "", **kw: object) -> None:
             cls.DOMAIN = domain
 
+    class _OptionsFlow:
+        """Stub for OptionsFlow base class."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
     ha_ce.ConfigFlow = _ConfigFlow  # type: ignore[attr-defined]
     ha_ce.ConfigFlowResult = dict  # type: ignore[attr-defined]
+    ha_ce.OptionsFlow = _OptionsFlow  # type: ignore[attr-defined]
     class _ConfigEntry:
         """Subscriptable ConfigEntry stub for TypeAlias usage."""
 
@@ -122,11 +129,28 @@ def install() -> None:
     ha_cv.entity_ids = MagicMock()  # type: ignore[attr-defined]
     ha_cv.ensure_list = MagicMock()  # type: ignore[attr-defined]
 
+    ha_selector = _mod("homeassistant.helpers.selector", ha_helpers)
+
+    class _TextSelectorType:
+        PASSWORD = "password"
+
+    @dataclass(frozen=True, kw_only=True)
+    class _TextSelectorConfig:
+        type: str
+
+    class _TextSelector:
+        def __init__(self, config: _TextSelectorConfig) -> None:
+            self.config = config
+
+    ha_selector.TextSelector = _TextSelector  # type: ignore[attr-defined]
+    ha_selector.TextSelectorConfig = _TextSelectorConfig  # type: ignore[attr-defined]
+    ha_selector.TextSelectorType = _TextSelectorType  # type: ignore[attr-defined]
+
     # NOTE: deliberately does NOT expose EntityCategory. Real HA removed
     # homeassistant.helpers.entity.EntityCategory; it lives in homeassistant.const.
     # Stubbing both paths hid a real ImportError that only surfaced when the
     # integration was loaded in Home Assistant (switch.py, from PR #62).
-    ha_entity = _mod("homeassistant.helpers.entity", ha_helpers)
+    _mod("homeassistant.helpers.entity", ha_helpers)
 
     ha_uc = _mod("homeassistant.helpers.update_coordinator", ha_helpers)
 
@@ -350,8 +374,33 @@ def install() -> None:
 
     ha_sensor = _mod("homeassistant.components.sensor", ha_comp)
     ha_sensor.SensorEntity = MagicMock  # type: ignore[attr-defined]
-    ha_sensor.SensorDeviceClass = MagicMock  # type: ignore[attr-defined]
-    ha_sensor.SensorStateClass = MagicMock  # type: ignore[attr-defined]
+
+    class _SensorDeviceClass:
+        BATTERY = "battery"
+        DURATION = "duration"
+        ENUM = "enum"
+
+    class _SensorStateClass:
+        MEASUREMENT = "measurement"
+
+    ha_sensor.SensorDeviceClass = _SensorDeviceClass  # type: ignore[attr-defined]
+    ha_sensor.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
+
+    @dataclass(frozen=True, kw_only=True)
+    class _SensorEntityDescription:
+        """Stub for SensorEntityDescription (the EntityDescription fields our code sets)."""
+
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        entity_category: object | None = None
+        device_class: object | None = None
+        icon: str | None = None
+        native_unit_of_measurement: str | None = None
+        state_class: object | None = None
+        options: list | None = None
+
+    ha_sensor.SensorEntityDescription = _SensorEntityDescription  # type: ignore[attr-defined]
 
     ha_bs = _mod("homeassistant.components.binary_sensor", ha_comp)
 

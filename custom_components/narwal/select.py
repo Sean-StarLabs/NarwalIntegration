@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from homeassistant.components.select import SelectEntity, SelectEntityDescription
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant, State
+from homeassistant.core import HomeAssistant, State, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
@@ -22,8 +22,13 @@ from .const import (
     MOP_STRENGTH_MAP,
     WATER_MAP,
     WORK_MODE_MAP,
+    fan_speed_list_for,
 )
-from .coordinator import NarwalCoordinator, is_active_clean_session
+from .coordinator import (
+    NarwalCoordinator,
+    is_live_clean_setting_available,
+    is_setup_available,
+)
 from .entity import NarwalEntity
 from .narwal_client import (
     CleaningRoute,
@@ -84,6 +89,9 @@ LEGACY_MODE_MAP: dict[str, WorkMode] = {
     "Mop": WorkMode.MOP,
     "Vacuum then mop": WorkMode.VACUUM_THEN_MOP,
     "Vacuum and mop": WorkMode.VACUUM_AND_MOP,
+}
+LEGACY_MODE_LABELS: dict[WorkMode, str] = {
+    value: label for label, value in LEGACY_MODE_MAP.items()
 }
 LEGACY_SUCTION_MAP: dict[str, FanLevel] = {
     "AI": FanLevel.UNSPECIFIED,
@@ -176,6 +184,68 @@ LEGACY_SELECT_DESCRIPTIONS: tuple[LegacyNarwalSelectEntityDescription, ...] = (
 )
 
 
+@dataclass(frozen=True, kw_only=True)
+class RoomNarwalSelectEntityDescription(SelectEntityDescription):
+    """Describes a per-room Narwal clean profile select."""
+
+    setting_key: str
+    attr: str
+    default_option: str
+    icon: str
+
+
+ROOM_SELECT_DESCRIPTIONS: tuple[RoomNarwalSelectEntityDescription, ...] = (
+    RoomNarwalSelectEntityDescription(
+        key="room_mode",
+        setting_key="mode",
+        attr="work_mode",
+        name="mode",
+        default_option="Vacuum and mop",
+        icon="mdi:robot-vacuum",
+    ),
+    RoomNarwalSelectEntityDescription(
+        key="room_suction",
+        setting_key="suction",
+        attr="fan",
+        name="suction",
+        default_option="Super",
+        icon="mdi:fan",
+    ),
+    RoomNarwalSelectEntityDescription(
+        key="room_water",
+        setting_key="water",
+        attr="water",
+        name="water",
+        default_option="Wet",
+        icon="mdi:water",
+    ),
+    RoomNarwalSelectEntityDescription(
+        key="room_scrub",
+        setting_key="scrub",
+        attr="mop_strength",
+        name="scrub",
+        default_option="High",
+        icon="mdi:brush",
+    ),
+    RoomNarwalSelectEntityDescription(
+        key="room_route",
+        setting_key="route",
+        attr="route",
+        name="route",
+        default_option="Meticulous",
+        icon="mdi:routes",
+    ),
+    RoomNarwalSelectEntityDescription(
+        key="room_passes",
+        setting_key="passes",
+        attr="passes",
+        name="passes",
+        default_option="2",
+        icon="mdi:counter",
+    ),
+)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: NarwalConfigEntry,
@@ -183,6 +253,33 @@ async def async_setup_entry(
 ) -> None:
     """Set up Narwal clean-param select entities."""
     coordinator = entry.runtime_data
+    known_room_settings: dict[tuple[int, str], RoomNarwalSettingSelect] = {}
+
+    @callback
+    def async_add_room_setting_entities() -> None:
+        map_data = coordinator.client.state.map_data
+        if map_data is None:
+            return
+        entities: list[RoomNarwalSettingSelect] = []
+        for room in sorted(map_data.rooms, key=lambda item: item.display_name.lower()):
+            if room.room_id <= 0:
+                continue
+            for description in ROOM_SELECT_DESCRIPTIONS:
+                key = (room.room_id, description.key)
+                if key in known_room_settings:
+                    known_room_settings[key].async_update_room_name(room.display_name)
+                    continue
+                entity = RoomNarwalSettingSelect(
+                    coordinator,
+                    room.room_id,
+                    room.display_name,
+                    description,
+                )
+                known_room_settings[key] = entity
+                entities.append(entity)
+        if entities:
+            async_add_entities(entities)
+
     async_add_entities(
         [
             *(
@@ -195,6 +292,8 @@ async def async_setup_entry(
             ),
         ]
     )
+    async_add_room_setting_entities()
+    entry.async_on_unload(coordinator.async_add_listener(async_add_room_setting_entities))
 
 
 class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
@@ -230,9 +329,11 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
         """Return True when this clean parameter can be changed now."""
         if not super().available:
             return False
+        if self.entity_description.attr in START_ONLY_CLEAN_SETTING_ATTRS:
+            return is_setup_available(self.coordinator.data)
         return (
-            self.entity_description.attr not in START_ONLY_CLEAN_SETTING_ATTRS
-            or not is_active_clean_session(self.coordinator.data)
+            is_setup_available(self.coordinator.data)
+            or is_live_clean_setting_available(self.coordinator.data)
         )
 
     @property
@@ -255,6 +356,206 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
             await getattr(self.coordinator.client, self.entity_description.live_setter)(
                 value
             )
+
+
+class RoomNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
+    """Per-room clean profile select backed by coordinator room settings."""
+
+    entity_description: RoomNarwalSelectEntityDescription
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        room_id: int,
+        room_name: str,
+        description: RoomNarwalSelectEntityDescription,
+    ) -> None:
+        """Initialize the per-room select."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        self._room_id = room_id
+        self._room_name = room_name
+        device_id = coordinator.config_entry.data["device_id"]
+        self._attr_unique_id = f"{device_id}_room_{room_id}_{description.setting_key}"
+        self._attr_name = f"{room_name} {description.name}"
+        self._attr_icon = description.icon
+        self._attr_options = self._options_for_description(description)
+
+    @callback
+    def async_update_room_name(self, room_name: str) -> None:
+        """Update display metadata when the map renames this room."""
+        if room_name == self._room_name:
+            return
+        self._room_name = room_name
+        self._attr_name = f"{room_name} {self.entity_description.name}"
+        if getattr(self, "hass", None) is not None:
+            self.async_write_ha_state()
+
+    def _options_for_description(
+        self,
+        description: RoomNarwalSelectEntityDescription,
+    ) -> list[str]:
+        """Return selectable options for this room setting."""
+        if description.setting_key == "suction":
+            return ["AI", *fan_speed_list_for(self.coordinator.config_entry.data)]
+        if description.setting_key == "mode":
+            return list(LEGACY_MODE_OPTIONS)
+        if description.setting_key == "water":
+            return list(LEGACY_WATER_OPTIONS)
+        if description.setting_key == "scrub":
+            return list(LEGACY_SCRUB_OPTIONS)
+        if description.setting_key == "route":
+            return list(LEGACY_ROUTE_OPTIONS)
+        if description.setting_key == "passes":
+            return list(LEGACY_PASSES_OPTIONS)
+        return []
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the room profile option."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        option = self._restored_option(last)
+        self._apply_option(option)
+
+    @property
+    def available(self) -> bool:
+        """Return True when this room profile can be changed now."""
+        if (
+            not super().available
+            or not is_setup_available(self.coordinator.data)
+            or not self._room_exists
+        ):
+            return False
+        key = self.entity_description.setting_key
+        mode = self._selected_mode
+        if key == "water" and mode not in LEGACY_MOP_MODES:
+            return False
+        if key == "scrub" and mode not in LEGACY_MOP_MODES:
+            return False
+        if key == "suction" and mode not in LEGACY_VACUUM_MODES:
+            return False
+        return True
+
+    @property
+    def options(self) -> list[str]:
+        """Return the selectable room profile options."""
+        return list(self._attr_options or [])
+
+    @property
+    def current_option(self) -> str | None:
+        """Return the currently selected profile option."""
+        settings = self.coordinator.room_clean_settings_for(self._room_id)
+        return self._label_for_value(getattr(settings, self.entity_description.attr))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | int]:
+        """Return room metadata for dashboards and automations."""
+        return {
+            "room_id": self._room_id,
+            "room_name": self._room_name,
+            "setting": self.entity_description.setting_key,
+        }
+
+    @property
+    def _room_exists(self) -> bool:
+        """Return True when the room still exists in the current map."""
+        state = self.coordinator.data
+        map_data = getattr(state, "map_data", None) if state is not None else None
+        rooms = getattr(map_data, "rooms", None)
+        if not isinstance(rooms, (list, tuple)):
+            return True
+        return any(room.room_id == self._room_id for room in rooms)
+
+    @property
+    def _selected_mode(self) -> str:
+        """Return the selected room clean mode."""
+        settings = self.coordinator.room_clean_settings_for(self._room_id)
+        return LEGACY_MODE_LABELS.get(settings.work_mode) or "Vacuum and mop"
+
+    def _label_for_value(self, value) -> str | None:
+        """Return the UI option label for a profile value."""
+        key = self.entity_description.setting_key
+        if key == "mode":
+            return LEGACY_MODE_LABELS.get(value)
+        if key == "suction":
+            return LEGACY_SUCTION_LABELS.get(value)
+        if key == "water":
+            labels = {value: label for label, value in LEGACY_WATER_MAP.items()}
+            return labels.get(value)
+        if key == "scrub":
+            labels = {value: label for label, value in LEGACY_SCRUB_MAP.items()}
+            return labels.get(value)
+        if key == "route":
+            labels = {value: label for label, value in LEGACY_ROUTE_MAP.items()}
+            return labels.get(value)
+        if key == "passes":
+            return str(value)
+        return None
+
+    def _normalise_option(self, option: str) -> str | None:
+        """Return a current option, accepting old hidden suction aliases."""
+        if option in self.options:
+            return option
+        if self.entity_description.setting_key != "suction":
+            return None
+        label = LEGACY_SUCTION_LABELS.get(LEGACY_SUCTION_MAP.get(option))
+        return label if label in self.options else None
+
+    def _restored_option(self, state: State | None) -> str:
+        """Return the restored or default room profile option."""
+        if state is not None:
+            option = self._normalise_option(state.state)
+            if option is not None:
+                return option
+        current = self.current_option
+        if current in self.options:
+            return current
+        return self.entity_description.default_option
+
+    def _apply_option(self, option: str) -> None:
+        """Store a room profile option."""
+        key = self.entity_description.setting_key
+        if key == "mode":
+            value = LEGACY_MODE_MAP[option]
+        elif key == "suction":
+            value = LEGACY_SUCTION_MAP[option]
+        elif key == "water":
+            value = LEGACY_WATER_MAP[option]
+        elif key == "scrub":
+            value = LEGACY_SCRUB_MAP[option]
+        elif key == "route":
+            value = LEGACY_ROUTE_MAP[option]
+        elif key == "passes":
+            value = int(option)
+        else:
+            raise HomeAssistantError(f"Unsupported Narwal room option: {option}")
+        self.coordinator.set_room_clean_setting(
+            self._room_id,
+            self.entity_description.attr,
+            value,
+        )
+
+    async def async_select_option(self, option: str) -> None:
+        """Apply a room profile option."""
+        requested_option = option
+        option = self._normalise_option(option) or ""
+        if not option:
+            raise HomeAssistantError(f"Unsupported Narwal room option: {requested_option}")
+        if not is_setup_available(self.coordinator.data):
+            raise HomeAssistantError("Narwal room profiles cannot be changed right now")
+
+        key = self.entity_description.setting_key
+        mode = self._selected_mode
+        if key == "water" and mode not in LEGACY_MOP_MODES:
+            raise HomeAssistantError("Water level is not available in vacuum-only mode")
+        if key == "scrub" and mode not in LEGACY_MOP_MODES:
+            raise HomeAssistantError("Scrub level is not available in vacuum-only mode")
+        if key == "suction" and mode not in LEGACY_VACUUM_MODES:
+            raise HomeAssistantError("Suction is not available in mop-only mode")
+
+        self._apply_option(option)
+        self.async_write_ha_state()
+        self.coordinator.async_update_listeners()
 
 
 class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
@@ -307,7 +608,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
     @property
     def _is_cleaning_or_paused(self) -> bool:
         """Return True while the robot is in an active clean session."""
-        return is_active_clean_session(self.coordinator.data)
+        return is_live_clean_setting_available(self.coordinator.data)
 
     def _setting_available(self) -> bool:
         """Return whether this setting is currently meaningful and actionable."""
@@ -318,7 +619,12 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             return False
         if key == "suction" and self._selected_mode not in LEGACY_VACUUM_MODES:
             return False
-        return key not in LEGACY_START_ONLY_SETTINGS or not self._is_cleaning_or_paused
+        if key in LEGACY_START_ONLY_SETTINGS:
+            return is_setup_available(self.coordinator.data)
+        return (
+            is_setup_available(self.coordinator.data)
+            or self._is_cleaning_or_paused
+        )
 
     def _apply_option(self, option: str) -> None:
         """Store a legacy option and mirror it into clean settings."""
@@ -367,13 +673,17 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             raise HomeAssistantError("Scrub level is not available in vacuum-only mode")
         if key == "suction" and self._selected_mode not in LEGACY_VACUUM_MODES:
             raise HomeAssistantError("Suction is not available in mop-only mode")
-        if key in LEGACY_START_ONLY_SETTINGS and self._is_cleaning_or_paused:
-            raise HomeAssistantError("This Narwal setting cannot be changed mid-clean")
-        if key == "suction" and option == "AI" and self._is_cleaning_or_paused:
+        setup_available = is_setup_available(self.coordinator.data)
+        live_available = self._is_cleaning_or_paused
+        if key in LEGACY_START_ONLY_SETTINGS and not setup_available:
+            raise HomeAssistantError("This Narwal setting cannot be changed right now")
+        if key not in LEGACY_START_ONLY_SETTINGS and not setup_available and not live_available:
+            raise HomeAssistantError("This Narwal setting cannot be changed right now")
+        if key == "suction" and option == "AI" and not setup_available:
             raise HomeAssistantError("AI suction cannot be selected mid-clean")
 
         response = None
-        if self._is_cleaning_or_paused:
+        if not setup_available and live_available:
             if key == "suction":
                 response = await self.coordinator.client.set_fan_speed(
                     LEGACY_SUCTION_MAP[option]

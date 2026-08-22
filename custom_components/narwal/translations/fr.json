@@ -106,6 +106,7 @@
         "name": "État",
         "state": {
           "cleaning": "Nettoyage",
+          "charging_to_resume": "Recharge avant reprise",
           "returning": "Retour",
           "paused": "En pause",
           "station_active": "Station active",
@@ -122,6 +123,20 @@
         "state": {
           "on": "Stationné",
           "off": "Non stationné"
+        }
+      },
+      "busy": {
+        "name": "Occupé",
+        "state": {
+          "on": "Occupé",
+          "off": "Inactif"
+        }
+      },
+      "setup_available": {
+        "name": "Configuration disponible",
+        "state": {
+          "on": "Disponible",
+          "off": "Occupé"
         }
       },
       "error": {
@@ -190,6 +205,9 @@
       }
     },
     "button": {
+      "stop_dock_task": {
+        "name": "Arrêter la tâche de la station"
+      },
       "empty_dustbin": {
         "name": "Vider le bac à poussière"
       },
@@ -198,9 +216,6 @@
       },
       "dry_mop": {
         "name": "Sécher la serpillière"
-      },
-      "wash_and_dry_mop": {
-        "name": "Laver et sécher la serpillière"
       },
       "dry_dust_bin": {
         "name": "Sécher et désinfecter le bac à poussière"

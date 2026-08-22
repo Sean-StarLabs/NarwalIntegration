@@ -27,6 +27,7 @@ from .const import (
     CONF_MODEL,
     CONF_PRODUCT_KEY,
     DOMAIN,
+    MANUFACTURER,
     PLATFORMS,
     configured_model_name,
     SERVICE_CLEAN_ROOMS,
@@ -84,6 +85,10 @@ ROUTE_OPTIONS: dict[str, CleaningRoute] = {
     "meticulous": CleaningRoute.METICULOUS,
 }
 
+DEPRECATED_ENTITY_UNIQUE_ID_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("button", "_wash_and_dry_mop"),
+)
+
 CLEAN_ROOMS_SCHEMA = vol.Schema(
     {
         vol.Optional(ATTR_ENTITY_ID): cv.entity_ids,
@@ -103,7 +108,6 @@ CLEAN_ROOMS_SCHEMA = vol.Schema(
         vol.Optional(FIELD_ROUTE): vol.In(ROUTE_OPTIONS),
     }
 )
-
 
 def _domain_data(hass: HomeAssistant) -> dict[str, NarwalCoordinator]:
     """Return Narwal domain runtime data."""
@@ -293,6 +297,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 raise HomeAssistantError(
                     f"Narwal room clean failed: {result_name} ({resp.result_code})"
                 )
+            coordinator.set_active_room_ids(room_ids)
             coordinator.async_set_updated_data(client.state)
 
     hass.services.async_register(
@@ -302,11 +307,58 @@ def _async_register_services(hass: HomeAssistant) -> None:
         schema=CLEAN_ROOMS_SCHEMA,
     )
 
-
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up Narwal services."""
     _async_register_services(hass)
     return True
+
+
+def _async_prepare_devices(
+    hass: HomeAssistant,
+    entry: NarwalConfigEntry,
+    coordinator: NarwalCoordinator,
+) -> None:
+    """Create/update the robot and dock devices before platforms add entities."""
+    device_id = entry.data["device_id"]
+    model = configured_model_name(entry.data)
+    sw_version = coordinator.client.state.firmware_version or None
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, device_id)},
+        manufacturer=MANUFACTURER,
+        model=model,
+        sw_version=sw_version,
+        name=entry.title,
+    )
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{device_id}_dock")},
+        manufacturer=MANUFACTURER,
+        model=f"{model} Dock",
+        sw_version=sw_version,
+        name=f"{entry.title} Dock",
+        via_device=(DOMAIN, device_id),
+    )
+
+
+def _async_remove_deprecated_entities(
+    hass: HomeAssistant,
+    entry: NarwalConfigEntry,
+) -> None:
+    """Remove entities no longer exposed by the integration."""
+    entity_registry = er.async_get(hass)
+    device_id = entry.data["device_id"]
+    for domain, suffix in DEPRECATED_ENTITY_UNIQUE_ID_SUFFIXES:
+        entity_id = entity_registry.async_get_entity_id(
+            domain,
+            DOMAIN,
+            f"{device_id}{suffix}",
+        )
+        if entity_id is None:
+            continue
+        _LOGGER.info("Removing deprecated Narwal entity %s", entity_id)
+        entity_registry.async_remove(entity_id)
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
@@ -341,18 +393,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bo
     entry.runtime_data = coordinator
     _domain_data(hass)[entry.entry_id] = coordinator
 
+    _async_prepare_devices(hass, entry, coordinator)
+    _async_remove_deprecated_entities(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    device_registry = dr.async_get(hass)
-    device = device_registry.async_get_device(
-        identifiers={(DOMAIN, entry.data["device_id"])}
-    )
-    if device is not None:
-        device_registry.async_update_device(
-            device.id,
-            model=configured_model_name(entry.data),
-            sw_version=coordinator.client.state.firmware_version or None,
-        )
 
     return True
 

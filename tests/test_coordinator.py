@@ -23,7 +23,11 @@ from custom_components.narwal.coordinator import (
     TOPIC_SUBSCRIPTION_TTL,
     NarwalCoordinator,
 )  # noqa: E402
-from custom_components.narwal.narwal_client import NarwalConnectionError, NarwalState  # noqa: E402
+from custom_components.narwal.narwal_client import (  # noqa: E402
+    NarwalConnectionError,
+    NarwalState,
+    WorkingStatus,
+)
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
 
@@ -81,7 +85,9 @@ class TestCoordinatorResilience:
         coordinator._last_display_map_resub = 0.0
         # Fresh subscription so renewal does not fire in unrelated tests.
         coordinator._last_topic_subscribe = time.monotonic()
+        coordinator._last_task_details_refresh = time.monotonic()
         coordinator._prev_working_status = MagicMock()
+        coordinator.active_room_ids = None
         coordinator.update_interval = None
         # Prevent background task warnings
         mock_entry.async_create_background_task = MagicMock()
@@ -167,6 +173,31 @@ class TestCoordinatorResilience:
 
         assert coordinator._consecutive_failures == 0
 
+    def test_sync_active_rooms_preserves_station_phase_during_clean(self) -> None:
+        """Station work during an active clean does not erase the requested rooms."""
+        coordinator = self._make_coordinator()
+        coordinator.active_room_ids = [1, 2]
+        state = NarwalState()
+        state.working_status = WorkingStatus.CLEANING
+        state.last_active_working_status_time = time.monotonic()
+        state.station_activity = 3
+
+        coordinator._sync_active_room_ids(state)
+
+        assert coordinator.active_room_ids == [1, 2]
+
+    def test_sync_active_rooms_clears_after_clean_ends_with_station_phase(self) -> None:
+        """Dock-only work after the clean has ended should clear stale room context."""
+        coordinator = self._make_coordinator()
+        coordinator.active_room_ids = [1, 2]
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.station_activity = 4
+
+        coordinator._sync_active_room_ids(state)
+
+        assert coordinator.active_room_ids is None
+
     async def test_poll_does_not_call_connect(self) -> None:
         """_async_update_data does NOT call client.connect() when disconnected."""
         coordinator = self._make_coordinator()
@@ -229,6 +260,7 @@ class TestTopicSubscriptionRenewal:
         c._map_fetch_pending = False
         c._last_display_map_resub = 0.0
         c._last_topic_subscribe = last_subscribe
+        c._last_task_details_refresh = time.monotonic()
         c._prev_working_status = MagicMock()
         c.update_interval = None
         return c

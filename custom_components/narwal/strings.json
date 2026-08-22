@@ -106,6 +106,7 @@
         "name": "Status",
         "state": {
           "cleaning": "Cleaning",
+          "charging_to_resume": "Charging to resume",
           "returning": "Returning",
           "paused": "Paused",
           "station_active": "Station active",
@@ -122,6 +123,20 @@
         "state": {
           "on": "Docked",
           "off": "Undocked"
+        }
+      },
+      "busy": {
+        "name": "Busy",
+        "state": {
+          "on": "Busy",
+          "off": "Idle"
+        }
+      },
+      "setup_available": {
+        "name": "Setup available",
+        "state": {
+          "on": "Available",
+          "off": "Busy"
         }
       },
       "error": {
@@ -190,6 +205,9 @@
       }
     },
     "button": {
+      "stop_dock_task": {
+        "name": "Stop dock task"
+      },
       "empty_dustbin": {
         "name": "Empty dustbin"
       },
@@ -198,9 +216,6 @@
       },
       "dry_mop": {
         "name": "Dry mop"
-      },
-      "wash_and_dry_mop": {
-        "name": "Wash and dry mop"
       },
       "dry_dust_bin": {
         "name": "Dry and disinfect dust bin"

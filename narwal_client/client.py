@@ -6,7 +6,8 @@ import asyncio
 import logging
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import websockets
@@ -44,9 +45,9 @@ from .const import (
     TOPIC_CMD_GET_ROBOT_TASK_STATUS,
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
-    TOPIC_CMD_PING,
     TOPIC_CMD_RECALL,
     TOPIC_CMD_RESUME,
+    TOPIC_CMD_RESET_CONSUMABLE_INFO,
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_MOP_HUMIDITY,
     TOPIC_CMD_PLAN_START,
@@ -55,7 +56,6 @@ from .const import (
     TOPIC_CMD_GET_DEBUG_IMAGE,
     TOPIC_CMD_SET_LED,
     TOPIC_CMD_WASH_MOP,
-    TOPIC_CMD_WASH_AND_DRY_MOP,
     TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
     TOPIC_POINT_NAVI_PLAN_TRAJ,
@@ -102,6 +102,20 @@ _AUX_STATUS_TOPICS = {
     TOPIC_ROBOT_CURRENT_STATUS,
     TOPIC_ROBOT_TASK_STATUS,
 }
+
+_DOCK_TASK_REFRESH_DELAY = 6.0
+
+
+@dataclass
+class RoomCleanSettings:
+    """Clean parameters for a single room in a custom clean task."""
+
+    work_mode: WorkMode = WorkMode.VACUUM_AND_MOP
+    fan: FanLevel = FanLevel.NORMAL
+    water: MopHumidity = MopHumidity.NORMAL
+    mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL
+    passes: int = 1
+    route: CleaningRoute | None = None
 
 
 def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStatus | None:
@@ -397,7 +411,7 @@ class NarwalClient:
         drained = 0
         while True:
             try:
-                data = await asyncio.wait_for(self._ws.recv(), timeout=0.05)
+                await asyncio.wait_for(self._ws.recv(), timeout=0.05)
                 drained += 1
             except asyncio.TimeoutError:
                 break
@@ -591,6 +605,36 @@ class NarwalClient:
     def _encode_string_field(cls, field_num: int, text: str) -> bytes:
         """Encode a protobuf string field."""
         return cls._encode_bytes_field(field_num, text.encode("utf-8"))
+
+    @classmethod
+    def _encode_packed_varint_field(cls, field_num: int, values: Iterable[int]) -> bytes:
+        """Encode a packed repeated varint field."""
+        data = b"".join(cls._encode_varint(value) for value in values)
+        return cls._encode_bytes_field(field_num, data)
+
+    @classmethod
+    def _build_reset_consumable_info_payload(
+        cls,
+        *,
+        maintain_items: Iterable[int] = (),
+        replace_items: Iterable[int] = (),
+    ) -> bytes:
+        """Build a ConsumableInfoPayload for reset_consumable_info.
+
+        get_consumable_info returns field 1 as a ConsumableInfoPayload whose
+        fields 1/2 are packed maintain/replace enum lists. The app's reset
+        topic appears to use the same payload shape when clearing individual
+        alerts; an empty payload is kept as a fallback for firmwares that only
+        support resetting the whole consumable-info alert list.
+        """
+        maintain = tuple(int(item) for item in maintain_items)
+        replace = tuple(int(item) for item in replace_items)
+        inner = b""
+        if maintain:
+            inner += cls._encode_packed_varint_field(1, maintain)
+        if replace:
+            inner += cls._encode_packed_varint_field(2, replace)
+        return cls._encode_bytes_field(1, inner) if inner else b""
 
     # All broadcast topics the robot can send — used for active_robot_publish
     _ALL_BROADCAST_TOPICS = [
@@ -1203,6 +1247,38 @@ class NarwalClient:
         WorkMode.VACUUM_AND_MOP: (4, ("7",)),      # sweepMopSyncTime
     }
 
+    def _clean_param_for_settings(self, settings: RoomCleanSettings) -> dict[str, int]:
+        """Return a CleanParam protobuf dict for one room."""
+        param_mode, pass_tags = self._WORK_MODE_PARAM[settings.work_mode]
+        param: dict[str, int] = {
+            "1": int(param_mode),
+            "2": int(settings.fan),
+            "3": int(settings.mop_strength),
+            "4": int(settings.water),
+        }
+        if settings.route is not None:
+            param["8"] = int(settings.route)
+        for tag in pass_tags:
+            param[tag] = int(settings.passes)
+        return param
+
+    @staticmethod
+    def _task_type_for_settings(
+        room_settings: list[RoomCleanSettings],
+        fallback: WorkMode,
+    ) -> WorkMode:
+        """Return the outer CleanTask type for a room-clean payload."""
+        modes = {settings.work_mode for settings in room_settings}
+        if len(modes) == 1:
+            return next(iter(modes))
+        if WorkMode.VACUUM_AND_MOP in modes:
+            return WorkMode.VACUUM_AND_MOP
+        if WorkMode.VACUUM_THEN_MOP in modes:
+            return WorkMode.VACUUM_THEN_MOP
+        if {WorkMode.VACUUM, WorkMode.MOP}.issubset(modes):
+            return WorkMode.VACUUM_THEN_MOP
+        return fallback
+
     def _build_start_clean_payload(
         self,
         room_ids: list[int],
@@ -1214,6 +1290,7 @@ class NarwalClient:
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
         route: CleaningRoute | None = None,
+        room_settings: Mapping[int, RoomCleanSettings] | None = None,
     ) -> bytes:
         """Build a clean/start_clean request for the given rooms.
 
@@ -1231,30 +1308,41 @@ class NarwalClient:
             mop_strength: Mop scrub intensity (tag 3).
             passes: Clean count, routed to the pass tag(s) for the mode.
             route: Optional route overlap level (tag 8).
+            room_settings: Optional per-room settings keyed by robot room ID.
         """
         import blackboxprotobuf
 
-        param_mode, pass_tags = self._WORK_MODE_PARAM[work_mode]
-        param: dict[str, int] = {
-            "1": int(param_mode),
-            "2": int(fan),
-            "3": int(mop_strength),
-            "4": int(water),
-        }
-        if route is not None:
-            param["8"] = int(route)
-        for tag in pass_tags:
-            param[tag] = int(passes)
+        default_settings = RoomCleanSettings(
+            work_mode=work_mode,
+            fan=fan,
+            water=water,
+            mop_strength=mop_strength,
+            passes=passes,
+            route=route,
+        )
+        settings_by_room = {
+            rid: room_settings.get(rid, default_settings)
+            for rid in room_ids
+        } if room_settings else {rid: default_settings for rid in room_ids}
+        task_type = self._task_type_for_settings(
+            list(settings_by_room.values()),
+            work_mode,
+        )
+        param_keys: set[str] = set()
+        params_by_room: dict[int, dict[str, int]] = {}
+        for rid, settings in settings_by_room.items():
+            params_by_room[rid] = self._clean_param_for_settings(settings)
+            param_keys.update(params_by_room[rid])
 
         items = [
-            {"1": {"1": 1, "2": rid}, "2": dict(param), "3": idx + 1}
+            {"1": {"1": 1, "2": rid}, "2": params_by_room[rid], "3": idx + 1}
             for idx, rid in enumerate(room_ids)
         ]
         task = {
             "1": map_id,
             "2": items if len(items) > 1 else items[0],
             "3": {},
-            "5": int(work_mode),  # CleanTask.taskType
+            "5": int(task_type),  # CleanTask.taskType
         }
         item_typedef = {
             "type": "message",
@@ -1266,7 +1354,7 @@ class NarwalClient:
                 # Derive the CleanParam typedef from the emitted dict — bbpb silently
                 # drops any tag absent from the typedef.
                 "2": {"type": "message", "message_typedef": {
-                    k: {"type": "int"} for k in param
+                    k: {"type": "int"} for k in sorted(param_keys, key=int)
                 }},
                 "3": {"type": "int"},
             },
@@ -1289,6 +1377,7 @@ class NarwalClient:
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
         route: CleaningRoute | None = None,
+        room_settings: Mapping[int, RoomCleanSettings] | None = None,
     ) -> CommandResponse:
         """Start cleaning the given rooms via clean/start_clean.
 
@@ -1306,6 +1395,7 @@ class NarwalClient:
             room_ids: Robot room IDs (RoomInfo.room_id), mapped from HA areas.
             work_mode, fan, water, mop_strength, passes, route: CleanParam settings —
                 see _build_start_clean_payload.
+            room_settings: Optional per-room settings keyed by robot room ID.
         """
         if not room_ids:
             # No rooms selected — do not call start(), which would resolve the
@@ -1325,6 +1415,7 @@ class NarwalClient:
         payload = self._build_start_clean_payload(
             room_ids, map_id, work_mode=work_mode, fan=fan, water=water,
             mop_strength=mop_strength, passes=passes, route=route,
+            room_settings=room_settings,
         )
         resp = await self.send_command(
             TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,
@@ -1370,6 +1461,23 @@ class NarwalClient:
         """Cancel current task."""
         return await self.send_command(TOPIC_CMD_CANCEL)
 
+    async def stop_dock_task(self) -> CommandResponse:
+        """Stop the active station maintenance task."""
+        response = await self.stop(timeout=15.0)
+        await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
+        try:
+            await self.get_dry_mop_remain_time()
+        except NarwalCommandError as err:
+            _LOGGER.debug("Drying timer refresh after dock stop failed: %s", err)
+        if response.result_code in (0, CommandResult.SUCCESS):
+            self.state.clear_washing_task()
+        if (
+            response.result_code in (0, CommandResult.SUCCESS)
+            and self.state.dry_mop_remaining_time in (None, 0)
+        ):
+            self.state.clear_drying_task()
+        return response
+
     async def return_to_base(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
         """Return to charging dock."""
         return await self.send_command(TOPIC_CMD_RECALL, timeout=timeout)
@@ -1405,10 +1513,6 @@ class NarwalClient:
     async def dry_mop(self) -> CommandResponse:
         """Dry the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_DRY_MOP)
-
-    async def wash_and_dry_mop(self) -> CommandResponse:
-        """Wash and dry the mop pads at the station."""
-        return await self.send_command(TOPIC_CMD_WASH_AND_DRY_MOP)
 
     async def dry_dust_bag(self) -> CommandResponse:
         """Dry or disinfect the robot dust bin at the station."""
@@ -1496,6 +1600,41 @@ class NarwalClient:
         resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE_INFO, timeout=15.0)
         self.state.update_from_consumable_info(resp.data)
         return resp
+
+    async def reset_consumable_info(
+        self,
+        *,
+        maintain_items: Iterable[int] = (),
+        replace_items: Iterable[int] = (),
+    ) -> CommandResponse:
+        """Clear robot-reported consumable maintenance/replacement alerts."""
+        maintain = tuple(int(item) for item in maintain_items)
+        replace = tuple(int(item) for item in replace_items)
+        payload = self._build_reset_consumable_info_payload(
+            maintain_items=maintain,
+            replace_items=replace,
+        )
+        response = await self.send_command(
+            TOPIC_CMD_RESET_CONSUMABLE_INFO,
+            payload,
+            timeout=15.0,
+        )
+        response_ok = response.result_code in (0, CommandResult.SUCCESS)
+        if response_ok:
+            await self.get_consumable_info()
+
+        target_still_reported = bool(
+            set(maintain).intersection(self.state.maintain_items)
+            or set(replace).intersection(self.state.replace_items)
+        )
+        if payload and target_still_reported:
+            _LOGGER.debug(
+                "Consumable reset target still reported after targeted clear: "
+                "maintain=%s replace=%s",
+                maintain,
+                replace,
+            )
+        return response
 
     async def get_clean_progress_info(self) -> CommandResponse:
         """Query active clean progress information."""

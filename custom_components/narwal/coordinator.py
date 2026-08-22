@@ -20,6 +20,7 @@ from .narwal_client import (
     NarwalClient,
     NarwalConnectionError,
     NarwalState,
+    RoomCleanSettings,
     WorkMode,
 )
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
@@ -48,7 +49,7 @@ ACTIVE_TASK_REFRESH_INTERVAL = 30.0
 
 
 @dataclass
-class CleanSettings:
+class CleanSettings(RoomCleanSettings):
     """User-selected clean parameters, applied at the next room clean start.
 
     Select/number entities mutate this, and clean-start paths read it. Each
@@ -65,14 +66,53 @@ class CleanSettings:
     route: CleaningRoute = CleaningRoute.METICULOUS
 
 
+def _state_attr_is_true(state: NarwalState, attr: str) -> bool:
+    """Return True only for explicit boolean state properties."""
+    return getattr(state, attr, False) is True
+
+
 def is_active_clean_session(state: NarwalState | None) -> bool:
     """Return True while clean parameters are locked to the current task."""
     if state is None:
         return False
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
-        or state.has_recent_active_working_status
-    ) and not state.is_returning
+        or _state_attr_is_true(state, "has_recent_active_working_status")
+    ) and not _state_attr_is_true(state, "is_returning")
+
+
+def is_live_clean_setting_available(state: NarwalState | None) -> bool:
+    """Return True when live clean settings can be changed during a task."""
+    if state is None:
+        return False
+    return (
+        is_active_clean_session(state)
+        and not _state_attr_is_true(state, "is_charging_to_resume")
+        and not _state_attr_is_true(state, "is_station_active")
+    )
+
+
+def is_narwal_task_busy(state: NarwalState | None) -> bool:
+    """Return True while the robot or dock is busy with a task phase."""
+    if state is None:
+        return False
+    return (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or _state_attr_is_true(state, "has_recent_active_working_status")
+        or _state_attr_is_true(state, "is_returning")
+        or _state_attr_is_true(state, "is_charging_to_resume")
+        or _state_attr_is_true(state, "is_station_active")
+    )
+
+
+def is_setup_available(state: NarwalState | None) -> bool:
+    """Return True when start-time clean setup controls should be available."""
+    if state is None or state.working_status in (
+        WorkingStatus.UNKNOWN,
+        WorkingStatus.ERROR,
+    ):
+        return False
+    return not is_narwal_task_busy(state)
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
@@ -107,6 +147,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             supports_broadcasts=supports_broadcasts,
         )
         self.clean_settings = CleanSettings()
+        self.room_clean_settings: dict[int, RoomCleanSettings] = {}
+        self.active_room_ids: list[int] | None = None
         self._listen_task: asyncio.Task[None] | None = None
         self._fast_poll_remaining = 0
         self._prev_working_status = WorkingStatus.UNKNOWN
@@ -117,6 +159,46 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._consecutive_failures = 0
         self._max_failures = 5  # 5 * 60s = 5 minutes before entities go unavailable
         self._consumable_poll_countdown = 0  # 0 = fetch on next poll, then every CONSUMABLE_POLL_EVERY
+
+    def default_room_clean_settings(self) -> RoomCleanSettings:
+        """Return a room-clean profile copied from the current global defaults."""
+        return RoomCleanSettings(
+            work_mode=self.clean_settings.work_mode,
+            fan=self.clean_settings.fan,
+            water=self.clean_settings.water,
+            mop_strength=self.clean_settings.mop_strength,
+            passes=self.clean_settings.passes,
+            route=self.clean_settings.route,
+        )
+
+    def room_clean_settings_for(self, room_id: int) -> RoomCleanSettings:
+        """Return the configured room-clean profile for a room."""
+        if room_id not in self.room_clean_settings:
+            self.room_clean_settings[room_id] = self.default_room_clean_settings()
+        return self.room_clean_settings[room_id]
+
+    def set_room_clean_setting(self, room_id: int, attr: str, value) -> None:
+        """Store one room-clean profile value."""
+        setattr(self.room_clean_settings_for(room_id), attr, value)
+
+    def set_active_room_ids(self, room_ids: list[int] | None) -> None:
+        """Store the room plan requested for the current cleaning task."""
+        if room_ids is None:
+            self.active_room_ids = None
+            return
+        clean_room_ids = [room_id for room_id in room_ids if room_id > 0]
+        self.active_room_ids = clean_room_ids or None
+
+    def _sync_active_room_ids(self, state: NarwalState) -> None:
+        """Clear active-room context when the active clean has ended."""
+        cleaning_context_active = (
+            state.working_status in ACTIVE_CLEANING_STATUSES
+            or _state_attr_is_true(state, "has_recent_active_working_status")
+            or _state_attr_is_true(state, "is_returning")
+            or _state_attr_is_true(state, "is_charging_to_resume")
+        )
+        if state.working_status == WorkingStatus.ERROR or not cleaning_context_active:
+            self.active_room_ids = None
 
     async def async_setup(self) -> None:
         """Connect to the vacuum and start the WebSocket listener.
@@ -190,6 +272,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         """Handle a push state update from the WebSocket listener."""
         # Push data arriving means robot is reachable — reset failure counter
         self._consecutive_failures = 0
+        self._sync_active_room_ids(state)
 
         # Fetch static map if missing (get_map failed at startup)
         if state.map_data is None and not self._map_fetch_pending:
@@ -379,6 +462,20 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         else:
             self._consumable_poll_countdown -= 1
 
+        is_cleaning = (
+            self.client.state.is_cleaning
+            or self.client.state.has_recent_active_working_status
+            or (
+                not self.client.state.is_docked
+                and self.client.state.working_status in ACTIVE_CLEANING_STATUSES
+            )
+        )
+        if is_cleaning or self.client.state.is_station_active:
+            now = time.monotonic()
+            if now - self._last_task_details_refresh > ACTIVE_TASK_REFRESH_INTERVAL:
+                self._last_task_details_refresh = now
+                await self._refresh_task_details(cleaning=is_cleaning)
+
         # Manage fast poll countdown
         if self._fast_poll_remaining > 0:
             if self.client.state.working_status != WorkingStatus.UNKNOWN:
@@ -389,6 +486,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 if self._fast_poll_remaining <= 0:
                     self.update_interval = POLL_INTERVAL
 
+        self._sync_active_room_ids(self.client.state)
         return self.client.state
 
     async def async_shutdown(self) -> None:

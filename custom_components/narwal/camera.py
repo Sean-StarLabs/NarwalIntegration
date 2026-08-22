@@ -37,8 +37,9 @@ _MIN_RENDER_INTERVAL = 2
 _TRAIL_MAX_POINTS = 50000  # full cleaning session worth
 _TRAIL_RECORD_INTERVAL = 3  # seconds between trail point recordings
 _TRAIL_MIN_GRID_DELTA = 0.25
-_TRAIL_MAX_GRID_JUMP_FRACTION = 0.18
+_TRAIL_MAX_GRID_JUMP_FRACTION = 0.06
 _TRAIL_MAX_GRID_JUMP_MIN = 24.0
+_TRAIL_MAX_GRID_JUMP_MAX = 72.0
 _TRAIL_NEW_SESSION_MAX_AGE = 60
 _TRAIL_INACTIVE_RESET_INTERVAL = 10 * 60
 
@@ -308,9 +309,13 @@ class NarwalMapCamera(NarwalEntity, Camera):
                     if distance < _TRAIL_MIN_GRID_DELTA:
                         self._last_trail_record = now
                         return
-                    max_jump = max(
-                        _TRAIL_MAX_GRID_JUMP_MIN,
-                        min(map_width, map_height) * _TRAIL_MAX_GRID_JUMP_FRACTION,
+                    max_jump = min(
+                        max(
+                            _TRAIL_MAX_GRID_JUMP_MIN,
+                            min(map_width, map_height)
+                            * _TRAIL_MAX_GRID_JUMP_FRACTION,
+                        ),
+                        _TRAIL_MAX_GRID_JUMP_MAX,
                     )
                     if distance > max_jump:
                         _LOGGER.debug(

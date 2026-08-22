@@ -1,6 +1,11 @@
 """Narwal robot vacuum client library — local WebSocket API."""
 
-from .client import NarwalClient, NarwalCommandError, NarwalConnectionError
+from .client import (
+    NarwalClient,
+    NarwalCommandError,
+    NarwalConnectionError,
+    RoomCleanSettings,
+)
 from .const import (
     AmbientLightCtrlType,
     CleaningRoute,
@@ -18,6 +23,7 @@ __all__ = [
     "NarwalClient",
     "NarwalCommandError",
     "NarwalConnectionError",
+    "RoomCleanSettings",
     "NarwalState",
     "CommandResponse",
     "CommandResult",
