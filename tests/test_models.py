@@ -5,7 +5,11 @@ from __future__ import annotations
 import logging
 import struct
 
-from narwal_client.const import CommandResult, WorkingStatus
+from narwal_client.const import (
+    TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+    CommandResult,
+    WorkingStatus,
+)
 from narwal_client.models import (
     CommandResponse,
     MapData,
@@ -115,6 +119,47 @@ class TestNarwalState:
         assert not state.has_recent_active_working_status
         assert state.dock_sub_state == 2
 
+    def test_working_status_decodes_progress_and_remaining_time(self) -> None:
+        """working_status reports progress/remaining time without an aux query."""
+        state = NarwalState()
+
+        state.update_from_working_status(
+            {
+                "1": _float_to_uint32(0.64),
+                "3": 120,
+                "4": 600,
+            }
+        )
+
+        assert state.task_progress_percent == 64
+        assert state.cleaning_time == 120
+        assert state.task_remaining_time == 600
+
+    def test_working_status_accepts_integer_progress_and_zero_remaining_time(self) -> None:
+        """Progress may arrive as an integer percent and zero remaining is valid."""
+        state = NarwalState()
+
+        state.update_from_working_status({"1": 47, "4": 0})
+
+        assert state.task_progress_percent == 47
+        assert state.task_remaining_time == 0
+
+    def test_terminal_dock_status_ignores_stale_positive_task_metrics(self) -> None:
+        """A stale metrics packet after docking must not resurrect cleaning."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "10": 1}, "11": 3, "47": 1})
+
+        state.update_from_working_status(
+            {"1": _float_to_uint32(1.0), "2": _float_to_uint32(12.5), "3": 900, "4": 0}
+        )
+
+        assert state.task_progress_percent == 100
+        assert state.task_remaining_time == 0
+        assert state.working_status == WorkingStatus.DOCKED
+        assert state.is_docked
+        assert not state.is_cleaning
+        assert not state.has_recent_active_working_status
+
     def test_task_completed_is_returning_until_docked(self) -> None:
         """TASK_COMPLETED is a return phase, not editable idle time."""
         state = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
@@ -157,13 +202,79 @@ class TestNarwalState:
         assert state.is_docked
         assert state.working_status == WorkingStatus.DOCKED
 
-    def test_working_status_clears_stale_dock_fields(self) -> None:
-        """Fresh task metrics override stale dock indicators."""
+    def test_non_cleaning_base_status_clears_stale_task_details(self) -> None:
+        """Progress/current-room fields from the prior clean should not leak after dock."""
+        state = NarwalState()
+        state.task_progress_percent = 72
+        state.task_elapsed_time = 900
+        state.task_remaining_time = 300
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+
+        state.update_from_base_status({"3": {"1": 10, "10": 1}})
+
+        assert state.task_progress_percent is None
+        assert state.task_elapsed_time == 0
+        assert state.task_remaining_time == 0
+        assert state.current_room_id is None
+        assert state.current_room_aux_name == ""
+
+    def test_paused_overlay_preserves_task_details(self) -> None:
+        """A paused task still needs progress and current-room details."""
+        state = NarwalState()
+        state.task_progress_percent = 72
+        state.task_elapsed_time = 900
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+
+        state.update_from_base_status({"3": {"1": 1, "2": 1}})
+
+        assert state.is_paused
+        assert state.has_paused_clean_task_context
+        assert state.task_progress_percent == 72
+        assert state.task_elapsed_time == 900
+        assert state.current_room_id == 4
+        assert state.current_room_aux_name == "Kitchen"
+
+    def test_clean_progress_info_updates_task_details(self) -> None:
+        """info/get_clean_progress_info exposes active task progress details."""
+        state = NarwalState()
+
+        state.update_from_aux_status(
+            TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+            {"2": {"1": 47, "3": 600, "6": 4}},
+        )
+
+        assert state.task_progress_percent == 47
+        assert state.task_elapsed_time == 600
+        assert state.current_room_id == 4
+
+    def test_clean_progress_info_accepts_normalized_float_progress(self) -> None:
+        """Progress can arrive as a native 0..1 float from the decoder."""
+        state = NarwalState()
+
+        state.update_from_aux_status(
+            TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+            {"2": {"1": 0.64}},
+        )
+
+        assert state.task_progress_percent == 64
+
+    def test_clean_progress_info_accepts_float32_bit_pattern_progress(self) -> None:
+        """Progress can arrive as a uint32 float bit pattern from the decoder."""
+        state = NarwalState()
+
+        state.update_from_aux_status(
+            TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+            {"2": {"1": _float_to_uint32(0.75)}},
+        )
+
+        assert state.task_progress_percent == 75
+
+    def test_working_status_clears_stale_dock_fields_with_explicit_off_dock_signal(self) -> None:
+        """Fresh task metrics override stale status only when base_status says off dock."""
         state = NarwalState(working_status=WorkingStatus.DOCKED)
-        state.dock_sub_state = 1
-        state.dock_activity = 2
-        state.dock_field11 = 2
-        state.dock_field47 = 3
+        state.update_from_base_status({"3": {"1": 10}, "11": 1, "47": 2})
 
         state.update_from_working_status({"3": 120})
 

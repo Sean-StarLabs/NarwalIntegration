@@ -35,11 +35,14 @@ from .const import (
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_ALL_MAPS,
     TOPIC_CMD_GET_BASE_STATUS,
+    TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_CONSUMABLE_INFO,
     TOPIC_CMD_GET_CURRENT_TASK,
     TOPIC_CMD_GET_DEVICE_INFO,
+    TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
     TOPIC_CMD_GET_FEATURE_LIST,
     TOPIC_CMD_GET_MAP,
+    TOPIC_CMD_GET_ROBOT_TASK_STATUS,
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_PING,
@@ -55,6 +58,12 @@ from .const import (
     TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
+    TOPIC_POINT_NAVI_PLAN_TRAJ,
+    TOPIC_PLANNING_DEBUG,
+    TOPIC_ROBOT_CURRENT_STATUS,
+    TOPIC_ROBOT_STATUS,
+    TOPIC_ROBOT_TASK_STATUS,
+    TOPIC_TIMELINE_STATUS,
     DEFAULT_TOPIC_PREFIX,
     WAKE_TIMEOUT,
     AmbientLightCtrlType,
@@ -111,6 +120,17 @@ _TOPICLESS_ACK_TOPICS = {
     TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
 }
+
+_AUX_STATUS_TOPICS = {
+    TOPIC_TIMELINE_STATUS,
+    TOPIC_POINT_NAVI_PLAN_TRAJ,
+    TOPIC_PLANNING_DEBUG,
+    TOPIC_ROBOT_STATUS,
+    TOPIC_ROBOT_CURRENT_STATUS,
+    TOPIC_ROBOT_TASK_STATUS,
+}
+
+_OPTIONAL_TASK_DETAIL_TIMEOUT = 3.0
 
 @dataclass(frozen=True)
 class _QueuedResponse:
@@ -677,6 +697,8 @@ class NarwalClient:
                 self.state.map_display_data.robot_y,
                 self.state.map_display_data.timestamp,
             )
+        elif short_topic in _AUX_STATUS_TOPICS:
+            self.state.update_from_aux_status(short_topic, decoded)
         if self.on_state_update:
             self.on_state_update(self.state)
 
@@ -736,9 +758,12 @@ class NarwalClient:
         "upgrade/upgrade_status",
         "status/download_status",
         "map/display_map",
-        "status/time_line_status",
-        "status/point_navi_plan_traj",
-        "developer/planning_debug_info",
+        TOPIC_TIMELINE_STATUS,
+        TOPIC_POINT_NAVI_PLAN_TRAJ,
+        TOPIC_PLANNING_DEBUG,
+        TOPIC_ROBOT_STATUS,
+        TOPIC_ROBOT_CURRENT_STATUS,
+        TOPIC_ROBOT_TASK_STATUS,
     ]
 
     def _build_topic_subscription(self, duration: int = 600) -> bytes:
@@ -1725,6 +1750,60 @@ class NarwalClient:
         else:
             _LOGGER.debug(
                 "Consumable info query failed; preserving existing alerts (code=%s)",
+                resp.result_code,
+            )
+        return resp
+
+    async def get_clean_progress_info(self) -> CommandResponse:
+        """Query active clean progress information."""
+        resp = await self.send_command(
+            TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+            timeout=_OPTIONAL_TASK_DETAIL_TIMEOUT,
+            wait_if_busy=False,
+        )
+        if resp.success:
+            self.state.update_from_aux_status(
+                TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+                resp.data,
+            )
+        else:
+            _LOGGER.debug(
+                "Clean progress query failed; preserving existing task details (code=%s)",
+                resp.result_code,
+            )
+        return resp
+
+    async def get_dry_mop_remain_time(self) -> CommandResponse:
+        """Query remaining mop drying time."""
+        resp = await self.send_command(
+            TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
+            timeout=_OPTIONAL_TASK_DETAIL_TIMEOUT,
+            wait_if_busy=False,
+        )
+        if resp.success:
+            self.state.update_from_aux_status(
+                TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
+                resp.data,
+            )
+        else:
+            _LOGGER.debug(
+                "Dry mop time query failed; preserving existing dock task state (code=%s)",
+                resp.result_code,
+            )
+        return resp
+
+    async def get_robot_task_status(self) -> CommandResponse:
+        """Query the robot task status model."""
+        resp = await self.send_command(
+            TOPIC_CMD_GET_ROBOT_TASK_STATUS,
+            timeout=_OPTIONAL_TASK_DETAIL_TIMEOUT,
+            wait_if_busy=False,
+        )
+        if resp.success:
+            self.state.update_from_aux_status(TOPIC_CMD_GET_ROBOT_TASK_STATUS, resp.data)
+        else:
+            _LOGGER.debug(
+                "Robot task status query failed; preserving existing task details (code=%s)",
                 resp.result_code,
             )
         return resp

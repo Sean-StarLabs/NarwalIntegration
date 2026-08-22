@@ -40,6 +40,9 @@
       "cleaning_time": {
         "name": "Temps de nettoyage"
       },
+      "task_progress": {
+        "name": "Progression"
+      },
       "firmware_version": {
         "name": "Version du firmware"
       },
@@ -78,6 +81,37 @@
           "charging": "En charge",
           "fully_charged": "Chargé complètement",
           "not_charging": "Pas en charge"
+        }
+      },
+      "current_room": {
+        "name": "Pièce actuelle"
+      },
+      "station_task": {
+        "name": "Tâche de la station",
+        "state": {
+          "emptying_dustbin": "Vidage du bac à poussière",
+          "washing_mop": "Lavage de la serpillière",
+          "drying_mop": "Séchage de la serpillière",
+          "drying_or_disinfecting": "Séchage / désinfection",
+          "station_active": "Station active",
+          "idle": "Inactive"
+        }
+      },
+      "dry_mop_remaining_time": {
+        "name": "Temps de séchage restant"
+      },
+      "task_status": {
+        "name": "État",
+        "state": {
+          "cleaning": "Nettoyage",
+          "remapping": "Reconfiguration de la carte",
+          "returning": "Retour",
+          "paused": "En pause",
+          "station_active": "Station active",
+          "docked": "Stationné",
+          "idle": "Inactif",
+          "error": "Erreur",
+          "unknown": "Inconnu"
         }
       }
     },

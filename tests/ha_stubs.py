@@ -48,7 +48,16 @@ def install() -> None:
         CONFIG = "config"
         DIAGNOSTIC = "diagnostic"
 
+    class _UnitOfArea:
+        SQUARE_METERS = "m²"
+
+    class _UnitOfTime:
+        SECONDS = "s"
+
     ha_const.EntityCategory = _EntityCategory  # type: ignore[attr-defined]
+    ha_const.PERCENTAGE = "%"  # type: ignore[attr-defined]
+    ha_const.UnitOfArea = _UnitOfArea  # type: ignore[attr-defined]
+    ha_const.UnitOfTime = _UnitOfTime  # type: ignore[attr-defined]
 
     # homeassistant.core
     ha_core = _mod("homeassistant.core", ha)
@@ -321,9 +330,42 @@ def install() -> None:
     ha_number.RestoreNumber = _RestoreNumber  # type: ignore[attr-defined]
 
     ha_sensor = _mod("homeassistant.components.sensor", ha_comp)
-    ha_sensor.SensorEntity = MagicMock  # type: ignore[attr-defined]
-    ha_sensor.SensorDeviceClass = MagicMock  # type: ignore[attr-defined]
-    ha_sensor.SensorStateClass = MagicMock  # type: ignore[attr-defined]
+
+    @dataclass(frozen=True, kw_only=True)
+    class _SensorEntityDescription:
+        """Stub for SensorEntityDescription."""
+
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        icon: str | None = None
+        device_class: object | None = None
+        native_unit_of_measurement: str | None = None
+        state_class: object | None = None
+        entity_category: object | None = None
+        options: list | None = None
+
+    class _SensorDeviceClass:
+        BATTERY = "battery"
+        DURATION = "duration"
+        ENUM = "enum"
+
+    class _SensorStateClass:
+        MEASUREMENT = "measurement"
+
+    class _SensorEntity:
+        """Stub for SensorEntity base class."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+        def async_write_ha_state(self) -> None:
+            pass
+
+    ha_sensor.SensorEntity = _SensorEntity  # type: ignore[attr-defined]
+    ha_sensor.SensorEntityDescription = _SensorEntityDescription  # type: ignore[attr-defined]
+    ha_sensor.SensorDeviceClass = _SensorDeviceClass  # type: ignore[attr-defined]
+    ha_sensor.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
 
     ha_bs = _mod("homeassistant.components.binary_sensor", ha_comp)
 

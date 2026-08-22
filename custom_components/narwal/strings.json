@@ -40,6 +40,9 @@
       "cleaning_time": {
         "name": "Cleaning time"
       },
+      "task_progress": {
+        "name": "Progress"
+      },
       "firmware_version": {
         "name": "Firmware version"
       },
@@ -82,6 +85,34 @@
       },
       "current_room": {
         "name": "Current room"
+      },
+      "station_task": {
+        "name": "Station task",
+        "state": {
+          "emptying_dustbin": "Emptying dustbin",
+          "washing_mop": "Washing mop",
+          "drying_mop": "Drying mop",
+          "drying_or_disinfecting": "Drying / disinfecting",
+          "station_active": "Station active",
+          "idle": "Idle"
+        }
+      },
+      "dry_mop_remaining_time": {
+        "name": "Drying time left"
+      },
+      "task_status": {
+        "name": "Status",
+        "state": {
+          "cleaning": "Cleaning",
+          "remapping": "Remapping",
+          "returning": "Returning",
+          "paused": "Paused",
+          "station_active": "Station active",
+          "docked": "Docked",
+          "idle": "Idle",
+          "error": "Error",
+          "unknown": "Unknown"
+        }
       }
     },
     "binary_sensor": {

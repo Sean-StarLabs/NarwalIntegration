@@ -19,11 +19,15 @@ from narwal_client.const import (
     TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_CLEAN_TASK,
     TOPIC_CMD_GET_CONSUMABLE_INFO,
+    TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_BASE_STATUS,
+    TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
+    TOPIC_CMD_GET_ROBOT_TASK_STATUS,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PLAN_START,
     TOPIC_CMD_TAKE_PICTURE,
+    TOPIC_ROBOT_TASK_STATUS,
     AmbientLightCtrlType,
     CommandResult,
     FanLevel,
@@ -631,6 +635,29 @@ class TestCommandResponseRouting:
         client.on_state_update.assert_called_once_with(client.state)
         assert client.robot_awake
 
+    @pytest.mark.asyncio
+    async def test_direct_recv_processes_aux_broadcast_topic(self) -> None:
+        client = NarwalClient("10.0.0.1", device_id="device")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._listener_active = False
+        client._ws.recv = AsyncMock(
+            side_effect=[
+                self._broadcast_frame(
+                    client._full_topic(TOPIC_ROBOT_TASK_STATUS),
+                    b"\x08\x01",
+                ),
+                self._field5_frame(client._full_topic(TOPIC_CMD_FORCE_END)),
+            ]
+        )
+
+        with patch.object(client.state, "update_from_aux_status") as mock_update:
+            result = await client.send_command(TOPIC_CMD_FORCE_END)
+
+        assert result.success
+        mock_update.assert_called_once()
+        assert mock_update.call_args.args[0] == TOPIC_ROBOT_TASK_STATUS
+
 
 class TestConsumableInfoQuery:
     """Tests for local consumable-info polling."""
@@ -652,6 +679,76 @@ class TestConsumableInfoQuery:
         mock_send.assert_awaited_once()
         assert client.state.maintain_items == [4]
         assert client.state.replace_items == [20]
+
+
+class TestTaskDetailQueries:
+    """Tests for task/detail query failure handling."""
+
+    @pytest.mark.asyncio
+    async def test_failed_clean_progress_query_preserves_task_details(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        client.state.task_progress_percent = 72
+        client.state.task_elapsed_time = 900
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(
+                result_code=CommandResult.NOT_READY,
+                data={"2": {"1": 4, "3": 12}},
+            )
+
+            await client.get_clean_progress_info()
+
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+            timeout=3.0,
+            wait_if_busy=False,
+        )
+        assert client.state.task_progress_percent == 72
+        assert client.state.task_elapsed_time == 900
+
+    @pytest.mark.asyncio
+    async def test_failed_dry_time_query_preserves_dock_task_state(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        client.state.dry_mop_remaining_time = 600
+        client.state.mop_drying_elapsed = 120
+        client.state.mop_drying_target = 720
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(
+                result_code=CommandResult.NOT_READY,
+                data={},
+            )
+
+            await client.get_dry_mop_remain_time()
+
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
+            timeout=3.0,
+            wait_if_busy=False,
+        )
+        assert client.state.dry_mop_remaining_time == 600
+        assert client.state.mop_drying_elapsed == 120
+        assert client.state.mop_drying_target == 720
+
+    @pytest.mark.asyncio
+    async def test_failed_robot_task_query_preserves_task_details(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        client.state.task_progress_percent = 72
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(
+                result_code=CommandResult.NOT_READY,
+                data={"2": [{"1": 4}]},
+            )
+
+            await client.get_robot_task_status()
+
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_GET_ROBOT_TASK_STATUS,
+            timeout=3.0,
+            wait_if_busy=False,
+        )
+        assert client.state.task_progress_percent == 72
 
 
 class TestBuildCleanPayloadV2:
