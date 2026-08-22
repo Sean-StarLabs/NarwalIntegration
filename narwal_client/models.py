@@ -168,6 +168,25 @@ class ObstacleInfo:
         return (self.center_x - origin_x, self.center_y - origin_y)
 
 
+@dataclass
+class CarpetInfo:
+    """A carpet or rug polygon from get_map field 2.26."""
+
+    id: int = 0
+    points: list[tuple[int, int]] = field(default_factory=list)
+    center_x: int = 0
+    center_y: int = 0
+    behavior: int = 0
+    room_id: int | None = None
+    is_flooring: bool = False
+
+    def to_grid_polygon(
+        self, origin_x: int, origin_y: int
+    ) -> list[tuple[float, float]]:
+        """Convert world coordinates to map-grid coordinates."""
+        return [(float(x - origin_x), float(y - origin_y)) for x, y in self.points]
+
+
 def _to_float32(val: Any) -> float | None:
     """Convert a protobuf value to float32.
 
@@ -279,6 +298,301 @@ def _parse_obstacles(field32: dict) -> list[ObstacleInfo]:
     return obstacles
 
 
+def _parse_carpets(field26: object) -> list[CarpetInfo]:
+    """Parse carpet polygons from get_map field 2.26."""
+    items = field26 if isinstance(field26, list) else [field26]
+    carpets: list[CarpetInfo] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        raw_points = item.get("2", [])
+        if isinstance(raw_points, dict):
+            raw_points = [raw_points]
+        points: list[tuple[int, int]] = []
+        for point in raw_points:
+            if not isinstance(point, dict):
+                continue
+            try:
+                points.append((int(point["1"]), int(point["2"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        center = item.get("3", {})
+        if not isinstance(center, dict):
+            center = {}
+        try:
+            carpets.append(
+                CarpetInfo(
+                    id=int(item.get("1", 0)),
+                    points=_simplify_closed_grid_path(points),
+                    center_x=int(center.get("1", 0)),
+                    center_y=int(center.get("2", 0)),
+                    behavior=int(item.get("4", 0)),
+                )
+            )
+        except (TypeError, ValueError):
+            continue
+    return [carpet for carpet in carpets if len(carpet.points) >= 3]
+
+
+def _map_room_geometry(
+    compressed_map: bytes, width: int, height: int
+) -> tuple[
+    list[int],
+    dict[int, tuple[int, int, int, int]],
+    dict[int, list[list[tuple[float, float]]]],
+    dict[int, tuple[float, float]],
+]:
+    """Decode room pixels and calculate bounds, contours, and label points."""
+    if not compressed_map or width <= 0 or height <= 0:
+        return [], {}, {}, {}
+    from .map_renderer import _decode_packed_varints, decompress_map
+
+    pixels = _decode_packed_varints(decompress_map(compressed_map))
+    expected = width * height
+    pixels = (pixels + [0] * expected)[:expected]
+    bounds: dict[int, tuple[int, int, int, int]] = {}
+    center_sums: dict[int, tuple[float, float, int]] = {}
+    room_ids: list[int] = []
+    for index, value in enumerate(pixels):
+        room_id = value >> 8
+        room_ids.append(room_id)
+        if room_id <= 0:
+            continue
+        x = index % width
+        y = index // width
+        current = bounds.get(room_id)
+        bounds[room_id] = (
+            x if current is None else min(current[0], x),
+            y if current is None else min(current[1], y),
+            x if current is None else max(current[2], x),
+            y if current is None else max(current[3], y),
+        )
+        if not value & 0x10:
+            sum_x, sum_y, count = center_sums.get(room_id, (0.0, 0.0, 0))
+            center_sums[room_id] = (
+                sum_x + x + 0.5,
+                sum_y + y + 0.5,
+                count + 1,
+            )
+    contours = {
+        room_id: _trace_room_contours(room_ids, width, height, room_id)
+        for room_id in bounds
+    }
+    centers = {
+        room_id: (sum_x / count, sum_y / count)
+        for room_id, (sum_x, sum_y, count) in center_sums.items()
+        if count
+    }
+    return pixels, bounds, contours, centers
+
+
+def _trace_room_contours(
+    room_ids: list[int], width: int, height: int, room_id: int
+) -> list[list[tuple[float, float]]]:
+    """Trace clockwise pixel-boundary loops for a room mask."""
+    edges: set[tuple[tuple[int, int], tuple[int, int]]] = set()
+
+    def room_at(x: int, y: int) -> int:
+        if x < 0 or y < 0 or x >= width or y >= height:
+            return 0
+        return room_ids[y * width + x]
+
+    for y in range(height):
+        for x in range(width):
+            if room_at(x, y) != room_id:
+                continue
+            if room_at(x, y - 1) != room_id:
+                edges.add(((x, y), (x + 1, y)))
+            if room_at(x + 1, y) != room_id:
+                edges.add(((x + 1, y), (x + 1, y + 1)))
+            if room_at(x, y + 1) != room_id:
+                edges.add(((x + 1, y + 1), (x, y + 1)))
+            if room_at(x - 1, y) != room_id:
+                edges.add(((x, y + 1), (x, y)))
+
+    outgoing: dict[tuple[int, int], list[tuple[int, int]]] = {}
+    for start, end in edges:
+        outgoing.setdefault(start, []).append(end)
+
+    contours: list[list[tuple[float, float]]] = []
+    while edges:
+        first_edge = min(edges)
+        start, current = first_edge
+        edges.remove(first_edge)
+        contour = [start, current]
+        while current != start:
+            candidates = [
+                end for end in outgoing.get(current, []) if (current, end) in edges
+            ]
+            if not candidates:
+                contour = []
+                break
+            next_point = min(candidates)
+            edges.remove((current, next_point))
+            contour.append(next_point)
+            current = next_point
+        if len(contour) < 5:
+            continue
+        simplified = _simplify_closed_grid_path(contour[:-1])
+        if len(simplified) >= 3 and abs(_polygon_area(simplified)) >= 4:
+            contours.append([(float(x), float(y)) for x, y in simplified])
+    return sorted(
+        contours,
+        key=lambda points: abs(_polygon_area(points)),
+        reverse=True,
+    )
+
+
+def _simplify_closed_grid_path(
+    points: list[tuple[int, int]],
+) -> list[tuple[int, int]]:
+    """Remove pixel stair-steps while preserving the closed room outline."""
+    if len(points) <= 3:
+        return points
+    simplified: list[tuple[int, int]] = []
+    for index, point in enumerate(points):
+        previous = points[index - 1]
+        following = points[(index + 1) % len(points)]
+        if (point[0] - previous[0]) * (following[1] - point[1]) == (
+            point[1] - previous[1]
+        ) * (following[0] - point[0]):
+            continue
+        simplified.append(point)
+    if len(simplified) <= 4:
+        return simplified
+
+    first = simplified[0]
+    split_index = max(
+        range(1, len(simplified)),
+        key=lambda index: (
+            (simplified[index][0] - first[0]) ** 2
+            + (simplified[index][1] - first[1]) ** 2
+        ),
+    )
+    first_half = _simplify_open_grid_path(
+        simplified[: split_index + 1],
+        0.75,
+    )
+    second_half = _simplify_open_grid_path(
+        simplified[split_index:] + [first],
+        0.75,
+    )
+    return first_half[:-1] + second_half[:-1]
+
+
+def _simplify_open_grid_path(
+    points: list[tuple[int, int]], epsilon: float
+) -> list[tuple[int, int]]:
+    """Simplify an open path with the Ramer-Douglas-Peucker algorithm."""
+    if len(points) <= 2:
+        return points
+    start_x, start_y = points[0]
+    end_x, end_y = points[-1]
+    segment_x = end_x - start_x
+    segment_y = end_y - start_y
+    segment_length = (segment_x**2 + segment_y**2) ** 0.5
+    furthest_index = 0
+    furthest_distance = 0.0
+    for index, (x, y) in enumerate(points[1:-1], start=1):
+        if segment_length == 0:
+            distance = ((x - start_x) ** 2 + (y - start_y) ** 2) ** 0.5
+        else:
+            distance = abs(
+                segment_y * x
+                - segment_x * y
+                + end_x * start_y
+                - end_y * start_x
+            ) / segment_length
+        if distance > furthest_distance:
+            furthest_index = index
+            furthest_distance = distance
+    if furthest_distance <= epsilon:
+        return [points[0], points[-1]]
+    left = _simplify_open_grid_path(points[: furthest_index + 1], epsilon)
+    right = _simplify_open_grid_path(points[furthest_index:], epsilon)
+    return left[:-1] + right
+
+
+def _polygon_area(
+    points: list[tuple[float, float]] | list[tuple[int, int]],
+) -> float:
+    """Return the signed area of a polygon."""
+    return sum(
+        x1 * y2 - x2 * y1
+        for (x1, y1), (x2, y2) in zip(
+            points,
+            points[1:] + points[:1],
+            strict=True,
+        )
+    ) / 2
+
+
+def _point_in_polygon(
+    x: float, y: float, points: list[tuple[float, float]]
+) -> bool:
+    """Return whether a point is inside a polygon."""
+    inside = False
+    previous_x, previous_y = points[-1]
+    for current_x, current_y in points:
+        if (current_y > y) != (previous_y > y):
+            crossing_x = (previous_x - current_x) * (y - current_y) / (
+                previous_y - current_y
+            ) + current_x
+            if x < crossing_x:
+                inside = not inside
+        previous_x, previous_y = current_x, current_y
+    return inside
+
+
+def _classify_room_surfaces(
+    pixels: list[int],
+    width: int,
+    height: int,
+    carpets: list[CarpetInfo],
+    origin_x: int,
+    origin_y: int,
+    valid_room_ids: set[int],
+) -> dict[int, str]:
+    """Classify fitted carpet from carpet coverage of each room mask."""
+    room_totals: dict[int, int] = {}
+    room_carpet_pixels: dict[int, int] = {}
+    carpet_room_pixels: list[dict[int, int]] = [{} for _ in carpets]
+    polygons = [carpet.to_grid_polygon(origin_x, origin_y) for carpet in carpets]
+
+    for index, value in enumerate(pixels[: width * height]):
+        room_id = value >> 8
+        if room_id not in valid_room_ids:
+            continue
+        room_totals[room_id] = room_totals.get(room_id, 0) + 1
+        x = (index % width) + 0.5
+        y = (index // width) + 0.5
+        covered = False
+        for carpet_index, polygon in enumerate(polygons):
+            if len(polygon) < 3 or not _point_in_polygon(x, y, polygon):
+                continue
+            covered = True
+            counts = carpet_room_pixels[carpet_index]
+            counts[room_id] = counts.get(room_id, 0) + 1
+        if covered:
+            room_carpet_pixels[room_id] = room_carpet_pixels.get(room_id, 0) + 1
+
+    for carpet, overlap in zip(carpets, carpet_room_pixels, strict=True):
+        if overlap:
+            carpet.room_id = max(overlap, key=overlap.__getitem__)
+        carpet.is_flooring = any(
+            count / room_totals.get(room_id, 1) >= 0.35
+            for room_id, count in overlap.items()
+        )
+    return {
+        room_id: (
+            "carpet"
+            if room_carpet_pixels.get(room_id, 0) / total >= 0.35
+            else "hard_floor"
+        )
+        for room_id, total in room_totals.items()
+    }
+
+
 @dataclass
 class MapData:
     """Map data from get_map response."""
@@ -296,6 +610,11 @@ class MapData:
     origin_x: int = 0  # x pixel offset from field 2.6.3
     origin_y: int = 0  # y pixel offset from field 2.6.1
     obstacles: list[ObstacleInfo] = field(default_factory=list)
+    carpets: list[CarpetInfo] = field(default_factory=list)
+    room_bounds: dict[int, tuple[int, int, int, int]] = field(default_factory=dict)
+    room_polygons: dict[int, list[list[tuple[float, float]]]] = field(default_factory=dict)
+    room_centers: dict[int, tuple[float, float]] = field(default_factory=dict)
+    room_surfaces: dict[int, str] = field(default_factory=dict)
     raw: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
@@ -377,13 +696,38 @@ class MapData:
         if isinstance(field32, dict):
             obstacles = _parse_obstacles(field32)
 
+        carpets = _parse_carpets(payload.get("26", []))
+        width = int(payload.get("4", 0))
+        height = int(payload.get("5", 0))
+        compressed_bytes = compressed if isinstance(compressed, bytes) else b""
+        pixels, room_bounds, room_polygons, room_centers = _map_room_geometry(
+            compressed_bytes,
+            width,
+            height,
+        )
+        for carpet in carpets:
+            grid_x = carpet.center_x - origin_x
+            grid_y = carpet.center_y - origin_y
+            if 0 <= grid_x < width and 0 <= grid_y < height and pixels:
+                room_id = pixels[grid_y * width + grid_x] >> 8
+                carpet.room_id = room_id or None
+        room_surfaces = _classify_room_surfaces(
+            pixels,
+            width,
+            height,
+            carpets,
+            origin_x,
+            origin_y,
+            {room.room_id for room in rooms},
+        )
+
         return cls(
             map_id=int(payload.get("1", 0)),
-            width=int(payload.get("4", 0)),
-            height=int(payload.get("5", 0)),
+            width=width,
+            height=height,
             resolution=resolution,
             rooms=rooms,
-            compressed_map=compressed if isinstance(compressed, bytes) else b"",
+            compressed_map=compressed_bytes,
             area=int(payload.get("33", 0)),
             created_at=int(payload.get("34", 0)),
             dock_x=dock_x,
@@ -391,6 +735,11 @@ class MapData:
             origin_x=origin_x,
             origin_y=origin_y,
             obstacles=obstacles,
+            carpets=carpets,
+            room_bounds=room_bounds,
+            room_polygons=room_polygons,
+            room_centers=room_centers,
+            room_surfaces=room_surfaces,
             raw=payload,
         )
 

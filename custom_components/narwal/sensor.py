@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 from homeassistant.components.sensor import (
     SensorDeviceClass,
@@ -180,6 +181,7 @@ async def async_setup_entry(
     ]
     entities.append(NarwalChargingStateSensor(coordinator))
     entities.append(NarwalTaskStatusSensor(coordinator))
+    entities.append(NarwalMapMetadataSensor(coordinator))
     async_add_entities(entities)
 
 
@@ -206,6 +208,96 @@ class NarwalSensor(NarwalEntity, SensorEntity):
         if state is None:
             return None
         return self.entity_description.value_fn(state)
+
+
+class NarwalMapMetadataSensor(NarwalEntity, SensorEntity):
+    """Static room geometry from the active Narwal map."""
+
+    _attr_translation_key = "map_metadata"
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_icon = "mdi:map-outline"
+
+    def __init__(self, coordinator: NarwalCoordinator) -> None:
+        """Initialize the map metadata sensor."""
+        super().__init__(coordinator)
+        device_id = coordinator.config_entry.data["device_id"]
+        self._attr_unique_id = f"{device_id}_map_metadata"
+
+    @property
+    def native_value(self) -> int | None:
+        """Return the active map identifier."""
+        state = self.coordinator.data
+        if state is None or state.map_data is None:
+            return None
+        return state.map_data.map_id
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return room masks and rug geometry."""
+        state = self.coordinator.data
+        if state is None or state.map_data is None:
+            return None
+        map_data = state.map_data
+        room_names = {room.room_id: room.display_name for room in map_data.rooms}
+        rooms = []
+        for room in map_data.rooms:
+            bounds = map_data.room_bounds.get(room.room_id)
+            polygons = map_data.room_polygons.get(room.room_id, [])
+            if bounds is None or not polygons:
+                continue
+            center = map_data.room_centers.get(room.room_id)
+            rooms.append(
+                {
+                    "id": room.room_id,
+                    "name": room.display_name,
+                    "room_type": room.room_sub_type,
+                    "surface": map_data.room_surfaces.get(room.room_id, "hard_floor"),
+                    "bounds": {
+                        "x": bounds[0],
+                        "y": bounds[1],
+                        "width": bounds[2] - bounds[0] + 1,
+                        "height": bounds[3] - bounds[1] + 1,
+                    },
+                    "label": (
+                        {"x": round(center[0], 2), "y": round(center[1], 2)}
+                        if center is not None
+                        else None
+                    ),
+                    "polygons": [
+                        [{"x": round(x, 2), "y": round(y, 2)} for x, y in polygon]
+                        for polygon in polygons
+                    ],
+                }
+            )
+        rugs = [
+            {
+                "id": carpet.id,
+                "room_id": carpet.room_id,
+                "room_name": room_names.get(carpet.room_id),
+                "behavior": carpet.behavior,
+                "points": [
+                    {"x": round(x, 2), "y": round(y, 2)}
+                    for x, y in carpet.to_grid_polygon(
+                        map_data.origin_x,
+                        map_data.origin_y,
+                    )
+                ],
+            }
+            for carpet in map_data.carpets
+            if not carpet.is_flooring
+        ]
+        attributes: dict[str, Any] = {
+            "map_size": {"width": map_data.width, "height": map_data.height},
+            "map_resolution": map_data.resolution,
+            "rooms": rooms,
+            "rugs": rugs,
+        }
+        if map_data.dock_x is not None and map_data.dock_y is not None:
+            attributes["dock_position"] = {
+                "x": round(map_data.dock_x, 2),
+                "y": round(map_data.dock_y, 2),
+            }
+        return attributes
 
 
 class NarwalChargingStateSensor(NarwalEntity, SensorEntity):
