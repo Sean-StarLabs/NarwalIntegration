@@ -20,6 +20,9 @@ from .const import (
     CommandResult,
     FanLevel,
     MopHumidity,
+    TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
+    TOPIC_CMD_GET_ROBOT_TASK_STATUS,
+    TOPIC_ROBOT_TASK_STATUS,
     WorkingStatus,
 )
 
@@ -225,6 +228,14 @@ def _enum_int_list(val: Any) -> list[int]:
         if n:
             out.append(n)
     return out
+
+
+def _optional_int(value: Any) -> int | None:
+    """Return an int for loosely decoded protobuf values, or None."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _parse_obstacles(field32: dict) -> list[ObstacleInfo]:
@@ -535,6 +546,10 @@ class NarwalState:
     cleaning_area: float = 0.0  # m² (coveredArea)
     cleaning_time: int = 0  # seconds
     last_active_working_status_time: float = 0.0
+    task_progress_percent: int | None = None
+    task_elapsed_time: int = 0
+    dry_mop_remaining_time: int | None = None
+    current_room_aux_name: str = ""
 
     # Consumables / station / fault (base_status; present on dock and during cleaning)
     dust_bag_health: float = 0.0  # field 35 stationBagHealthScore (%)
@@ -580,6 +595,10 @@ class NarwalState:
     # Dock activity (field 3 sub-field 12: 2/6 observed when docked)
     dock_activity: int = 0
 
+    # Station activity (field 3 sub-field 18)
+    # Observed: 1 during dust gathering, 4 during dock dry/disinfection work.
+    station_activity: int = 0
+
     # Dock presence (field 3 sub-field 3)
     # Values observed: 1=on dock, 2=off dock, 6=on dock (charged idle)
     dock_presence: int = 0
@@ -612,6 +631,7 @@ class NarwalState:
     # Raw data for fields we haven't fully decoded yet
     raw_base_status: dict[str, Any] = field(default_factory=dict)
     raw_working_status: dict[str, Any] = field(default_factory=dict)
+    raw_aux_status: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     @property
     def has_recent_active_working_status(self) -> bool:
@@ -670,6 +690,8 @@ class NarwalState:
             return True
         if self.dock_activity > 0:
             return True
+        if self.station_activity > 0:
+            return True
         if self.dock_field11 >= 2:
             return True
         if self.dock_field47 in (1, 3):
@@ -698,6 +720,14 @@ class NarwalState:
         return self.is_returning_to_dock and self.dock_sub_state == 2
 
     @property
+    def is_station_active(self) -> bool:
+        """True when the base station is running a dock-side task."""
+        return self.station_activity > 0 or (
+            self.dry_mop_remaining_time is not None
+            and self.dry_mop_remaining_time > 0
+        )
+
+    @property
     def current_room_name(self) -> str | None:
         """Return the display name of the room currently being cleaned.
 
@@ -708,11 +738,11 @@ class NarwalState:
         if self.current_room_id is None:
             return None
         if self.map_data is None:
-            return None
+            return self.current_room_aux_name or None
         for room in self.map_data.rooms:
             if room.room_id == self.current_room_id:
                 return room.display_name
-        return None
+        return self.current_room_aux_name or None
 
     def update_from_working_status(self, decoded: dict[str, Any]) -> None:
         """Update state from a decoded working_status message.
@@ -756,6 +786,7 @@ class NarwalState:
             self.is_returning_to_dock = False
             self.dock_sub_state = 0
             self.dock_activity = 0
+            self.station_activity = 0
             self.dock_presence = 2
             self.dock_field11 = 1
             self.dock_field47 = 2
@@ -842,6 +873,12 @@ class NarwalState:
                     self.dock_activity = int(field3["12"])
                 except (ValueError, TypeError):
                     pass
+            self.station_activity = 0
+            if "18" in field3:
+                try:
+                    self.station_activity = int(field3["18"])
+                except (ValueError, TypeError):
+                    pass
             if "3" in field3:
                 try:
                     self.dock_presence = int(field3["3"])
@@ -852,6 +889,8 @@ class NarwalState:
                     self.dock_sub_state = 0
                 if "12" not in field3:
                     self.dock_activity = 0
+                if "18" not in field3:
+                    self.station_activity = 0
                 if "3" not in field3:
                     self.dock_presence = 2
                 if "11" not in decoded:
@@ -859,7 +898,7 @@ class NarwalState:
                 if "47" not in decoded:
                     self.dock_field47 = 2
             # Log unrecognized sub-fields for future firmware mapping
-            _known_f3 = {"1", "2", "3", "7", "10", "12"}
+            _known_f3 = {"1", "2", "3", "7", "10", "12", "18"}
             _unknown_f3 = set(field3.keys()) - _known_f3
             if _unknown_f3:
                 _LOGGER.debug(
@@ -993,6 +1032,43 @@ class NarwalState:
         """
         if "3" in decoded:
             self.download_status = int(decoded["3"])
+
+    def update_from_aux_status(self, topic: str, decoded: dict[str, Any]) -> None:
+        """Store and parse auxiliary status/task payloads."""
+        self.raw_aux_status[topic] = decoded
+        if topic in {TOPIC_ROBOT_TASK_STATUS, TOPIC_CMD_GET_ROBOT_TASK_STATUS}:
+            payload = decoded.get("2")
+            if isinstance(payload, list):
+                payload = payload[0] if payload else None
+            if not isinstance(payload, dict):
+                return
+            progress = _optional_int(payload.get("1"))
+            if progress is not None:
+                self.task_progress_percent = max(0, min(100, progress))
+            elapsed = _optional_int(payload.get("2"))
+            if elapsed is not None:
+                self.task_elapsed_time = elapsed
+            room = payload.get("6")
+            if not isinstance(room, dict):
+                room = payload.get("8")
+            if isinstance(room, dict):
+                room_id = _optional_int(room.get("1"))
+                if room_id is not None:
+                    self.current_room_id = room_id or None
+                name = room.get("3")
+                if isinstance(name, (bytes, bytearray)):
+                    self.current_room_aux_name = bytes(name).decode(
+                        "utf-8", errors="replace"
+                    )
+                else:
+                    self.current_room_aux_name = str(name) if name else ""
+                    if (
+                        self.current_room_aux_name.startswith("b'")
+                        and self.current_room_aux_name.endswith("'")
+                    ):
+                        self.current_room_aux_name = self.current_room_aux_name[2:-1]
+        elif topic == TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME:
+            self.dry_mop_remaining_time = _optional_int(decoded.get("2"))
 
     def update_from_consumable_info(self, decoded: dict[str, Any]) -> None:
         """Parse a consumable/get_consumable_info response into maintain/replace alert lists.

@@ -43,6 +43,7 @@ CONSUMABLE_POLL_EVERY = 30
 # base_status-derived value, and the live map stops updating (#73).
 TOPIC_SUBSCRIPTION_TTL = 600.0
 TOPIC_RESUBSCRIBE_AFTER = 240.0
+ACTIVE_TASK_REFRESH_INTERVAL = 30.0
 
 
 @dataclass
@@ -97,6 +98,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._map_fetch_pending = False
         self._last_display_map_resub: float = 0.0
         self._last_topic_subscribe: float = 0.0
+        self._last_task_details_refresh: float = 0.0
         self._consecutive_failures = 0
         self._max_failures = 5  # 5 * 60s = 5 minutes before entities go unavailable
         self._consumable_poll_countdown = 0  # 0 = fetch on next poll, then every CONSUMABLE_POLL_EVERY
@@ -228,6 +230,16 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     f"{DOMAIN}_resub",
                 )
 
+        if is_cleaning or state.is_station_active:
+            now = time.monotonic()
+            if now - self._last_task_details_refresh > ACTIVE_TASK_REFRESH_INTERVAL:
+                self._last_task_details_refresh = now
+                self.config_entry.async_create_background_task(
+                    self.hass,
+                    self._refresh_task_details(cleaning=is_cleaning),
+                    f"{DOMAIN}_task_details",
+                )
+
         self.async_set_updated_data(state)
 
         # Broadcast arrived — switch back to normal polling if in fast mode
@@ -265,6 +277,19 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self._last_topic_subscribe = time.monotonic()
         except Exception:
             _LOGGER.debug("Topic re-subscription failed")
+
+    async def _refresh_task_details(self, *, cleaning: bool) -> None:
+        """Query app-style task detail endpoints while a task is active."""
+        try:
+            if cleaning:
+                await self.client.get_clean_progress_info()
+            else:
+                await self.client.get_dry_mop_remain_time()
+            await self.client.get_robot_task_status()
+        except Exception as err:
+            _LOGGER.debug("Task detail refresh failed: %s", err)
+            return
+        self.async_set_updated_data(self.client.state)
 
     async def _refresh_dock_status(self) -> None:
         """Immediate get_status() after return-to-dock to refresh dock fields."""

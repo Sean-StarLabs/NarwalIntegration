@@ -62,7 +62,11 @@ TOPIC_UPGRADE_STATUS = "upgrade/upgrade_status"
 TOPIC_DOWNLOAD_STATUS = "status/download_status"
 TOPIC_DISPLAY_MAP = "map/display_map"
 TOPIC_TIMELINE_STATUS = "status/time_line_status"
+TOPIC_POINT_NAVI_PLAN_TRAJ = "status/point_navi_plan_traj"
 TOPIC_PLANNING_DEBUG = "developer/planning_debug_info"
+TOPIC_ROBOT_STATUS = "status/robot"
+TOPIC_ROBOT_CURRENT_STATUS = "status/robot/current"
+TOPIC_ROBOT_TASK_STATUS = "robot/task/status"
 
 # --- Command topics (client → robot, confirmed working) ---
 # Common
@@ -98,6 +102,9 @@ TOPIC_CMD_EASY_CLEAN = "clean/easy_clean/start"
 TOPIC_CMD_SET_FAN_LEVEL = "clean/set_fan_level"
 TOPIC_CMD_SET_MOP_HUMIDITY = "clean/set_mop_humidity"
 TOPIC_CMD_GET_CURRENT_TASK = "clean/current_clean_task/get"
+TOPIC_CMD_GET_CLEAN_PROGRESS_INFO = "info/get_clean_progress_info"
+TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME = "supply/get_dry_mop_remain_time"
+TOPIC_CMD_GET_ROBOT_TASK_STATUS = "robot/task/status/get"
 
 # Map
 TOPIC_CMD_GET_MAP = "map/get_map"
