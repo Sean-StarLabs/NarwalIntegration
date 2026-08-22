@@ -44,6 +44,7 @@ WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
     WorkingStatus.CLEANING: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING_ALT: VacuumActivity.CLEANING,
     WorkingStatus.REMAPPING: VacuumActivity.CLEANING,  # mapping/exploration — robot is actively busy
+    WorkingStatus.CUSTOM_CLEANING: VacuumActivity.CLEANING,
     WorkingStatus.TASK_COMPLETED: VacuumActivity.RETURNING,
     WorkingStatus.ERROR: VacuumActivity.ERROR,
 }

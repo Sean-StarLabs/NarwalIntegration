@@ -188,6 +188,14 @@ class TestNarwalState:
         assert state.is_cleaning
         assert not state.is_docked
 
+    def test_custom_cleaning_working_status(self) -> None:
+        """CUSTOM_CLEANING(17) maps to active cleaning."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 17}, "11": 1, "47": 2})
+        assert state.working_status == WorkingStatus.CUSTOM_CLEANING
+        assert state.is_cleaning
+        assert not state.is_docked
+
     def test_new_fw_field3_unknown_subfields_logged(self) -> None:
         """New firmware sub-fields (4, 11) are parsed without error."""
         state = NarwalState()
