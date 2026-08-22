@@ -203,7 +203,7 @@ class WorkingStatus(IntEnum):
     # revisit if a capture shows 3 means something else (e.g. a self-test state).
     CLEANING_V2 = 3   # active cleaning on newer Flow 2 firmware
     CLEANING = 4      # active cleaning (stays 4 even while returning to dock)
-    CLEANING_ALT = 5  # cleaning — observed when robot was physically stuck; may indicate error/stuck state
+    CLEANING_ALT = 5  # cleaning - seen when stuck; may indicate error/stuck state
     REMAPPING = 7     # mapping/exploration (live 2026-07-09); camera active, take_picture accepted
     DOCKED = 10       # on dock (does NOT reliably indicate charging vs charged)
     CHARGED = 14      # on dock (reported before 100% — use battery_level for charge state)
@@ -224,7 +224,11 @@ ACTIVE_CLEANING_STATUSES = frozenset(
 
 
 class FanLevel(IntEnum):
-    """CleanParam suction level (CleanTask.pbenum FanLevel). Live clean/set_fan_level carries a SweepFanLevel instead — identical ints 0-4, but it has no SUPER, so the app maps SUPER->STRONG on that path."""
+    """CleanParam suction level.
+
+    Live clean/set_fan_level carries a SweepFanLevel instead: identical ints
+    0-4, but it has no SUPER, so the app maps SUPER->STRONG on that path.
+    """
 
     UNSPECIFIED = 0
     MUTE = 1
@@ -235,7 +239,7 @@ class FanLevel(IntEnum):
 
 
 class MopHumidity(IntEnum):
-    """Water volume. CleanParam tag 4 and the live clean/set_mop_humidity command share these ints."""
+    """Water volume shared by CleanParam tag 4 and live set_mop_humidity."""
 
     UNSPECIFIED = 0
     DRY = 1
@@ -251,8 +255,19 @@ class MopStrengthLevel(IntEnum):
     HIGH = 2
 
 
+class CleaningRoute(IntEnum):
+    """Cleaning route overlap level (CleanParam tag 8)."""
+
+    STANDARD = 1
+    METICULOUS = 2
+
+
 class WorkMode(IntEnum):
-    """Clean work mode — the app's robot_work_mode_* selector (Vacuum / Mop / Vacuum then mop / Vacuum and mop). Its value IS the CleanTask.taskType the robot executes; the per-item CleanParam.mode (the proto's own CleanMode enum) is derived separately in client._WORK_MODE_PARAM."""
+    """Clean work mode selected by the app's robot_work_mode_* setting.
+
+    This value is the CleanTask.taskType the robot executes; each item's
+    CleanParam.mode is derived separately in client._WORK_MODE_PARAM.
+    """
 
     VACUUM = 1
     MOP = 2

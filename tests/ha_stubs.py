@@ -36,13 +36,28 @@ def install() -> None:
     vol.Required = MagicMock(side_effect=lambda *a, **kw: a[0] if a else "key")  # type: ignore[attr-defined]
     vol.Optional = MagicMock(side_effect=lambda *a, **kw: a[0] if a else "key")  # type: ignore[attr-defined]
     vol.In = MagicMock()  # type: ignore[attr-defined]
+    vol.All = MagicMock()  # type: ignore[attr-defined]
+    vol.Coerce = MagicMock()  # type: ignore[attr-defined]
+    vol.Range = MagicMock()  # type: ignore[attr-defined]
+    vol.Invalid = type("Invalid", (Exception,), {})  # type: ignore[attr-defined]
 
     # --- homeassistant ---
     ha = _mod("homeassistant")
 
+    ha_auth = _mod("homeassistant.auth", ha)
+    ha_auth_permissions = _mod("homeassistant.auth.permissions", ha_auth)
+    ha_auth_permissions_const = _mod(
+        "homeassistant.auth.permissions.const",
+        ha_auth_permissions,
+    )
+    ha_auth_permissions_const.POLICY_CONTROL = "control"  # type: ignore[attr-defined]
+
     # homeassistant.const
     ha_const = _mod("homeassistant.const", ha)
     ha_const.Platform = MagicMock()  # type: ignore[attr-defined]
+    ha_const.ATTR_AREA_ID = "area_id"  # type: ignore[attr-defined]
+    ha_const.ATTR_DEVICE_ID = "device_id"  # type: ignore[attr-defined]
+    ha_const.ATTR_ENTITY_ID = "entity_id"  # type: ignore[attr-defined]
     ha_const.PERCENTAGE = "%"  # type: ignore[attr-defined]
     ha_const.STATE_ON = "on"  # type: ignore[attr-defined]
     ha_const.UnitOfArea = MagicMock()  # type: ignore[attr-defined]
@@ -57,7 +72,12 @@ def install() -> None:
     # homeassistant.core
     ha_core = _mod("homeassistant.core", ha)
     ha_core.HomeAssistant = MagicMock  # type: ignore[attr-defined]
+    ha_core.ServiceCall = MagicMock  # type: ignore[attr-defined]
+    ha_core.State = MagicMock  # type: ignore[attr-defined]
     ha_core.callback = lambda f: f  # type: ignore[attr-defined]
+
+    ha_util = _mod("homeassistant.util", ha)
+    ha_util.slugify = lambda value: str(value).lower().replace(" ", "_")  # type: ignore[attr-defined]
 
     # homeassistant.exceptions
     ha_exc = _mod("homeassistant.exceptions", ha)
@@ -65,6 +85,8 @@ def install() -> None:
     ha_exc.HomeAssistantError = type(  # type: ignore[attr-defined]
         "HomeAssistantError", (Exception,), {}
     )
+    ha_exc.Unauthorized = type("Unauthorized", (Exception,), {})  # type: ignore[attr-defined]
+    ha_exc.UnknownUser = type("UnknownUser", (Exception,), {})  # type: ignore[attr-defined]
 
     # homeassistant.config_entries
     ha_ce = _mod("homeassistant.config_entries", ha)
@@ -98,6 +120,9 @@ def install() -> None:
 
     # homeassistant.helpers (and sub-modules)
     ha_helpers = _mod("homeassistant.helpers", ha)
+    ha_cv = _mod("homeassistant.helpers.config_validation", ha_helpers)
+    ha_cv.entity_ids = MagicMock()  # type: ignore[attr-defined]
+    ha_cv.ensure_list = MagicMock()  # type: ignore[attr-defined]
 
     # NOTE: deliberately does NOT expose EntityCategory. Real HA removed
     # homeassistant.helpers.entity.EntityCategory; it lives in homeassistant.const.
@@ -139,6 +164,15 @@ def install() -> None:
 
     ha_dr = _mod("homeassistant.helpers.device_registry", ha_helpers)
     ha_dr.DeviceInfo = dict  # type: ignore[attr-defined]
+
+    ha_er = _mod("homeassistant.helpers.entity_registry", ha_helpers)
+    ha_er.async_get = MagicMock()  # type: ignore[attr-defined]
+
+    ha_service = _mod("homeassistant.helpers.service", ha_helpers)
+    ha_service.async_extract_entity_ids = MagicMock()  # type: ignore[attr-defined]
+
+    ha_aiohttp = _mod("homeassistant.helpers.aiohttp_client", ha_helpers)
+    ha_aiohttp.async_get_clientsession = MagicMock()  # type: ignore[attr-defined]
 
     ha_ep = _mod("homeassistant.helpers.entity_platform", ha_helpers)
     ha_ep.AddConfigEntryEntitiesCallback = MagicMock  # type: ignore[attr-defined]
@@ -185,8 +219,11 @@ def install() -> None:
     ha_comp = _mod("homeassistant.components", ha)
 
     ha_vac = _mod("homeassistant.components.vacuum", ha_comp)
+    ha_vac.DOMAIN = "vacuum"  # type: ignore[attr-defined]
+
     class _Segment:
         """Stub for homeassistant.components.vacuum.Segment."""
+
         def __init__(self, *, id: str, name: str, group: str | None = None) -> None:
             self.id = id
             self.name = name

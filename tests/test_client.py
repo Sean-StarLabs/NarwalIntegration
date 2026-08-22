@@ -16,9 +16,9 @@ from narwal_client.const import (
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_BASE_STATUS,
-    TOPIC_CMD_PLAN_START,
     TOPIC_CMD_WASH_MOP,
     AmbientLightCtrlType,
+    CleaningRoute,
     CommandResult,
     FanLevel,
     WorkingStatus,
@@ -250,13 +250,6 @@ class TestBuildCleanPayloadV2:
         assert params["7"] == 1
         assert params["3"] == 2
 
-    def test_v2_payload_differs_from_legacy_default(self) -> None:
-        """v2 schema must not collide with the legacy hardcoded default."""
-        client = NarwalClient("127.0.0.1")
-        v2 = client._build_clean_payload_v2([1])
-        assert v2 != client._DEFAULT_CLEAN_PAYLOAD
-
-
 class TestWholeHouseStart:
     """start() must route a whole-house clean through clean/start_clean (#69).
 
@@ -268,7 +261,7 @@ class TestWholeHouseStart:
     def _connected_client(self) -> NarwalClient:
         client = NarwalClient("127.0.0.1")
         client._ws = AsyncMock()
-        client._connected = True
+        client._connected.set()
         return client
 
     @pytest.mark.asyncio
@@ -289,11 +282,10 @@ class TestWholeHouseStart:
         assert result is success
         topic = mock_send.await_args_list[0].args[0]
         assert topic == TOPIC_CMD_CLEAN_TASK
-        assert topic != TOPIC_CMD_PLAN_START
 
     @pytest.mark.asyncio
-    async def test_start_never_returns_early_on_plan_start_success(self) -> None:
-        """Regression guard for #69: no path returns a bare clean/plan/start ack."""
+    async def test_start_sends_only_start_clean(self) -> None:
+        """Regression guard for #69: no path sends clean/plan/start."""
         client = self._connected_client()
         client.state.map_data = MapData(map_id=1, rooms=[RoomInfo(room_id=3)])
 
@@ -306,7 +298,7 @@ class TestWholeHouseStart:
             await client.start()
 
         sent_topics = [call.args[0] for call in mock_send.await_args_list]
-        assert TOPIC_CMD_PLAN_START not in sent_topics
+        assert sent_topics == [TOPIC_CMD_CLEAN_TASK]
 
     @pytest.mark.asyncio
     async def test_start_forwards_clean_settings(self) -> None:
@@ -320,18 +312,22 @@ class TestWholeHouseStart:
             mock_rooms.return_value = CommandResponse(
                 result_code=CommandResult.SUCCESS
             )
-            await client.start(fan=FanLevel.STRONG, passes=2)
+            await client.start(
+                fan=FanLevel.STRONG,
+                passes=2,
+                route=CleaningRoute.METICULOUS,
+            )
 
         assert mock_rooms.await_args.args[0] == [6]
         assert mock_rooms.await_args.kwargs["fan"] is FanLevel.STRONG
         assert mock_rooms.await_args.kwargs["passes"] == 2
+        assert mock_rooms.await_args.kwargs["route"] is CleaningRoute.METICULOUS
 
     @pytest.mark.asyncio
-    async def test_start_falls_back_to_saved_plan_without_rooms(self) -> None:
-        """No map rooms — fall back to clean/plan/start as a last resort."""
+    async def test_start_without_rooms_returns_not_ready(self) -> None:
+        """No map rooms means no explicit whole-house payload can be built."""
         client = self._connected_client()
         assert client.state.map_data is None
-        plan_resp = CommandResponse(result_code=CommandResult.SUCCESS)
 
         with patch.object(
             client, "get_map", new_callable=AsyncMock
@@ -339,12 +335,10 @@ class TestWholeHouseStart:
             client, "send_command", new_callable=AsyncMock
         ) as mock_send:
             mock_map.side_effect = RuntimeError("no map")
-            mock_send.return_value = plan_resp
             result = await client.start()
 
-        assert result is plan_resp
-        mock_send.assert_awaited_once()
-        assert mock_send.await_args.args[0] == TOPIC_CMD_PLAN_START
+        assert result.result_code == CommandResult.NOT_READY
+        mock_send.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_start_ignores_zero_room_ids(self) -> None:
@@ -358,13 +352,14 @@ class TestWholeHouseStart:
             mock_send.return_value = CommandResponse(
                 result_code=CommandResult.SUCCESS
             )
-            await client.start()
+            result = await client.start()
 
-        assert mock_send.await_args.args[0] == TOPIC_CMD_PLAN_START
+        assert result.result_code == CommandResult.NOT_READY
+        mock_send.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_start_rooms_with_empty_list_does_not_recurse(self) -> None:
-        """start_rooms([]) must not bounce back into start() and loop."""
+    async def test_start_rooms_with_empty_list_returns_not_ready(self) -> None:
+        """start_rooms([]) does not dispatch an ambiguous saved plan."""
         client = self._connected_client()
         client.state.map_data = MapData(map_id=1, rooms=[RoomInfo(room_id=2)])
 
@@ -376,9 +371,8 @@ class TestWholeHouseStart:
             )
             result = await client.start_rooms([])
 
-        mock_send.assert_awaited_once()
-        assert mock_send.await_args.args[0] == TOPIC_CMD_PLAN_START
-        assert result.result_code == CommandResult.SUCCESS
+        mock_send.assert_not_awaited()
+        assert result.result_code == CommandResult.NOT_READY
 
     @pytest.mark.asyncio
     async def test_start_rooms_rejects_active_dock_task(self) -> None:
@@ -438,8 +432,8 @@ class TestWholeHouseStart:
         mock_send.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_start_rejects_active_dock_task_before_map_fallback(self) -> None:
-        """Whole-house start is blocked even when it would use the saved plan."""
+    async def test_start_rejects_active_dock_task_before_map_lookup(self) -> None:
+        """Whole-house start is blocked before map lookup when dock work is active."""
         client = self._connected_client()
         client.state.station_activity = 1
 

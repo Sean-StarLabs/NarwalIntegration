@@ -22,7 +22,13 @@ from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 
 from custom_components.narwal.coordinator import CleanSettings  # noqa: E402
 from custom_components.narwal.vacuum import NarwalVacuum  # noqa: E402
-from narwal_client.const import CommandResult, WorkingStatus  # noqa: E402
+from narwal_client import RoomCleanSettings  # noqa: E402
+from narwal_client.const import (  # noqa: E402
+    CommandResult,
+    FanLevel,
+    WorkingStatus,
+    WorkMode,
+)
 from narwal_client.models import (  # noqa: E402
     DOCK_TASK_DRY_DOCK_BAG,
     DOCK_TASK_DRY_MOP,
@@ -50,6 +56,11 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     coordinator.clean_settings = CleanSettings()
     coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
     coordinator.dock_action_lock = asyncio.Lock()
+    coordinator.room_clean_settings_for_rooms = MagicMock(
+        side_effect=lambda room_ids: {
+            room_id: RoomCleanSettings() for room_id in room_ids
+        }
+    )
 
     vac = NarwalVacuum.__new__(NarwalVacuum)
     vac.coordinator = coordinator
@@ -62,6 +73,13 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     vac.async_write_ha_state = MagicMock()
 
     return vac
+
+
+def _active_clean_state() -> NarwalState:
+    """Return a state whose working_status still looks like active cleaning."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.CLEANING_ALT
+    return state
 
 
 def _docked_state() -> NarwalState:
@@ -208,7 +226,14 @@ class TestAsyncCleanSegments:
             water=settings.water,
             mop_strength=settings.mop_strength,
             passes=settings.passes,
+            route=settings.route,
+            room_settings={
+                11: RoomCleanSettings(),
+                9: RoomCleanSettings(),
+            },
         )
+        assert state.has_assumed_robot_clean
+        vac.async_write_ha_state.assert_called_once()
 
     async def test_segment_clean_accepted_response_does_not_warn(self, caplog) -> None:
         """Accepted async start responses are not room-clean failures."""
@@ -272,7 +297,7 @@ class TestAsyncCleanSegments:
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.start_rooms = AsyncMock(
-            return_value=MagicMock(result_code=0, success=True)
+            return_value=CommandResponse(result_code=0)
         )
         await vac.coordinator.dock_action_lock.acquire()
 
@@ -308,6 +333,55 @@ class TestAsyncCleanSegments:
 
         vac.coordinator.client.start_rooms.assert_not_awaited()
 
+
+class TestVacuumFanSpeed:
+    async def test_live_fan_change_applies_while_paused(self) -> None:
+        state = _active_clean_state()
+        state.is_paused = True
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+
+        await vac.async_set_fan_speed("Strong")
+
+        vac.coordinator.client.set_fan_speed.assert_awaited_once_with(FanLevel.STRONG)
+        assert vac.coordinator.clean_settings.fan == FanLevel.STRONG
+
+    async def test_fan_change_rejected_when_entity_unavailable(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.last_update_success = False
+        vac.coordinator.client.set_fan_speed = AsyncMock()
+
+        with pytest.raises(Exception, match="fan speed cannot be changed"):
+            await vac.async_set_fan_speed("Strong")
+
+        vac.coordinator.client.set_fan_speed.assert_not_awaited()
+
+    async def test_fan_change_rejected_in_mop_only_mode(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.clean_settings.work_mode = WorkMode.MOP
+        vac.coordinator.client.set_fan_speed = AsyncMock()
+
+        with pytest.raises(Exception, match="mop-only mode"):
+            await vac.async_set_fan_speed("Strong")
+
+        vac.coordinator.client.set_fan_speed.assert_not_awaited()
+
+    async def test_rejected_live_fan_change_does_not_update_settings(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+        )
+        vac.coordinator.clean_settings.fan = FanLevel.NORMAL
+
+        with pytest.raises(Exception, match="set fan speed failed"):
+            await vac.async_set_fan_speed("Strong")
+
+        assert vac.coordinator.clean_settings.fan == FanLevel.NORMAL
 
 class TestCheckSegmentChanges:
     """Tests for _check_segment_changes."""
@@ -397,8 +471,30 @@ class TestAsyncStartWholeHouse:
         assert "Start command was rejected" not in caplog.text
         assert state.has_assumed_robot_clean
 
-    async def test_falls_back_to_saved_plan_without_map(self) -> None:
-        """With no map rooms available, falls back to the saved-plan start()."""
+    async def test_whole_house_start_passes_room_profiles(self) -> None:
+        """Whole-house start uses room-specific profiles for each room."""
+        state = _docked_state()
+        state.map_data = MapData(
+            map_id=2,
+            rooms=[RoomInfo(room_id=1), RoomInfo(room_id=2)],
+        )
+        profile = RoomCleanSettings(fan=FanLevel.STRONG)
+        vac = _make_vacuum(state=state)
+        vac.coordinator.room_clean_settings_for_rooms = MagicMock(
+            return_value={1: profile, 2: RoomCleanSettings()}
+        )
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        await vac.async_start()
+
+        kwargs = vac.coordinator.client.start_rooms.await_args.kwargs
+        assert kwargs["room_settings"] == {1: profile, 2: RoomCleanSettings()}
+
+    async def test_whole_house_without_map_raises(self) -> None:
+        """With no map rooms available, no ambiguous start command is sent."""
         state = _docked_state()  # no map_data
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
@@ -408,9 +504,10 @@ class TestAsyncStartWholeHouse:
         )
         vac.coordinator.client.start_rooms = AsyncMock()
 
-        await vac.async_start()
+        with pytest.raises(HomeAssistantError, match="room map is not available"):
+            await vac.async_start()
 
-        vac.coordinator.client.start.assert_awaited_once()
+        vac.coordinator.client.start.assert_not_awaited()
         vac.coordinator.client.start_rooms.assert_not_called()
 
     async def test_rejected_whole_house_start_raises_service_error(self) -> None:

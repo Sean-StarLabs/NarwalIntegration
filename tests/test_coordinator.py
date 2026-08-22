@@ -21,13 +21,20 @@ from custom_components.narwal.const import NO_BROADCAST_PRODUCT_KEYS  # noqa: E4
 from custom_components.narwal.coordinator import (  # noqa: E402
     TOPIC_RESUBSCRIBE_AFTER,
     TOPIC_SUBSCRIPTION_TTL,
+    CleanSettings,
     NarwalCoordinator,
-)
+    can_edit_pending_clean_settings,
+    can_start_cleaning,
+    is_live_clean_setting_available,
+)  # noqa: E402
 from custom_components.narwal.narwal_client import (  # noqa: E402
     CommandResponse,
     CommandResult,
+    FanLevel,
+    MopHumidity,
     NarwalConnectionError,
     NarwalState,
+    RoomCleanSettings,
     WorkingStatus,
 )
 
@@ -55,6 +62,118 @@ def test_non_broadcast_product_key_configures_polling_client() -> None:
         topic_prefix=f"/{product_key}",
         supports_broadcasts=False,
     )
+
+
+def test_room_profiles_only_override_customized_fields() -> None:
+    """Read-only room profile creation must not freeze global defaults."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.clean_settings = CleanSettings()
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+
+    coordinator.room_clean_settings_for(4)
+    coordinator.clean_settings.fan = FanLevel.STRONG
+    coordinator.clean_settings.water = MopHumidity.WET
+
+    settings = coordinator.room_clean_settings_for_rooms([4])[4]
+
+    assert settings.fan == FanLevel.STRONG
+    assert settings.water == MopHumidity.WET
+
+    coordinator.set_room_clean_setting(4, "water", MopHumidity.DRY)
+    merged = coordinator.room_clean_settings_for_rooms([4])[4]
+
+    assert merged.fan == FanLevel.STRONG
+    assert merged.water == MopHumidity.DRY
+
+
+def test_room_profile_override_can_be_cleared() -> None:
+    """Cleared fields should fall back to the current global clean setting."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.clean_settings = CleanSettings()
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+
+    coordinator.set_room_clean_setting(4, "water", MopHumidity.DRY)
+    coordinator.clean_settings.water = MopHumidity.WET
+
+    coordinator.clear_room_clean_setting(4, "water")
+    settings = coordinator.room_clean_settings_for_rooms([4])[4]
+
+    assert settings.water == MopHumidity.WET
+    assert coordinator.room_clean_settings_customized == {}
+
+
+def test_effective_room_profile_follows_global_defaults_until_customized() -> None:
+    """Room entity reads should not materialize stale inherited defaults."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.clean_settings = CleanSettings()
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+
+    first = coordinator.effective_room_clean_settings_for(4)
+    coordinator.clean_settings.route = first.route
+    coordinator.clean_settings.fan = FanLevel.STRONG
+
+    inherited = coordinator.effective_room_clean_settings_for(4)
+
+    assert inherited.fan == FanLevel.STRONG
+    assert coordinator.room_clean_settings == {}
+
+    coordinator.set_room_clean_setting(4, "water", MopHumidity.DRY)
+    coordinator.clean_settings.water = MopHumidity.WET
+    customized = coordinator.effective_room_clean_settings_for(4)
+
+    assert customized.fan == FanLevel.STRONG
+    assert customized.water == MopHumidity.DRY
+
+
+def test_room_profiles_can_be_bypassed_for_explicit_service_settings() -> None:
+    """Callers can request exact settings without saved room-profile overrides."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.clean_settings = CleanSettings()
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator.set_room_clean_setting(4, "fan", FanLevel.MUTE)
+    requested = RoomCleanSettings(fan=FanLevel.STRONG)
+
+    settings = coordinator.room_clean_settings_for_rooms(
+        [4],
+        default=requested,
+        use_room_profiles=False,
+    )[4]
+
+    assert settings is requested
+    assert settings.fan == FanLevel.STRONG
+
+
+def test_paused_standby_task_context_blocks_new_actions() -> None:
+    """Paused STANDBY overlays still represent the current clean task."""
+    state = NarwalState()
+    state.task_progress_percent = 72
+    state.task_elapsed_time = 900
+    state.current_room_id = 4
+
+    state.update_from_base_status({"3": {"1": 1, "2": 1}, "11": 1, "47": 2})
+
+    assert state.working_status == WorkingStatus.STANDBY
+    assert state.is_paused
+    assert state.has_paused_clean_task_context
+    assert is_live_clean_setting_available(state)
+    assert not can_edit_pending_clean_settings(state)
+    assert not can_start_cleaning(state)
 
 
 class TestCoordinatorResilience:

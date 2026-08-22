@@ -7,7 +7,8 @@ import contextlib
 import logging
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 import websockets
@@ -46,7 +47,6 @@ from .const import (
     TOPIC_CMD_GET_MAP,
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
-    TOPIC_CMD_PLAN_START,
     TOPIC_CMD_RECALL,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
@@ -58,6 +58,7 @@ from .const import (
     TOPIC_CMD_YELL,
     WAKE_TIMEOUT,
     AmbientLightCtrlType,
+    CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
@@ -149,6 +150,18 @@ def _can_force_end_scoped_dock_task(state: NarwalState, task: str | None) -> boo
 def _has_generic_dock_stop_proof(state: NarwalState) -> bool:
     """Return true when generic force-end can only target dock-side work."""
     return state.is_docked and state.has_dock_presence_signal
+
+
+@dataclass
+class RoomCleanSettings:
+    """Clean parameters for a single room in a custom clean task."""
+
+    work_mode: WorkMode = WorkMode.VACUUM_AND_MOP
+    fan: FanLevel = FanLevel.NORMAL
+    water: MopHumidity = MopHumidity.NORMAL
+    mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL
+    passes: int = 1
+    route: CleaningRoute | None = None
 
 
 def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStatus | None:
@@ -1107,16 +1120,6 @@ class NarwalClient:
         """Trigger locate sound — robot says 'Robot is here'."""
         return await self.send_command(TOPIC_CMD_YELL)
 
-    # Legacy clean task payload — the minimal CleanTask the app sent on Flow
-    # firmware < v01.07.22. Only used by the saved-plan fallback below, which
-    # goes to clean/plan/start — a topic that discards payloads entirely (#66),
-    # so these bytes are effectively a no-op marker on current firmware.
-    # Structure: {1: {2: {}, 5: {1: {1: 3, 2: 2, 3: 1}, 5: {}}}}
-    #   field 5.1.1 = suction level (3=max)
-    #   field 5.1.2 = mop humidity (2=wet)
-    #   field 5.1.3 = passes (1=single)
-    _DEFAULT_CLEAN_PAYLOAD = bytes.fromhex("0a0e12002a0a0a060803100218012a00")
-
     async def _all_room_ids(self) -> list[int]:
         """Every cleanable room id on the active map, fetching the map if needed."""
         map_data = self.state.map_data
@@ -1130,30 +1133,6 @@ class NarwalClient:
             return []
         return [r.room_id for r in map_data.rooms if r.room_id > 0]
 
-    async def _start_saved_plan(self) -> CommandResponse:
-        """Last-resort start: re-run the plan stored on the robot.
-
-        clean/plan/start is StartWithPlan{planId, mapId} — it ignores the
-        payload and re-runs whatever plan the robot already holds, which is
-        usually the last room selection rather than the whole house. Only
-        reachable when no map rooms are known.
-        """
-        _LOGGER.warning(
-            "start(): no map rooms available; falling back to clean/plan/start, "
-            "which re-runs the robot's saved plan rather than cleaning every room"
-        )
-        if self.state.blocks_robot_start_for_dock_task:
-            _LOGGER.warning(
-                "start(): dock task active (%s); not starting saved plan",
-                self.state.active_dock_task_keys or "unmapped",
-            )
-            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
-        return await self.send_command(
-            TOPIC_CMD_PLAN_START,
-            payload=self._DEFAULT_CLEAN_PAYLOAD,
-            timeout=10.0,
-        )
-
     async def start(
         self,
         *,
@@ -1162,18 +1141,16 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.NORMAL,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
     ) -> CommandResponse:
         """Start a whole-house clean.
 
         Enumerates every room on the active map and issues clean/start_clean,
         matching the app's allRoomIds() path.
 
-        The old implementation sent a minimal payload to clean/plan/start and
-        returned as soon as the result was anything but NOT_APPLICABLE. Newer
-        firmware answers SUCCESS there and does nothing, so the caller saw a
-        successful start that never happened (#69). clean/plan/start is a
-        plan-runner that discards payloads (#66), so it survives only as a
-        last-resort fallback when no map rooms are known.
+        The old implementation sent a minimal payload to clean/plan/start.
+        Newer firmware answers SUCCESS there and does nothing, so this path
+        fails clearly when no room list is available instead (#69).
         """
         if _robot_start_blocked(self.state):
             _LOGGER.warning(
@@ -1181,9 +1158,12 @@ class NarwalClient:
                 self.state.active_dock_task_keys or "unmapped",
             )
             return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+        if not self.connected:
+            raise NarwalConnectionError("Not connected to vacuum")
         room_ids = await self._all_room_ids()
         if not room_ids:
-            return await self._start_saved_plan()
+            _LOGGER.warning("start(): no map rooms available")
+            return CommandResponse(result_code=CommandResult.NOT_READY)
         _LOGGER.info("start(): whole-house clean over %d rooms", len(room_ids))
         return await self.start_rooms(
             room_ids,
@@ -1192,6 +1172,7 @@ class NarwalClient:
             water=water,
             mop_strength=mop_strength,
             passes=passes,
+            route=route,
         )
 
     def _build_clean_payload_v2(
@@ -1228,7 +1209,7 @@ class NarwalClient:
             clean_mode: v2 schema cleanMode (3 observed for sweep+mop).
 
         Returns:
-            Encoded protobuf bytes for clean/plan/start.
+            Encoded protobuf bytes for clean/start_clean.
         """
         import blackboxprotobuf
 
@@ -1302,6 +1283,31 @@ class NarwalClient:
         WorkMode.VACUUM_AND_MOP: (4, ("7",)),      # sweepMopSyncTime
     }
 
+    def _clean_param_for_settings(self, settings: RoomCleanSettings) -> dict[str, int]:
+        """Return a CleanParam protobuf dict for one room."""
+        param_mode, pass_tags = self._WORK_MODE_PARAM[settings.work_mode]
+        param: dict[str, int] = {
+            "1": int(param_mode),
+            "2": int(settings.fan),
+            "3": int(settings.mop_strength),
+            "4": int(settings.water),
+        }
+        if settings.route is not None:
+            param["8"] = int(settings.route)
+        for tag in pass_tags:
+            param[tag] = int(settings.passes)
+        return param
+
+    @staticmethod
+    def _task_type_for_settings(
+        room_settings: list[RoomCleanSettings],
+    ) -> WorkMode:
+        """Return the outer CleanTask type for a room-clean payload."""
+        modes = {settings.work_mode for settings in room_settings}
+        if len(modes) == 1:
+            return next(iter(modes))
+        raise ValueError("Mixed Narwal room clean modes are not supported")
+
     def _build_start_clean_payload(
         self,
         room_ids: list[int],
@@ -1312,13 +1318,15 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.NORMAL,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
+        room_settings: Mapping[int, RoomCleanSettings] | None = None,
     ) -> bytes:
         """Build a clean/start_clean request for the given rooms.
 
         StartClean_Request{1: CleanTask{1: map_id, 2: [CleanItem...], 3: {} (TaskOption),
         5: taskType}}; CleanItem{1: ZoneOption{1: 1 (room zone), 2: room_id}, 2: CleanParam,
         3: order}. taskType (the execution-mode carrier) and CleanParam.mode/pass-tag are
-        derived from work_mode. overlapLevel is omitted — live-validated as ignored here.
+        derived from work_mode. overlapLevel is CleanParam tag 8 when supplied.
 
         Args:
             room_ids: Robot room IDs (RoomInfo.room_id).
@@ -1328,28 +1336,42 @@ class NarwalClient:
             water: Mop water volume (tag 4).
             mop_strength: Mop scrub intensity (tag 3).
             passes: Clean count, routed to the pass tag(s) for the mode.
+            route: Optional route overlap level (tag 8).
+            room_settings: Optional per-room settings keyed by robot room ID.
         """
         import blackboxprotobuf
 
-        param_mode, pass_tags = self._WORK_MODE_PARAM[work_mode]
-        param: dict[str, int] = {
-            "1": int(param_mode),
-            "2": int(fan),
-            "3": int(mop_strength),
-            "4": int(water),
-        }
-        for tag in pass_tags:
-            param[tag] = int(passes)
+        default_settings = RoomCleanSettings(
+            work_mode=work_mode,
+            fan=fan,
+            water=water,
+            mop_strength=mop_strength,
+            passes=passes,
+            route=route,
+        )
+        settings_by_room = (
+            {rid: room_settings.get(rid, default_settings) for rid in room_ids}
+            if room_settings
+            else {rid: default_settings for rid in room_ids}
+        )
+        task_type = self._task_type_for_settings(
+            list(settings_by_room.values()),
+        )
+        param_keys: set[str] = set()
+        params_by_room: dict[int, dict[str, int]] = {}
+        for rid, settings in settings_by_room.items():
+            params_by_room[rid] = self._clean_param_for_settings(settings)
+            param_keys.update(params_by_room[rid])
 
         items = [
-            {"1": {"1": 1, "2": rid}, "2": dict(param), "3": idx + 1}
+            {"1": {"1": 1, "2": rid}, "2": params_by_room[rid], "3": idx + 1}
             for idx, rid in enumerate(room_ids)
         ]
         task = {
             "1": map_id,
             "2": items if len(items) > 1 else items[0],
             "3": {},
-            "5": int(work_mode),  # CleanTask.taskType
+            "5": int(task_type),  # CleanTask.taskType
         }
         item_typedef = {
             "type": "message",
@@ -1361,7 +1383,7 @@ class NarwalClient:
                 # Derive the CleanParam typedef from the emitted dict — bbpb silently
                 # drops any tag absent from the typedef.
                 "2": {"type": "message", "message_typedef": {
-                    k: {"type": "int"} for k in param
+                    k: {"type": "int"} for k in sorted(param_keys, key=int)
                 }},
                 "3": {"type": "int"},
             },
@@ -1383,6 +1405,8 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.NORMAL,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
+        room_settings: Mapping[int, RoomCleanSettings] | None = None,
     ) -> CommandResponse:
         """Start cleaning the given rooms via clean/start_clean.
 
@@ -1398,13 +1422,12 @@ class NarwalClient:
 
         Args:
             room_ids: Robot room IDs (RoomInfo.room_id), mapped from HA areas.
-            work_mode, fan, water, mop_strength, passes: CleanParam settings —
+            work_mode, fan, water, mop_strength, passes, route: CleanParam settings —
                 see _build_start_clean_payload.
+            room_settings: Optional per-room settings keyed by robot room ID.
         """
         if not room_ids:
-            # No rooms selected — do not call start(), which would resolve the
-            # full room list and come straight back here.
-            return await self._start_saved_plan()
+            return CommandResponse(result_code=CommandResult.NOT_READY)
         async with self._robot_start_lock:
             if _robot_start_blocked(self.state):
                 _LOGGER.warning(
@@ -1423,10 +1446,21 @@ class NarwalClient:
                 )
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
 
-            payload = self._build_start_clean_payload(
-                room_ids, map_id, work_mode=work_mode, fan=fan, water=water,
-                mop_strength=mop_strength, passes=passes,
-            )
+            try:
+                payload = self._build_start_clean_payload(
+                    room_ids,
+                    map_id,
+                    work_mode=work_mode,
+                    fan=fan,
+                    water=water,
+                    mop_strength=mop_strength,
+                    passes=passes,
+                    route=route,
+                    room_settings=room_settings,
+                )
+            except ValueError as err:
+                _LOGGER.warning("start_rooms: %s", err)
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             resp = await self.send_command(
                 TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,
             )
