@@ -33,7 +33,7 @@ from .const import (
     fan_speed_list_for,
     SERVICE_CLEAN_ROOMS,
 )
-from .coordinator import NarwalCoordinator, can_start_cleaning
+from .coordinator import NarwalCoordinator, can_start_cleaning, is_narwal_task_busy
 from .narwal_client import (
     CleaningRoute,
     CommandResult,
@@ -43,6 +43,7 @@ from .narwal_client import (
     NarwalConnectionError,
     RoomCleanSettings,
     WorkMode,
+    WorkingStatus,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -87,6 +88,15 @@ ROUTE_OPTIONS: dict[str, CleaningRoute] = {
     "meticulous": CleaningRoute.METICULOUS,
 }
 
+
+def _can_attempt_clean_rooms_start(state) -> bool:
+    """Allow service calls to wake an initially unknown sleeping robot."""
+    return can_start_cleaning(state) or (
+        state is not None
+        and state.working_status == WorkingStatus.UNKNOWN
+        and not is_narwal_task_busy(state)
+    )
+
 DEPRECATED_ENTITY_UNIQUE_ID_SUFFIXES: tuple[tuple[str, str], ...] = (
     ("button", "_wash_and_dry_mop"),
 )
@@ -110,6 +120,7 @@ CLEAN_ROOMS_SCHEMA = vol.Schema(
         vol.Optional(FIELD_ROUTE): vol.In(ROUTE_OPTIONS),
     }
 )
+
 
 def _domain_data(hass: HomeAssistant) -> dict[str, NarwalCoordinator]:
     """Return Narwal domain runtime data."""
@@ -278,14 +289,18 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         plans: list[tuple[NarwalCoordinator, list[int], RoomCleanSettings]] = []
         for coordinator in coordinators:
-            if not can_start_cleaning(coordinator.data):
-                raise HomeAssistantError("Narwal room clean cannot be started right now")
+            if not _can_attempt_clean_rooms_start(coordinator.data):
+                raise HomeAssistantError(
+                    "Narwal room clean cannot be started right now"
+                )
             room_ids = await _async_room_ids_for_coordinator(
                 coordinator,
                 call.data[FIELD_ROOMS],
             )
             if not room_ids:
                 raise HomeAssistantError("At least one room must be selected")
+            if not _can_attempt_clean_rooms_start(coordinator.data):
+                raise HomeAssistantError("Narwal room clean cannot be started right now")
 
             if fan is FanLevel.SUPER and "Ultra" not in fan_speed_list_for(
                 coordinator.config_entry.data
@@ -360,6 +375,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         async_clean_rooms,
         schema=CLEAN_ROOMS_SCHEMA,
     )
+
 
 async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     """Set up Narwal services."""

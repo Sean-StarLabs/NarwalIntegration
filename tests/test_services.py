@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -30,6 +31,7 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     MapData,
     NarwalState,
     RoomInfo,
+    WorkingStatus,
 )
 
 
@@ -146,6 +148,61 @@ async def test_clean_rooms_service_uses_requested_settings_over_room_profiles() 
 async def test_clean_rooms_service_rejects_unavailable_start() -> None:
     """The service enforces the same availability as the start entities."""
     coordinator = _coordinator(docked=False)
+    handler, registry = _register_clean_rooms_handler(coordinator)
+
+    with (
+        patch(
+            "custom_components.narwal.service.async_extract_entity_ids",
+            new_callable=AsyncMock,
+            return_value=["vacuum.downstairs_narwal"],
+        ),
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+        pytest.raises(Exception, match="cannot be started"),
+    ):
+        await handler(_clean_rooms_call())
+
+    coordinator.client.start_rooms.assert_not_awaited()
+
+
+async def test_clean_rooms_service_wakes_unknown_before_starting() -> None:
+    """An initially unknown sleeping robot can wake before strict start validation."""
+    coordinator = _coordinator(docked=False)
+    coordinator.client.robot_awake = False
+
+    async def wake_robot(*, timeout: float) -> bool:
+        coordinator.client.state.update_from_base_status({"3": {"1": 10, "10": 1}})
+        return True
+
+    coordinator.client.wake = AsyncMock(side_effect=wake_robot)
+    handler, registry = _register_clean_rooms_handler(coordinator)
+
+    with (
+        patch(
+            "custom_components.narwal.service.async_extract_entity_ids",
+            new_callable=AsyncMock,
+            return_value=["vacuum.downstairs_narwal"],
+        ),
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+    ):
+        await handler(_clean_rooms_call())
+
+    coordinator.client.wake.assert_awaited_once_with(timeout=10.0)
+    coordinator.client.start_rooms.assert_awaited_once()
+
+
+async def test_clean_rooms_service_revalidates_after_room_resolution() -> None:
+    """Map lookup can refresh state; do not send a clean if the robot became busy."""
+    coordinator = _coordinator()
+    coordinator.client.state.map_data = None
+
+    async def refresh_map() -> None:
+        coordinator.client.state.map_data = MapData(
+            rooms=[RoomInfo(room_id=4), RoomInfo(room_id=7)]
+        )
+        coordinator.client.state.working_status = WorkingStatus.CLEANING_ALT
+        coordinator.client.state.last_active_working_status_time = time.monotonic()
+
+    coordinator.client.get_map = AsyncMock(side_effect=refresh_map)
     handler, registry = _register_clean_rooms_handler(coordinator)
 
     with (

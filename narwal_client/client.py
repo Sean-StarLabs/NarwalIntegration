@@ -46,6 +46,7 @@ from .const import (
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_RECALL,
+    TOPIC_CMD_RESET_CONSUMABLE_INFO,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_MOP_HUMIDITY,
@@ -112,6 +113,7 @@ _TOPICLESS_ACK_TOPICS = {
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_PLAN_START,
     TOPIC_CMD_RECALL,
+    TOPIC_CMD_RESET_CONSUMABLE_INFO,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_LED,
@@ -1771,7 +1773,10 @@ class NarwalClient:
 
     async def dry_mop(self) -> CommandResponse:
         """Dry the mop pads at the station."""
-        return await self.send_command(TOPIC_CMD_DRY_MOP)
+        response = await self.send_command(TOPIC_CMD_DRY_MOP)
+        if response.result_code in (0, CommandResult.SUCCESS, CommandResult.APPLIED):
+            self.state.last_dry_mop_empty_time = 0.0
+        return response
 
     async def dry_dust_bag(self) -> CommandResponse:
         """Dry or disinfect the robot dust bin at the station."""
@@ -1860,6 +1865,7 @@ class NarwalClient:
         if resp.success:
             self.state.update_from_consumable_info(resp.data)
         else:
+            self.state.consumable_info_available = False
             _LOGGER.debug(
                 "Consumable info query failed; preserving existing alerts (code=%s)",
                 resp.result_code,
@@ -1884,12 +1890,17 @@ class NarwalClient:
             payload,
             timeout=15.0,
         )
+        refresh_response: CommandResponse | None = None
         if response.success:
-            await self.get_consumable_info()
+            refresh_response = await self.get_consumable_info()
 
-        target_still_reported = bool(
-            set(maintain).intersection(self.state.maintain_items)
-            or set(replace).intersection(self.state.replace_items)
+        refresh_verified = refresh_response is None or refresh_response.success
+        target_still_reported = (
+            refresh_verified
+            and bool(
+                set(maintain).intersection(self.state.maintain_items)
+                or set(replace).intersection(self.state.replace_items)
+            )
         )
         if payload and target_still_reported:
             _LOGGER.debug(

@@ -91,10 +91,12 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
         # consumable/get_consumable_info maintainItems (clean/check these parts).
-        value_fn=lambda s: bool(s.maintain_items) if s.raw_base_status else None,
+        value_fn=lambda s: bool(s.maintain_items)
+        if s.consumable_info_available
+        else None,
         attrs_fn=lambda s: {
             "items": [CONSUMABLE_MAINTAIN_ITEMS.get(i, str(i)) for i in s.maintain_items]
-        } if s.raw_base_status else None,
+        } if s.consumable_info_available else None,
     ),
     NarwalBinarySensorEntityDescription(
         key="replacement_required",
@@ -102,10 +104,12 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
         # consumable/get_consumable_info replaceItems (replace these parts).
-        value_fn=lambda s: bool(s.replace_items) if s.raw_base_status else None,
+        value_fn=lambda s: bool(s.replace_items)
+        if s.consumable_info_available
+        else None,
         attrs_fn=lambda s: {
             "items": [CONSUMABLE_REPLACE_ITEMS.get(i, str(i)) for i in s.replace_items]
-        } if s.raw_base_status else None,
+        } if s.consumable_info_available else None,
     ),
     NarwalBinarySensorEntityDescription(
         key="clean_water_tank",
@@ -180,6 +184,8 @@ class NarwalDockedSensor(NarwalEntity, BinarySensorEntity):
         """Return True if the vacuum is on the dock."""
         state = self.coordinator.data
         if state is None:
+            return None
+        if getattr(state, "dock_state_unknown", False):
             return None
         return _is_dock_side(state)
 

@@ -14,7 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
 from .const import PASSES_MAX, PASSES_MIN
-from .coordinator import NarwalCoordinator, is_setup_available
+from .coordinator import NarwalCoordinator, can_edit_pending_clean_settings
 from .entity import NarwalEntity
 
 
@@ -52,7 +52,9 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
     @property
     def available(self) -> bool:
         """Return True when the pass count can be changed now."""
-        return super().available and is_setup_available(self.coordinator.data)
+        return super().available and can_edit_pending_clean_settings(
+            self.coordinator.data
+        )
 
     @property
     def native_value(self) -> float:
@@ -62,6 +64,8 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
     async def async_set_native_value(self, value: float) -> None:
         """Store the pass count."""
         if not super().available:
+            raise HomeAssistantError("Narwal pass count cannot be changed right now")
+        if not can_edit_pending_clean_settings(self.coordinator.data):
             raise HomeAssistantError("Narwal pass count cannot be changed right now")
         self.coordinator.clean_settings.passes = int(value)
         self.async_write_ha_state()

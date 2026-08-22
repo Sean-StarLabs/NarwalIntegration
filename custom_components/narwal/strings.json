@@ -207,6 +207,24 @@
       }
     },
     "button": {
+      "start_cleaning": {
+        "name": "Start cleaning"
+      },
+      "resume_cleaning": {
+        "name": "Resume cleaning"
+      },
+      "pause_cleaning": {
+        "name": "Pause cleaning"
+      },
+      "stop_cleaning": {
+        "name": "Stop cleaning"
+      },
+      "return_to_dock": {
+        "name": "Return to dock"
+      },
+      "locate_robot": {
+        "name": "Locate robot"
+      },
       "stop_dock_task": {
         "name": "Stop dock task"
       },

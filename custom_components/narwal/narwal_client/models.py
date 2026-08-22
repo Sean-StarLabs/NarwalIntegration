@@ -919,6 +919,7 @@ class NarwalState:
     # Consumable alerts from consumable/get_consumable_info (queried, not broadcast)
     maintain_items: list[int] = field(default_factory=list)  # ConsumableMaintainItem values
     replace_items: list[int] = field(default_factory=list)  # ConsumableReplaceItem values
+    consumable_info_available: bool = False
 
     # Map
     map_data: MapData | None = None
@@ -1032,6 +1033,8 @@ class NarwalState:
         cleaning is not active, since the robot can report unmapped states
         (e.g. self-test) while physically docked.
         """
+        if self.has_explicit_off_dock_signal:
+            return False
         if self.working_status == WorkingStatus.REMAPPING:
             return False
         if self.working_status in (
@@ -1075,6 +1078,22 @@ class NarwalState:
         )
 
     @property
+    def has_explicit_off_dock_signal(self) -> bool:
+        """True when the latest base-status payload says the robot is off dock."""
+        field3 = self.raw_base_status.get("3")
+        if isinstance(field3, list):
+            field3 = field3[0] if field3 else None
+        field3_off_dock = (
+            isinstance(field3, dict)
+            and (field3.get("10") == 2 or field3.get("3") == 2)
+        )
+        return (
+            field3_off_dock
+            or self.raw_base_status.get("11") == 1
+            or self.raw_base_status.get("47") == 2
+        )
+
+    @property
     def dock_state_unknown(self) -> bool:
         """True when startup/status data has not confirmed dock position yet."""
         return (
@@ -1111,6 +1130,8 @@ class NarwalState:
     @property
     def is_station_active(self) -> bool:
         """True when the base station is running a dock-side task."""
+        if self.has_explicit_off_dock_signal and not self.has_dock_presence_signal:
+            return False
         if self.is_washing_mop or self.is_drying_mop:
             return True
         return self.station_activity > 0
@@ -1276,9 +1297,9 @@ class NarwalState:
 
     def clear_washing_task(self) -> None:
         """Clear mop washing fields after a confirmed station-task stop."""
-        if self.dock_activity == 3:
+        if self.dock_activity:
             self.dock_activity = 0
-        if self.station_activity in (2, 3):
+        if self.station_activity:
             self.station_activity = 0
 
     def update_from_working_status(self, decoded: dict[str, Any]) -> None:
@@ -1462,11 +1483,12 @@ class NarwalState:
                 except (ValueError, TypeError):
                     pass
             if self.working_status in ACTIVE_OFF_DOCK_STATUSES:
+                explicit_off_dock = self.has_explicit_off_dock_signal
                 if "10" not in field3:
                     self.dock_sub_state = 0
-                if "12" not in field3:
+                if explicit_off_dock or "12" not in field3:
                     self.dock_activity = 0
-                if "18" not in field3:
+                if explicit_off_dock or "18" not in field3:
                     self.station_activity = 0
                 if "3" not in field3:
                     self.dock_presence = 2
@@ -1645,3 +1667,4 @@ class NarwalState:
             payload = {}
         self.maintain_items = _enum_int_list(payload.get("1"))
         self.replace_items = _enum_int_list(payload.get("2"))
+        self.consumable_info_available = True

@@ -239,6 +239,31 @@ class TestNarwalClientInit:
         assert not client.state.is_washing_mop
         assert not client.state.is_station_active
 
+    async def test_stop_dock_task_applied_clears_stale_station_activity(self) -> None:
+        """APPLIED is an accepted stop and should clear cached dock activity."""
+        client = NarwalClient("10.0.0.1")
+        client.state.dock_activity = 3
+        client.state.station_activity = 3
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch.object(
+                client,
+                "get_dry_mop_remain_time",
+                new_callable=AsyncMock,
+                return_value=CommandResponse(result_code=CommandResult.SUCCESS),
+            ),
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_send.return_value = CommandResponse(result_code=CommandResult.APPLIED)
+
+            result = await client.stop_dock_task()
+
+        assert result.success
+        assert client.state.dock_activity == 0
+        assert client.state.station_activity == 0
+        assert not client.state.is_station_active
+
     @pytest.mark.asyncio
     async def test_stop_dock_task_ignores_failed_timer_refresh_after_success(self) -> None:
         """A failed optional timer refresh must not turn a successful stop into failure."""
@@ -263,6 +288,20 @@ class TestNarwalClientInit:
         assert result.success
         assert client.state.dock_activity == 0
         assert client.state.station_activity == 0
+
+    @pytest.mark.asyncio
+    async def test_dry_mop_clears_empty_timer_suppression(self) -> None:
+        """Starting a new dry task clears suppression from a previous empty timer."""
+        client = NarwalClient("10.0.0.1")
+        client.state.last_dry_mop_empty_time = time.monotonic()
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(result_code=CommandResult.SUCCESS)
+
+            result = await client.dry_mop()
+
+        assert result.result_code == CommandResult.SUCCESS
+        assert client.state.last_dry_mop_empty_time == 0.0
 
 
 class TestCommandResponseRouting:
@@ -766,6 +805,7 @@ class TestConsumableInfoQuery:
         client = NarwalClient("127.0.0.1")
         client.state.maintain_items = [4]
         client.state.replace_items = [20]
+        client.state.consumable_info_available = True
 
         with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
             mock_send.return_value = CommandResponse(
@@ -778,6 +818,19 @@ class TestConsumableInfoQuery:
         mock_send.assert_awaited_once()
         assert client.state.maintain_items == [4]
         assert client.state.replace_items == [20]
+        assert not client.state.consumable_info_available
+
+    @pytest.mark.asyncio
+    async def test_successful_consumable_info_query_marks_endpoint_available(self) -> None:
+        client = NarwalClient("127.0.0.1")
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(data={"1": {"1": [4]}})
+
+            await client.get_consumable_info()
+
+        assert client.state.consumable_info_available
+        assert client.state.maintain_items == [4]
 
     @pytest.mark.asyncio
     async def test_reset_consumable_info_refreshes_after_applied_result(self) -> None:
@@ -797,6 +850,24 @@ class TestConsumableInfoQuery:
 
         assert result.success
         refresh.assert_awaited_once_with()
+
+    @pytest.mark.asyncio
+    async def test_reset_consumable_info_does_not_fail_on_stale_refresh(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        client.state.maintain_items = [4]
+        client.state.consumable_info_available = True
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.side_effect = [
+                CommandResponse(result_code=CommandResult.APPLIED),
+                CommandResponse(result_code=CommandResult.NOT_READY),
+            ]
+
+            result = await client.reset_consumable_info(maintain_items=(4,))
+
+        assert result.success
+        assert client.state.maintain_items == [4]
+        assert not client.state.consumable_info_available
 
 
 class TestTaskDetailQueries:

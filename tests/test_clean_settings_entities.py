@@ -589,7 +589,7 @@ class TestNarwalPassesNumber:
         assert not NarwalPassesNumber(coord).available
 
     async def test_set_native_value_stores_int(self) -> None:
-        coord = _coordinator()
+        coord = _coordinator(state=_state())
         num = NarwalPassesNumber(coord)
         await num.async_set_native_value(3.0)
         assert coord.clean_settings.passes == 3
