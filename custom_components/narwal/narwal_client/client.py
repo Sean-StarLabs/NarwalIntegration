@@ -26,7 +26,9 @@ from .const import (
     TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_AMBIENT_LIGHT_CTRL,
     TOPIC_CMD_CANCEL,
+    TOPIC_CMD_DRY_DUST_BAG,
     TOPIC_CMD_DRY_MOP,
+    TOPIC_CMD_DRY_STATION_BAG,
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_EASY_CLEAN,
     TOPIC_CMD_FORCE_END,
@@ -50,6 +52,8 @@ from .const import (
     TOPIC_CMD_GET_DEBUG_IMAGE,
     TOPIC_CMD_SET_LED,
     TOPIC_CMD_WASH_MOP,
+    TOPIC_CMD_WASH_AND_DRY_MOP,
+    TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
     DEFAULT_TOPIC_PREFIX,
     WAKE_TIMEOUT,
@@ -1363,9 +1367,25 @@ class NarwalClient:
         """Wash the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_WASH_MOP)
 
+    async def wash_mop_by_robot_status(self) -> CommandResponse:
+        """Wash mop pads using the app's status-gated station command."""
+        return await self.send_command(TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS)
+
     async def dry_mop(self) -> CommandResponse:
         """Dry the mop pads at the station."""
         return await self.send_command(TOPIC_CMD_DRY_MOP)
+
+    async def wash_and_dry_mop(self) -> CommandResponse:
+        """Wash and dry the mop pads at the station."""
+        return await self.send_command(TOPIC_CMD_WASH_AND_DRY_MOP)
+
+    async def dry_dust_bag(self) -> CommandResponse:
+        """Dry or disinfect the robot dust bin at the station."""
+        return await self.send_command(TOPIC_CMD_DRY_DUST_BAG)
+
+    async def dry_station_bag(self) -> CommandResponse:
+        """Dry or disinfect the dock dust bag at the station."""
+        return await self.send_command(TOPIC_CMD_DRY_STATION_BAG)
 
     async def empty_dustbin(self) -> CommandResponse:
         """Empty the dustbin at the station."""

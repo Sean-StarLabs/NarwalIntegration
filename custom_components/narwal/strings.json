@@ -157,6 +157,26 @@
         "name": "Dock light"
       }
     },
+    "button": {
+      "empty_dustbin": {
+        "name": "Empty dustbin"
+      },
+      "wash_mop": {
+        "name": "Wash mop"
+      },
+      "dry_mop": {
+        "name": "Dry mop"
+      },
+      "wash_and_dry_mop": {
+        "name": "Wash and dry mop"
+      },
+      "dry_dust_bin": {
+        "name": "Dry and disinfect dust bin"
+      },
+      "dry_dock_bag": {
+        "name": "Dry and disinfect dock bag"
+      }
+    },
     "switch": {
       "show_room_labels": {
         "name": "Show room labels"
