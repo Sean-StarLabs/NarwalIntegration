@@ -13,13 +13,14 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .narwal_client import (
-    WorkMode,
+    CleaningRoute,
     FanLevel,
     MopHumidity,
     MopStrengthLevel,
     NarwalClient,
     NarwalConnectionError,
     NarwalState,
+    WorkMode,
 )
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
 
@@ -50,7 +51,10 @@ ACTIVE_TASK_REFRESH_INTERVAL = 30.0
 class CleanSettings:
     """User-selected clean parameters, applied at the next room clean start.
 
-    Single source of truth the select/number entities mutate and the clean-start path reads; each entity persists its value via RestoreEntity, so they survive restarts. Only fan and water also have live setters — work_mode/mop_strength/passes take effect at the next start.
+    Select/number entities mutate this, and clean-start paths read it. Each
+    entity persists its value via RestoreEntity, so settings survive restarts.
+    Only fan and water have live setters; the other parameters take effect at
+    the next start.
     """
 
     work_mode: WorkMode = WorkMode.VACUUM_AND_MOP
@@ -58,6 +62,17 @@ class CleanSettings:
     water: MopHumidity = MopHumidity.NORMAL
     mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL
     passes: int = 1
+    route: CleaningRoute = CleaningRoute.METICULOUS
+
+
+def is_active_clean_session(state: NarwalState | None) -> bool:
+    """Return True while clean parameters are locked to the current task."""
+    if state is None:
+        return False
+    return (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.has_recent_active_working_status
+    ) and not state.is_returning
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):

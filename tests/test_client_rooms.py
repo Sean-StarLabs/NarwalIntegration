@@ -9,6 +9,7 @@ import pytest
 
 from narwal_client.client import NarwalClient
 from narwal_client.const import (
+    CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
@@ -67,11 +68,20 @@ class TestBuildStartCleanPayload:
         assert param["4"] == MopHumidity.WET
         assert param["3"] == MopStrengthLevel.HIGH
 
-    def test_overlap_not_sent(self) -> None:
-        """overlapLevel (tag 8) is omitted — live-validated as ignored."""
+    def test_route_omitted_when_unset(self) -> None:
+        """overlapLevel (tag 8) is omitted when no route is supplied."""
         client = NarwalClient("127.0.0.1")
         param = _items(_task(client._build_start_clean_payload([2], 1)))[0]["2"]
         assert "8" not in param
+
+    def test_route_encoded_when_supplied(self) -> None:
+        """Route lands in CleanParam overlapLevel tag 8."""
+        client = NarwalClient("127.0.0.1")
+        payload = client._build_start_clean_payload(
+            [2], 1, route=CleaningRoute.METICULOUS
+        )
+        param = _items(_task(payload))[0]["2"]
+        assert param["8"] == CleaningRoute.METICULOUS
 
     def test_map_zone_and_order(self) -> None:
         """map_id, room zone refs, and 1-based order encode correctly."""
@@ -117,6 +127,7 @@ class TestStartRooms:
             await client.start_rooms(
                 [5], work_mode=WorkMode.MOP, fan=FanLevel.STRONG,
                 water=MopHumidity.DRY, mop_strength=MopStrengthLevel.HIGH, passes=3,
+                route=CleaningRoute.STANDARD,
             )
         mock_send.assert_awaited_once()
         param = _items(_task(mock_send.await_args.kwargs["payload"]))[0]["2"]
@@ -125,6 +136,7 @@ class TestStartRooms:
         assert param["3"] == MopStrengthLevel.HIGH
         assert param["4"] == MopHumidity.DRY
         assert param["6"] == 3  # mopTime pass count
+        assert param["8"] == CleaningRoute.STANDARD
 
     @pytest.mark.asyncio
     async def test_no_map_id_returns_not_applicable(self) -> None:
