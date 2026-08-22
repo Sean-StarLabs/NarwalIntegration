@@ -9,11 +9,12 @@ from __future__ import annotations
 from homeassistant.components.number import NumberMode, RestoreNumber
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
 from .const import PASSES_MAX, PASSES_MIN
-from .coordinator import NarwalCoordinator
+from .coordinator import NarwalCoordinator, is_active_clean_session
 from .entity import NarwalEntity
 
 
@@ -50,8 +51,8 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
 
     @property
     def available(self) -> bool:
-        """Editable even while the robot sleeps — this is a pending setting."""
-        return True
+        """Return True when the pass count can be changed now."""
+        return super().available and not is_active_clean_session(self.coordinator.data)
 
     @property
     def native_value(self) -> float:
@@ -60,5 +61,8 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         """Store the pass count."""
+        if not super().available:
+            raise HomeAssistantError("Narwal pass count cannot be changed right now")
         self.coordinator.clean_settings.passes = int(value)
         self.async_write_ha_state()
+        self.coordinator.async_update_listeners()

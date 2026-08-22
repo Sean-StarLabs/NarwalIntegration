@@ -50,6 +50,8 @@ class TestCoordinatorMapRefresh:
         coordinator._fast_poll_remaining = 0
         coordinator._listen_task = None
         coordinator._map_fetch_pending = False
+        coordinator.active_room_ids = None
+        coordinator._active_room_plan_pending_until = 0.0
         coordinator._remapping_map_key = None
         coordinator._remapping_map_refresh_pending = False
         coordinator._remapping_map_refresh_attempts = 0

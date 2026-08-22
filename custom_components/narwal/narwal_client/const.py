@@ -266,6 +266,13 @@ class MopStrengthLevel(IntEnum):
     HIGH = 2
 
 
+class CleaningRoute(IntEnum):
+    """Cleaning route overlap level (CleanParam tag 8)."""
+
+    STANDARD = 1
+    METICULOUS = 2
+
+
 class WorkMode(IntEnum):
     """Clean work mode — the app's robot_work_mode_* selector (Vacuum / Mop / Vacuum then mop / Vacuum and mop). Its value IS the CleanTask.taskType the robot executes; the per-item CleanParam.mode (the proto's own CleanMode enum) is derived separately in client._WORK_MODE_PARAM."""
 

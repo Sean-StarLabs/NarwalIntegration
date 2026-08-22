@@ -7,8 +7,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import blackboxprotobuf
 import pytest
 
-from narwal_client.client import NarwalClient
+from narwal_client.client import NarwalClient, RoomCleanSettings
 from narwal_client.const import (
+    CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
@@ -67,11 +68,20 @@ class TestBuildStartCleanPayload:
         assert param["4"] == MopHumidity.WET
         assert param["3"] == MopStrengthLevel.HIGH
 
-    def test_overlap_not_sent(self) -> None:
-        """overlapLevel (tag 8) is omitted — live-validated as ignored."""
+    def test_route_omitted_when_unset(self) -> None:
+        """overlapLevel (tag 8) is omitted when no route is supplied."""
         client = NarwalClient("127.0.0.1")
         param = _items(_task(client._build_start_clean_payload([2], 1)))[0]["2"]
         assert "8" not in param
+
+    def test_route_encoded_when_supplied(self) -> None:
+        """Route lands in CleanParam overlapLevel tag 8."""
+        client = NarwalClient("127.0.0.1")
+        payload = client._build_start_clean_payload(
+            [2], 1, route=CleaningRoute.METICULOUS
+        )
+        param = _items(_task(payload))[0]["2"]
+        assert param["8"] == CleaningRoute.METICULOUS
 
     def test_map_zone_and_order(self) -> None:
         """map_id, room zone refs, and 1-based order encode correctly."""
@@ -82,6 +92,48 @@ class TestBuildStartCleanPayload:
         assert [it["1"]["2"] for it in items] == [2, 12]
         assert all(it["1"]["1"] == 1 for it in items)  # zoneType = ROOM
         assert [it["3"] for it in items] == [1, 2]
+
+    def test_per_room_settings_encode_distinct_clean_params(self) -> None:
+        """Each room can carry its own CleanParam in one CleanTask."""
+        client = NarwalClient("127.0.0.1")
+        payload = client._build_start_clean_payload(
+            [2, 12],
+            7,
+            room_settings={
+                2: RoomCleanSettings(
+                    work_mode=WorkMode.MOP,
+                    fan=FanLevel.UNSPECIFIED,
+                    water=MopHumidity.WET,
+                    mop_strength=MopStrengthLevel.HIGH,
+                    passes=3,
+                    route=CleaningRoute.METICULOUS,
+                ),
+                12: RoomCleanSettings(
+                    work_mode=WorkMode.VACUUM_THEN_MOP,
+                    fan=FanLevel.STRONG,
+                    water=MopHumidity.NORMAL,
+                    mop_strength=MopStrengthLevel.NORMAL,
+                    passes=1,
+                    route=CleaningRoute.STANDARD,
+                ),
+            },
+        )
+
+        task = _task(payload)
+        assert task["5"] == WorkMode.VACUUM_THEN_MOP
+        room_params = {item["1"]["2"]: item["2"] for item in _items(task)}
+        assert room_params[2]["1"] == 3  # MOP CleanParam.mode
+        assert room_params[2]["3"] == MopStrengthLevel.HIGH
+        assert room_params[2]["4"] == MopHumidity.WET
+        assert room_params[2]["6"] == 3
+        assert room_params[2]["8"] == CleaningRoute.METICULOUS
+
+        assert room_params[12]["1"] == 5  # VACUUM_THEN_MOP CleanParam.mode
+        assert room_params[12]["2"] == FanLevel.STRONG
+        assert room_params[12]["4"] == MopHumidity.NORMAL
+        assert room_params[12]["5"] == 1
+        assert room_params[12]["6"] == 1
+        assert room_params[12]["8"] == CleaningRoute.STANDARD
 
 
 class TestStartRooms:
@@ -117,6 +169,7 @@ class TestStartRooms:
             await client.start_rooms(
                 [5], work_mode=WorkMode.MOP, fan=FanLevel.STRONG,
                 water=MopHumidity.DRY, mop_strength=MopStrengthLevel.HIGH, passes=3,
+                route=CleaningRoute.STANDARD,
             )
         mock_send.assert_awaited_once()
         param = _items(_task(mock_send.await_args.kwargs["payload"]))[0]["2"]
@@ -125,6 +178,36 @@ class TestStartRooms:
         assert param["3"] == MopStrengthLevel.HIGH
         assert param["4"] == MopHumidity.DRY
         assert param["6"] == 3  # mopTime pass count
+        assert param["8"] == CleaningRoute.STANDARD
+
+    @pytest.mark.asyncio
+    async def test_forwards_room_settings_to_payload(self) -> None:
+        """Per-room settings passed to start_rooms reach the encoded CleanTask."""
+        client = self._client()
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = success
+            await client.start_rooms(
+                [5],
+                room_settings={
+                    5: RoomCleanSettings(
+                        work_mode=WorkMode.MOP,
+                        fan=FanLevel.UNSPECIFIED,
+                        water=MopHumidity.WET,
+                        mop_strength=MopStrengthLevel.HIGH,
+                        passes=3,
+                        route=CleaningRoute.METICULOUS,
+                    )
+                },
+            )
+
+        mock_send.assert_awaited_once()
+        param = _items(_task(mock_send.await_args.kwargs["payload"]))[0]["2"]
+        assert param["1"] == 3
+        assert param["3"] == MopStrengthLevel.HIGH
+        assert param["4"] == MopHumidity.WET
+        assert param["6"] == 3
+        assert param["8"] == CleaningRoute.METICULOUS
 
     @pytest.mark.asyncio
     async def test_no_map_id_returns_not_applicable(self) -> None:

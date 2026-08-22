@@ -6,7 +6,7 @@ import asyncio
 import logging
 import random
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -67,6 +67,7 @@ from .const import (
     DEFAULT_TOPIC_PREFIX,
     WAKE_TIMEOUT,
     AmbientLightCtrlType,
+    CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
@@ -131,6 +132,18 @@ _AUX_STATUS_TOPICS = {
 }
 
 _OPTIONAL_TASK_DETAIL_TIMEOUT = 3.0
+
+@dataclass
+class RoomCleanSettings:
+    """Clean parameters for a single room in a custom clean task."""
+
+    work_mode: WorkMode = WorkMode.VACUUM_AND_MOP
+    fan: FanLevel = FanLevel.NORMAL
+    water: MopHumidity = MopHumidity.NORMAL
+    mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL
+    passes: int = 1
+    route: CleaningRoute | None = None
+
 
 @dataclass(frozen=True)
 class _QueuedResponse:
@@ -1463,6 +1476,38 @@ class NarwalClient:
         WorkMode.VACUUM_AND_MOP: (4, ("7",)),      # sweepMopSyncTime
     }
 
+    def _clean_param_for_settings(self, settings: RoomCleanSettings) -> dict[str, int]:
+        """Return a CleanParam protobuf dict for one room."""
+        param_mode, pass_tags = self._WORK_MODE_PARAM[settings.work_mode]
+        param: dict[str, int] = {
+            "1": int(param_mode),
+            "2": int(settings.fan),
+            "3": int(settings.mop_strength),
+            "4": int(settings.water),
+        }
+        if settings.route is not None:
+            param["8"] = int(settings.route)
+        for tag in pass_tags:
+            param[tag] = int(settings.passes)
+        return param
+
+    @staticmethod
+    def _task_type_for_settings(
+        room_settings: list[RoomCleanSettings],
+        fallback: WorkMode,
+    ) -> WorkMode:
+        """Return the outer CleanTask type for a room-clean payload."""
+        modes = {settings.work_mode for settings in room_settings}
+        if len(modes) == 1:
+            return next(iter(modes))
+        if WorkMode.VACUUM_AND_MOP in modes:
+            return WorkMode.VACUUM_AND_MOP
+        if WorkMode.VACUUM_THEN_MOP in modes:
+            return WorkMode.VACUUM_THEN_MOP
+        if {WorkMode.VACUUM, WorkMode.MOP}.issubset(modes):
+            return WorkMode.VACUUM_THEN_MOP
+        return fallback
+
     def _build_start_clean_payload(
         self,
         room_ids: list[int],
@@ -1473,13 +1518,15 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.NORMAL,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
+        room_settings: Mapping[int, RoomCleanSettings] | None = None,
     ) -> bytes:
         """Build a clean/start_clean request for the given rooms.
 
         StartClean_Request{1: CleanTask{1: map_id, 2: [CleanItem...], 3: {} (TaskOption),
         5: taskType}}; CleanItem{1: ZoneOption{1: 1 (room zone), 2: room_id}, 2: CleanParam,
         3: order}. taskType (the execution-mode carrier) and CleanParam.mode/pass-tag are
-        derived from work_mode. overlapLevel is omitted — live-validated as ignored here.
+        derived from work_mode. overlapLevel is CleanParam tag 8 when supplied.
 
         Args:
             room_ids: Robot room IDs (RoomInfo.room_id).
@@ -1489,28 +1536,43 @@ class NarwalClient:
             water: Mop water volume (tag 4).
             mop_strength: Mop scrub intensity (tag 3).
             passes: Clean count, routed to the pass tag(s) for the mode.
+            route: Optional route overlap level (tag 8).
+            room_settings: Optional per-room settings keyed by robot room ID.
         """
         import blackboxprotobuf
 
-        param_mode, pass_tags = self._WORK_MODE_PARAM[work_mode]
-        param: dict[str, int] = {
-            "1": int(param_mode),
-            "2": int(fan),
-            "3": int(mop_strength),
-            "4": int(water),
-        }
-        for tag in pass_tags:
-            param[tag] = int(passes)
+        default_settings = RoomCleanSettings(
+            work_mode=work_mode,
+            fan=fan,
+            water=water,
+            mop_strength=mop_strength,
+            passes=passes,
+            route=route,
+        )
+        settings_by_room = (
+            {rid: room_settings.get(rid, default_settings) for rid in room_ids}
+            if room_settings
+            else {rid: default_settings for rid in room_ids}
+        )
+        task_type = self._task_type_for_settings(
+            list(settings_by_room.values()),
+            work_mode,
+        )
+        param_keys: set[str] = set()
+        params_by_room: dict[int, dict[str, int]] = {}
+        for rid, settings in settings_by_room.items():
+            params_by_room[rid] = self._clean_param_for_settings(settings)
+            param_keys.update(params_by_room[rid])
 
         items = [
-            {"1": {"1": 1, "2": rid}, "2": dict(param), "3": idx + 1}
+            {"1": {"1": 1, "2": rid}, "2": params_by_room[rid], "3": idx + 1}
             for idx, rid in enumerate(room_ids)
         ]
         task = {
             "1": map_id,
             "2": items if len(items) > 1 else items[0],
             "3": {},
-            "5": int(work_mode),  # CleanTask.taskType
+            "5": int(task_type),  # CleanTask.taskType
         }
         item_typedef = {
             "type": "message",
@@ -1522,7 +1584,7 @@ class NarwalClient:
                 # Derive the CleanParam typedef from the emitted dict — bbpb silently
                 # drops any tag absent from the typedef.
                 "2": {"type": "message", "message_typedef": {
-                    k: {"type": "int"} for k in param
+                    k: {"type": "int"} for k in sorted(param_keys, key=int)
                 }},
                 "3": {"type": "int"},
             },
@@ -1544,6 +1606,8 @@ class NarwalClient:
         water: MopHumidity = MopHumidity.NORMAL,
         mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL,
         passes: int = 1,
+        route: CleaningRoute | None = None,
+        room_settings: Mapping[int, RoomCleanSettings] | None = None,
     ) -> CommandResponse:
         """Start cleaning the given rooms via clean/start_clean.
 
@@ -1559,8 +1623,9 @@ class NarwalClient:
 
         Args:
             room_ids: Robot room IDs (RoomInfo.room_id), mapped from HA areas.
-            work_mode, fan, water, mop_strength, passes: CleanParam settings —
+            work_mode, fan, water, mop_strength, passes, route: CleanParam settings —
                 see _build_start_clean_payload.
+            room_settings: Optional per-room settings keyed by robot room ID.
         """
         if not room_ids:
             # No rooms selected — do not call start(), which would resolve the
@@ -1579,7 +1644,8 @@ class NarwalClient:
 
         payload = self._build_start_clean_payload(
             room_ids, map_id, work_mode=work_mode, fan=fan, water=water,
-            mop_strength=mop_strength, passes=passes,
+            mop_strength=mop_strength, passes=passes, route=route,
+            room_settings=room_settings,
         )
         resp = await self.send_command(
             TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,

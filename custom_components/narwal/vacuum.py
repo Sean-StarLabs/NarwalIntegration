@@ -17,6 +17,7 @@ try:
 except ImportError:
     Segment = None  # HA < 2026.3 — room cleaning unavailable
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
@@ -25,7 +26,12 @@ from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 from . import NarwalConfigEntry
 from .const import FAN_SPEED_LIST, FAN_SPEED_MAP, fan_speed_list_for
-from .coordinator import NarwalCoordinator
+from .coordinator import (
+    NarwalCoordinator,
+    can_edit_pending_clean_settings,
+    clean_setting_applies_to_mode,
+    is_live_clean_setting_available,
+)
 from .entity import NarwalEntity
 
 _LOGGER = logging.getLogger(__name__)
@@ -51,6 +57,23 @@ WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
 
 # FanLevel value -> fan_speed label (canonical labels only; FAN_SPEED_MAP also holds back-compat aliases).
 _FAN_LABELS: dict[int, str] = {int(FAN_SPEED_MAP[label]): label for label in FAN_SPEED_LIST}
+
+
+def _result_name(result_code: int | CommandResult) -> str:
+    """Return a readable Narwal command result name."""
+    try:
+        return CommandResult(result_code).name
+    except ValueError:
+        return f"UNKNOWN({result_code})"
+
+
+def _raise_if_command_failed(response: Any, action: str) -> None:
+    """Raise a Home Assistant service error for rejected robot commands."""
+    if response.success:
+        return
+    raise HomeAssistantError(
+        f"Narwal {action} failed: {_result_name(response.result_code)}"
+    )
 
 
 async def async_setup_entry(
@@ -180,6 +203,8 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 water=settings.water,
                 mop_strength=settings.mop_strength,
                 passes=settings.passes,
+                route=settings.route,
+                room_settings=self.coordinator.room_clean_settings_for_rooms(room_ids),
             )
         else:
             # No map rooms known — best-effort fall back to the saved-plan start.
@@ -253,11 +278,24 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         level = FAN_SPEED_MAP.get(fan_speed)
         if level is None:
             return
+        if not self.available:
+            raise HomeAssistantError("Narwal fan speed cannot be changed right now")
+        state = self.coordinator.data
+        if not clean_setting_applies_to_mode("fan", self.coordinator.clean_settings.work_mode):
+            raise HomeAssistantError(
+                "Narwal fan speed is not available in mop-only mode"
+            )
+        if not (
+            can_edit_pending_clean_settings(state)
+            or is_live_clean_setting_available(state)
+        ):
+            raise HomeAssistantError("Narwal fan speed cannot be changed right now")
+        if is_live_clean_setting_available(state):
+            resp = await self.coordinator.client.set_fan_speed(level)
+            _raise_if_command_failed(resp, "set fan speed")
         self.coordinator.clean_settings.fan = level
         self.async_write_ha_state()
-        state = self.coordinator.data
-        if state is not None and state.is_cleaning:
-            await self.coordinator.client.set_fan_speed(level)
+        self.coordinator.async_update_listeners()
 
     # --- Segment API (HA 2026.3 room-specific cleaning) ---
 
@@ -297,13 +335,42 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         a room-specific clean command to the robot.
         """
         await self._ensure_awake()
-        room_ids = [int(sid) for sid in segment_ids]
+        try:
+            room_ids = [int(sid) for sid in segment_ids]
+        except (TypeError, ValueError) as err:
+            raise HomeAssistantError("Narwal segment IDs must be numeric") from err
+        if any(room_id <= 0 for room_id in room_ids):
+            raise HomeAssistantError("Narwal segment IDs must be positive")
+        state = self.coordinator.data
+        known_ids: set[int] = set()
+        if state is None or state.map_data is None:
+            try:
+                await self.coordinator.client.get_map()
+            except Exception:
+                _LOGGER.debug("Could not fetch Narwal map before segment clean")
+            state = self.coordinator.data
+        if state is not None and state.map_data is not None:
+            known_ids = {room.room_id for room in state.map_data.rooms if room.room_id > 0}
+        else:
+            known_ids = {
+                int(segment.id)
+                for segment in (getattr(self, "last_seen_segments", None) or [])
+                if str(segment.id).isdigit() and int(segment.id) > 0
+            }
+        if not known_ids:
+            raise HomeAssistantError("Narwal map is not available")
+        unknown_ids = [room_id for room_id in room_ids if room_id not in known_ids]
+        if unknown_ids:
+            raise HomeAssistantError(
+                f"Unknown Narwal room ID: {', '.join(str(room_id) for room_id in unknown_ids)}"
+            )
         settings = self.coordinator.clean_settings
         _LOGGER.info(
             "Starting room-specific clean: rooms=%s mode=%s fan=%s water=%s "
-            "mop_strength=%s passes=%s",
+            "mop_strength=%s passes=%s route=%s",
             room_ids, settings.work_mode.name, settings.fan.name,
             settings.water.name, settings.mop_strength.name, settings.passes,
+            settings.route.name,
         )
         resp = await self.coordinator.client.start_rooms(
             room_ids,
@@ -312,6 +379,8 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             water=settings.water,
             mop_strength=settings.mop_strength,
             passes=settings.passes,
+            route=settings.route,
+            room_settings=self.coordinator.room_clean_settings_for_rooms(room_ids),
         )
         try:
             result_name = CommandResult(resp.result_code).name
@@ -329,6 +398,9 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 "Try again after the robot is idle on the dock.",
                 result_name, resp.result_code, room_ids,
             )
+            return
+        self.coordinator.set_active_room_ids(room_ids)
+        self.async_write_ha_state()
 
     @callback
     def _handle_coordinator_update(self) -> None:
