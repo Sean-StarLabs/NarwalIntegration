@@ -208,6 +208,18 @@ class TestNarwalState:
         assert not state.is_docked
         assert state.dock_activity == 0
 
+    def test_clear_washing_task_clears_station_activity(self) -> None:
+        """Stopping a station task clears non-washing station activities locally."""
+        for station_activity in (1, 2, 3, 4):
+            state = NarwalState()
+            state.dock_activity = 3
+            state.station_activity = station_activity
+
+            state.clear_washing_task()
+
+            assert state.dock_activity == 0
+            assert state.station_activity == 0
+
     def test_zeroed_task_metrics_do_not_mark_cleaning(self) -> None:
         """A zeroed session counter is not evidence of an active clean.
 
@@ -308,6 +320,26 @@ class TestNarwalState:
         assert state.dock_field11 == 1
         assert state.dock_field47 == 2
 
+    def test_explicit_off_dock_signal_overrides_terminal_dock_status(self) -> None:
+        """Current off-dock fields are stronger than stale docked work status."""
+        state = NarwalState()
+
+        state.update_from_base_status({"3": {"1": 10}, "11": 1, "47": 2})
+
+        assert state.working_status == WorkingStatus.DOCKED
+        assert state.has_explicit_off_dock_signal
+        assert not state.is_docked
+
+    def test_terminal_dock_status_ignores_stale_off_dock_fields(self) -> None:
+        """A fresh terminal dock state should not inherit prior cleaning fields."""
+        state = NarwalState()
+        state.update_from_working_status({"3": 120})
+
+        state.update_from_base_status({"3": {"1": 10}})
+
+        assert state.working_status == WorkingStatus.DOCKED
+        assert state.is_docked
+
     def test_update_from_base_status_cleaning(self) -> None:
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(85.0)})
@@ -389,6 +421,18 @@ class TestNarwalState:
         assert not state.is_station_active
         assert not state.is_drying_mop
         assert state.dry_mop_remaining_time is None
+
+    def test_active_off_dock_status_ignores_stale_station_activity(self) -> None:
+        """A stale station activity value must not hide an off-dock clean."""
+        state = NarwalState()
+
+        state.update_from_base_status(
+            {"3": {"1": 4, "3": 2, "18": 1}, "11": 1, "47": 2}
+        )
+
+        assert state.is_cleaning
+        assert state.station_activity == 0
+        assert not state.is_station_active
 
     def test_working_status_station_timer_beats_stale_clean_elapsed(self) -> None:
         """Dock timer packets must not be reclassified as active robot cleaning."""
@@ -1035,6 +1079,15 @@ class TestMapData:
         m = MapData.from_response(decoded)
         assert m.dock_x is None
         assert m.dock_y is None
+
+    def test_consumable_info_success_marks_endpoint_available(self) -> None:
+        state = NarwalState()
+
+        state.update_from_consumable_info({"1": {"1": [4], "2": [20]}})
+
+        assert state.consumable_info_available
+        assert state.maintain_items == [4]
+        assert state.replace_items == [20]
 
     def test_empty_response(self) -> None:
         m = MapData.from_response({})

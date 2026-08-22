@@ -37,7 +37,7 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     coordinator.config_entry.data = {"device_id": "test_dev_001"}
     coordinator.config_entry.title = "Narwal Test"
     coordinator.client = MagicMock()
-    coordinator.client.state = MagicMock()
+    coordinator.client.state = state or MagicMock()
     coordinator.client.state.firmware_version = "1.0.0"
     coordinator.last_update_success = True
     coordinator.clean_settings = CleanSettings()
@@ -77,7 +77,7 @@ def _active_clean_state() -> NarwalState:
 class TestVacuumActivity:
     """Tests for mapping Narwal task context to HA vacuum activity."""
 
-    def test_charging_to_resume_reports_docked_activity(self) -> None:
+    def test_charging_to_resume_reports_cleaning_activity(self) -> None:
         state = _active_clean_state()
         state.battery_level = 25
         state.battery_level_increasing = True
@@ -87,7 +87,7 @@ class TestVacuumActivity:
         vac = _make_vacuum(state=state)
 
         assert state.is_charging_to_resume
-        assert vac.activity == VacuumActivity.DOCKED
+        assert vac.activity == VacuumActivity.CLEANING
         assert vac.extra_state_attributes["task_status"] == "charging_to_resume"
         assert vac.extra_state_attributes["docked"] is True
 
@@ -109,6 +109,15 @@ class TestVacuumActivity:
 
         assert vac.extra_state_attributes["task_status"] == "remapping"
 
+    def test_parsed_fault_reports_error_activity_and_task_status(self) -> None:
+        state = _active_clean_state()
+        state.has_error = True
+        state.error_codes = [2105]
+        vac = _make_vacuum(state=state)
+
+        assert vac.activity == VacuumActivity.ERROR
+        assert vac.extra_state_attributes["task_status"] == "error"
+
     def test_dock_drying_during_open_task_reports_docked_activity(self) -> None:
         state = _active_clean_state()
         state.dry_mop_remaining_time = 12_503
@@ -121,7 +130,7 @@ class TestVacuumActivity:
         assert state.is_cleaning
         assert state.is_station_active
         assert vac.activity == VacuumActivity.DOCKED
-        assert vac.extra_state_attributes["station_task"] == "drying_mop"
+        assert "station_task" not in vac.extra_state_attributes
         assert vac.extra_state_attributes["docked"] is True
 
     def test_dock_washing_reports_docked_activity(self) -> None:
@@ -131,7 +140,7 @@ class TestVacuumActivity:
 
         assert vac.activity == VacuumActivity.DOCKED
         assert vac.extra_state_attributes["task_status"] == "station_active"
-        assert vac.extra_state_attributes["station_task"] == "washing_mop"
+        assert "station_task" not in vac.extra_state_attributes
         assert vac.extra_state_attributes["docked"] is True
 
     def test_stale_clean_details_hidden_after_clean_ends(self) -> None:
@@ -148,7 +157,7 @@ class TestVacuumActivity:
         attrs = vac.extra_state_attributes
 
         assert attrs["task_status"] == "station_active"
-        assert attrs["station_task"] == "drying_or_disinfecting"
+        assert "station_task" not in attrs
         assert "progress" not in attrs
         assert "current_room_id" not in attrs
         assert "current_room" not in attrs
@@ -174,6 +183,7 @@ class TestVacuumActivity:
         state.task_progress_percent = 72
         state.current_room_id = 4
         state.current_room_aux_name = "Kitchen"
+        state.task_remaining_time = 300
         state.cleaning_area = 12.5
         state.cleaning_time = 900
         vac = _make_vacuum(state=state)
@@ -181,6 +191,7 @@ class TestVacuumActivity:
         attrs = vac.extra_state_attributes
 
         assert attrs["progress"] == 72
+        assert attrs["remaining_time"] == 300
         assert attrs["current_room_id"] == 4
         assert attrs["current_room"] == "Kitchen"
         assert attrs["active_room_ids"] == [4]
@@ -306,6 +317,7 @@ class TestAsyncCleanSegments:
         """Converts string segment IDs to int and calls start_rooms with the settings."""
         state = NarwalState()
         state.map_data = MapData(rooms=[RoomInfo(room_id=11), RoomInfo(room_id=9)])
+        state.working_status = WorkingStatus.DOCKED
         vac = _make_vacuum(state=state)
         settings = vac.coordinator.clean_settings
         vac.coordinator.client.start_rooms = AsyncMock(
@@ -332,6 +344,52 @@ class TestAsyncCleanSegments:
         )
         assert vac.coordinator.active_room_ids == [11, 9]
 
+    async def test_rejected_start_rooms_raises_and_preserves_active_rooms(self) -> None:
+        state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
+        state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=MagicMock(result_code=3, success=False)
+        )
+
+        with pytest.raises(Exception, match="room clean failed"):
+            await vac.async_clean_segments(["11"])
+
+        assert vac.coordinator.active_room_ids is None
+
+    async def test_empty_segment_ids_raise_without_starting_saved_plan(self) -> None:
+        state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
+        state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock()
+        vac.coordinator.client.start = AsyncMock()
+
+        with pytest.raises(Exception, match="must not be empty"):
+            await vac.async_clean_segments([])
+
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+        vac.coordinator.client.start.assert_not_called()
+
+    async def test_segment_clean_revalidates_after_map_refresh(self) -> None:
+        state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
+        state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        refreshed = _active_clean_state()
+        vac.coordinator.client.state = refreshed
+
+        with pytest.raises(Exception, match="room clean cannot be started"):
+            await vac.async_clean_segments(["11"])
+
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+
 
 class TestVacuumReturnToBase:
     async def test_preserves_active_room_plan_while_returning(self) -> None:
@@ -355,6 +413,7 @@ class TestVacuumReturnToBase:
 
     async def test_non_numeric_segment_id_raises(self) -> None:
         state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
         state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
@@ -367,6 +426,7 @@ class TestVacuumReturnToBase:
 
     async def test_unknown_segment_id_raises(self) -> None:
         state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
         state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
@@ -377,7 +437,121 @@ class TestVacuumReturnToBase:
 
         vac.coordinator.client.start_rooms.assert_not_awaited()
 
-class TestVacuumFanSpeed:
+    async def test_rejected_return_to_base_raises(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.return_to_base = AsyncMock(
+            return_value=MagicMock(result_code=3, success=False)
+        )
+
+        with pytest.raises(Exception, match="return to dock failed"):
+            await vac.async_return_to_base()
+
+        vac.async_write_ha_state.assert_not_called()
+
+
+class TestVacuumControls:
+    async def test_locate_unavailable_when_dock_task_active(self) -> None:
+        state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
+        state.dry_mop_remaining_time = 600
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.locate = AsyncMock()
+
+        with pytest.raises(Exception, match="locate cannot be used"):
+            await vac.async_locate()
+
+        vac.coordinator.client.locate.assert_not_awaited()
+
+    async def test_rejected_stop_raises(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock(
+            return_value=MagicMock(result_code=3, success=False)
+        )
+
+        with pytest.raises(Exception, match="stop failed"):
+            await vac.async_stop()
+
+        assert vac.coordinator.active_room_ids is None
+
+    async def test_stop_revalidates_after_wake_refresh(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = False
+        vac.coordinator.client.wake = AsyncMock()
+        vac.coordinator.client.stop = AsyncMock()
+
+        refreshed = NarwalState()
+        refreshed.working_status = WorkingStatus.DOCKED
+        vac.coordinator.client.state = refreshed
+
+        with pytest.raises(Exception, match="cannot be stopped"):
+            await vac.async_stop()
+
+        vac.coordinator.client.wake.assert_awaited_once_with(timeout=10.0)
+        vac.coordinator.client.stop.assert_not_awaited()
+
+    async def test_pause_revalidates_after_wake_refresh(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = False
+        vac.coordinator.client.wake = AsyncMock()
+        vac.coordinator.client.pause = AsyncMock()
+
+        refreshed = NarwalState()
+        refreshed.working_status = WorkingStatus.DOCKED
+        vac.coordinator.client.state = refreshed
+
+        with pytest.raises(Exception, match="cannot be paused"):
+            await vac.async_pause()
+
+        vac.coordinator.client.wake.assert_awaited_once_with(timeout=10.0)
+        vac.coordinator.client.pause.assert_not_awaited()
+
+    async def test_return_to_base_revalidates_after_wake_refresh(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = False
+        vac.coordinator.client.wake = AsyncMock()
+        vac.coordinator.client.return_to_base = AsyncMock()
+
+        refreshed = NarwalState()
+        refreshed.working_status = WorkingStatus.DOCKED
+        vac.coordinator.client.state = refreshed
+
+        with pytest.raises(Exception, match="cannot return"):
+            await vac.async_return_to_base()
+
+        vac.coordinator.client.wake.assert_awaited_once_with(timeout=10.0)
+        vac.coordinator.client.return_to_base.assert_not_awaited()
+
+    async def test_locate_revalidates_after_wake_refresh(self) -> None:
+        state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = False
+        vac.coordinator.client.wake = AsyncMock()
+        vac.coordinator.client.locate = AsyncMock()
+
+        refreshed = NarwalState()
+        refreshed.working_status = WorkingStatus.DOCKED
+        refreshed.dry_mop_remaining_time = 600
+        refreshed.dock_field11 = 3
+        refreshed.dock_field47 = 1
+        vac.coordinator.client.state = refreshed
+
+        with pytest.raises(Exception, match="locate cannot be used"):
+            await vac.async_locate()
+
+        vac.coordinator.client.wake.assert_awaited_once_with(timeout=10.0)
+        vac.coordinator.client.locate.assert_not_awaited()
+
     async def test_live_fan_change_applies_while_paused(self) -> None:
         state = _active_clean_state()
         state.is_paused = True
@@ -515,6 +689,7 @@ class TestAsyncStartWholeHouse:
     async def test_enumerates_all_rooms(self) -> None:
         """Whole-house start passes every room id to clean/start_clean, skipping plan/start."""
         state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
         state.map_data = MapData(map_id=2, rooms=[
             RoomInfo(room_id=1), RoomInfo(room_id=2), RoomInfo(room_id=0),  # 0 filtered
         ])
@@ -558,6 +733,7 @@ class TestAsyncStartWholeHouse:
     async def test_falls_back_to_saved_plan_without_map(self) -> None:
         """With no map rooms available, falls back to the saved-plan start()."""
         state = NarwalState()  # no map_data
+        state.working_status = WorkingStatus.DOCKED
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.get_map = AsyncMock()  # does not populate map_data
@@ -569,4 +745,26 @@ class TestAsyncStartWholeHouse:
         await vac.async_start()
 
         vac.coordinator.client.start.assert_awaited_once()
+        vac.coordinator.client.start_rooms.assert_not_called()
+
+    async def test_whole_house_start_revalidates_after_map_prefetch(self) -> None:
+        """A stale idle state must not start a clean after map prefetch refreshes it."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+
+        refreshed = _active_clean_state()
+
+        async def refresh_map() -> None:
+            vac.coordinator.client.state = refreshed
+
+        vac.coordinator.client.get_map = AsyncMock(side_effect=refresh_map)
+        vac.coordinator.client.start = AsyncMock()
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(Exception, match="clean cannot be started"):
+            await vac.async_start()
+
+        vac.coordinator.client.start.assert_not_called()
         vac.coordinator.client.start_rooms.assert_not_called()

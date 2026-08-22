@@ -207,6 +207,24 @@
       }
     },
     "button": {
+      "start_cleaning": {
+        "name": "Démarrer le nettoyage"
+      },
+      "resume_cleaning": {
+        "name": "Reprendre le nettoyage"
+      },
+      "pause_cleaning": {
+        "name": "Mettre le nettoyage en pause"
+      },
+      "stop_cleaning": {
+        "name": "Arrêter le nettoyage"
+      },
+      "return_to_dock": {
+        "name": "Retourner à la station"
+      },
+      "locate_robot": {
+        "name": "Localiser le robot"
+      },
       "stop_dock_task": {
         "name": "Arrêter la tâche de la station"
       },

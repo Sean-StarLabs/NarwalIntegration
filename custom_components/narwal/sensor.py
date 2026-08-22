@@ -22,7 +22,7 @@ from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 from . import NarwalConfigEntry
 from .const import TASK_RESULT_OPTIONS
-from .coordinator import NarwalCoordinator
+from .coordinator import NarwalCoordinator, dock_task
 from .entity import NarwalEntity, is_dock_consumable_name
 
 _MAX_MAP_METADATA_ATTRIBUTE_BYTES = 16 * 1024
@@ -111,17 +111,7 @@ def _fit_map_metadata_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
 
 def _station_task(state: NarwalState) -> str | None:
     """Return the active dock task."""
-    if not state.is_station_active:
-        return "idle"
-    if state.station_activity == 1:
-        return "emptying_dustbin"
-    if state.is_washing_mop:
-        return "washing_mop"
-    if state.is_drying_mop:
-        return "drying_mop"
-    if state.station_activity == 4:
-        return "drying_or_disinfecting"
-    return "station_active"
+    return dock_task(state) or "idle"
 
 
 def _has_base_status_field(state: NarwalState, field: str) -> bool:

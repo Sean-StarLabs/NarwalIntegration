@@ -72,6 +72,20 @@ def test_error_attributes_expose_code_detail() -> None:
     assert "code=2105" in attrs["help_url"]
 
 
+def test_local_consumables_unavailable_until_endpoint_succeeds() -> None:
+    """Base status alone is not proof the consumable-info endpoint worked."""
+    state = NarwalState()
+    state.update_from_base_status({"3": {"1": 10}})
+
+    assert _DESCS["maintenance_required"].value_fn(state) is None
+    assert _DESCS["replacement_required"].value_fn(state) is None
+
+    state.update_from_consumable_info({"1": {}})
+
+    assert _DESCS["maintenance_required"].value_fn(state) is False
+    assert _DESCS["replacement_required"].value_fn(state) is False
+
+
 def test_no_help_url_when_healthy() -> None:
     """No help_url attribute when there's no active error code."""
     desc = _DESCS["error"]
@@ -164,13 +178,13 @@ def test_busy_and_setup_unavailable_when_station_active() -> None:
     assert _DESCS["setup_available"].value_fn(state) is False
 
 
-def test_setup_unavailable_when_state_unknown() -> None:
-    """Unknown startup state is not treated as configurable."""
+def test_setup_available_when_state_unknown() -> None:
+    """Unknown startup state still allows pending local settings."""
     state = NarwalState()
 
     assert state.working_status == WorkingStatus.UNKNOWN
     assert _DESCS["busy"].value_fn(state) is False
-    assert _DESCS["setup_available"].value_fn(state) is False
+    assert _DESCS["setup_available"].value_fn(state) is True
 
 
 def test_docked_sensor_on_when_charging_to_resume() -> None:
@@ -185,6 +199,11 @@ def test_docked_sensor_on_when_charging_to_resume() -> None:
 
     assert state.is_charging_to_resume
     assert _docked_sensor(state).is_on is True
+
+
+def test_docked_sensor_unknown_until_dock_position_known() -> None:
+    """Startup dock state should be unknown, not a false off-dock reading."""
+    assert _docked_sensor(NarwalState()).is_on is None
 
 
 def test_docked_sensor_on_when_station_task_active() -> None:
