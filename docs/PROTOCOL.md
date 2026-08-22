@@ -362,7 +362,7 @@ is a mistake this project has made in both directions:
 | 3 | `timeConsuming` — session elapsed seconds |
 | 4 | `remainedTime` — seconds |
 | 6 | `cleaningZoneId` — the room currently being cleaned |
-| 8..17 | Station drying/sterilization/dust-bag timers. The cumulative counters (9/11/13/15/17) stay constant while idle — field 13 is `totalDryStationBagTime` (18000 = 5 h), once misread as cleaning area because 18000/10000 resembled a plausible 1.8 m² |
+| 8..17 | Station drying/sterilization/dust-bag timers. Even fields are elapsed seconds and odd fields are target seconds for the active pair. Captures have shown `8/9` for mop drying and `12/13` for drying/disinfecting (`12=9366..9490`, `13=18000`). Odd counters may stay constant while idle — field 13 was once misread as cleaning area because 18000/10000 resembled a plausible 1.8 m² |
 
 ### `map/display_map` — live position
 

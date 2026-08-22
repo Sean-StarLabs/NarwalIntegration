@@ -31,6 +31,8 @@ from .coordinator import (
     can_edit_pending_clean_settings,
     clean_setting_applies_to_mode,
     is_live_clean_setting_available,
+    is_narwal_task_busy,
+    is_setup_available,
 )
 from .entity import NarwalEntity
 
@@ -74,6 +76,91 @@ def _raise_if_command_failed(response: Any, action: str) -> None:
     raise HomeAssistantError(
         f"Narwal {action} failed: {_result_name(response.result_code)}"
     )
+
+
+def _station_task(state: Any) -> str | None:
+    """Return the active dock task."""
+    if not state.is_station_active:
+        return None
+    if state.station_activity == 1:
+        return "emptying_dustbin"
+    if state.is_washing_mop:
+        return "washing_mop"
+    if state.is_drying_mop:
+        return "drying_mop"
+    if state.station_activity == 4:
+        return "drying_or_disinfecting"
+    return "station_active"
+
+
+def _task_status(state: Any) -> str:
+    """Return the same task-status value exposed by the status sensor."""
+    is_cleaning_state = (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.has_recent_active_working_status
+    )
+    if state.working_status == WorkingStatus.ERROR:
+        return "error"
+    if state.working_status == WorkingStatus.REMAPPING:
+        return "remapping"
+    if state.is_paused and is_cleaning_state:
+        return "paused"
+    if state.is_returning:
+        return "returning"
+    if state.is_charging_to_resume:
+        return "charging_to_resume"
+    if state.is_station_active:
+        return "station_active"
+    if state.is_cleaning:
+        return "cleaning"
+    if state.is_docked:
+        return "docked"
+    if state.working_status == WorkingStatus.STANDBY:
+        return "idle"
+    return "unknown"
+
+
+def _is_dock_side(state: Any) -> bool:
+    """Return true when the robot or dock is doing dock-side work."""
+    return state.is_docked or state.is_charging_to_resume or state.is_station_active
+
+
+def _has_active_cleaning_metrics(state: Any) -> bool:
+    """Return true while live clean-progress details are current."""
+    return state.is_cleaning or state.has_recent_active_working_status
+
+
+def _has_active_room_plan(state: Any) -> bool:
+    """Return true while room-plan attributes still describe the active task."""
+    return (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.has_recent_active_working_status
+        or state.is_returning
+        or state.is_charging_to_resume
+    )
+
+
+def _charging_state(state: Any) -> str:
+    """Return the same charging value exposed by the charging sensor."""
+    if state.is_charging_to_resume:
+        return "charging"
+    if not state.is_docked:
+        return "not_charging"
+    if state.battery_level >= 100:
+        return "fully_charged"
+    return "charging"
+
+
+def _room_names_by_id(state: Any) -> dict[int, str]:
+    """Return cleanable room display names keyed by room id."""
+    map_data = getattr(state, "map_data", None)
+    if map_data is None:
+        return {}
+    return {
+        room.room_id: room.display_name
+        for room in map_data.rooms
+        if room.room_id > 0
+    }
 
 
 async def async_setup_entry(
@@ -124,19 +211,14 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             state.working_status in ACTIVE_CLEANING_STATUSES
             or state.has_recent_active_working_status
         )
-        # is_paused (field 3.2) stays stale after docking — only trust
-        # during cleaning states. Paused takes priority over returning
-        # since the robot physically stops when paused mid-return.
         if state.is_paused and is_cleaning_state:
             return VacuumActivity.PAUSED
-        # Check returning before cleaning — robot keeps working_status=CLEANING
-        # while navigating back to dock (field 3.7=1 indicates returning)
         if state.is_returning:
             return VacuumActivity.RETURNING
+        if _is_dock_side(state):
+            return VacuumActivity.DOCKED
         if state.is_cleaning:
             return VacuumActivity.CLEANING
-        if state.is_docked:
-            return VacuumActivity.DOCKED
         activity = WORKING_STATUS_TO_ACTIVITY.get(state.working_status)
         if activity is not None:
             return activity
@@ -163,6 +245,65 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         and, while cleaning, written live via set_fan_speed).
         """
         return _FAN_LABELS.get(int(self.coordinator.clean_settings.fan))
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Return task context for dashboard cards and automations."""
+        state = self.coordinator.data
+        if state is None:
+            return None
+
+        attributes: dict[str, Any] = {
+            "task_status": _task_status(state),
+            "busy": is_narwal_task_busy(state),
+            "setup_available": is_setup_available(state),
+            "working_status": state.working_status.name.lower(),
+            "battery_level": state.battery_level,
+            "charging_state": _charging_state(state),
+            "charging_to_resume": state.is_charging_to_resume,
+            "docked": _is_dock_side(state),
+        }
+        room_names = _room_names_by_id(state)
+        if room_names:
+            attributes["rooms"] = [
+                {"id": room_id, "name": name}
+                for room_id, name in sorted(room_names.items(), key=lambda item: item[1].lower())
+            ]
+        active_cleaning_metrics = _has_active_cleaning_metrics(state)
+        active_room_plan = _has_active_room_plan(state)
+        if active_cleaning_metrics and state.current_room_id is not None:
+            attributes["current_room_id"] = state.current_room_id
+        if active_cleaning_metrics and state.task_progress_percent is not None:
+            attributes["progress"] = state.task_progress_percent
+        if active_cleaning_metrics and state.current_room_name:
+            attributes["current_room"] = state.current_room_name
+        active_room_ids = getattr(self.coordinator, "active_room_ids", None)
+        if not isinstance(active_room_ids, list):
+            active_room_ids = None
+        if active_room_plan and active_room_ids:
+            attributes["active_room_ids"] = active_room_ids
+            attributes["active_segments"] = [str(room_id) for room_id in active_room_ids]
+            attributes["active_rooms"] = [
+                room_names.get(room_id, str(room_id)) for room_id in active_room_ids
+            ]
+        elif active_cleaning_metrics and state.current_room_id is not None:
+            attributes["active_room_ids"] = [state.current_room_id]
+            attributes["active_segments"] = [str(state.current_room_id)]
+            attributes["active_rooms"] = [
+                state.current_room_name or str(state.current_room_id)
+            ]
+        if active_cleaning_metrics and state.cleaning_area > 0:
+            attributes["cleaning_area"] = round(state.cleaning_area, 2)
+        if active_cleaning_metrics and state.cleaning_time > 0:
+            attributes["cleaning_time"] = state.cleaning_time
+        if station_task := _station_task(state):
+            attributes["station_task"] = station_task
+        if state.dry_mop_remaining_time is not None:
+            attributes["drying_time_left"] = state.dry_mop_remaining_time
+        if state.mop_drying_target > 0:
+            attributes["mop_drying_elapsed"] = state.mop_drying_elapsed
+            attributes["mop_drying_target"] = state.mop_drying_target
+        return attributes
 
     # Timeout for action commands (start/stop/return) — robot may need
     # time to load map, plan route, etc., especially after waking.
@@ -218,6 +359,9 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 "Start command did not succeed (code=%s) — robot may not have started",
                 resp.result_code,
             )
+        elif room_ids:
+            self.coordinator.set_active_room_ids(room_ids)
+            self.async_write_ha_state()
 
     async def _all_room_ids(self) -> list[int]:
         """Every cleanable room id for a whole-house clean; fetches the map if not cached."""
@@ -245,6 +389,9 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         await self._ensure_awake()
         resp = await self.coordinator.client.stop()
         _LOGGER.info("Stop response: code=%s, success=%s", resp.result_code, resp.success)
+        if resp.success:
+            self.coordinator.set_active_room_ids(None)
+            self.async_write_ha_state()
 
     async def async_pause(self) -> None:
         """Pause cleaning."""
@@ -263,6 +410,8 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             _LOGGER.warning(
                 "Return-to-base did not succeed (code=%s)", resp.result_code,
             )
+        else:
+            self.async_write_ha_state()
 
     async def async_locate(self, **kwargs) -> None:
         """Locate the vacuum — robot says 'Robot is here'."""
@@ -399,8 +548,9 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 result_name, resp.result_code, room_ids,
             )
             return
-        self.coordinator.set_active_room_ids(room_ids)
-        self.async_write_ha_state()
+        else:
+            self.coordinator.set_active_room_ids(room_ids)
+            self.async_write_ha_state()
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -427,7 +577,13 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             if r.room_id > 0
         }
         last_set = {(s.id, s.name) for s in last}
-        if current_set != last_set:
+        if current_set == last_set:
+            self._last_segment_change_signature = None
+            return
+
+        signature = (tuple(sorted(last_set)), tuple(sorted(current_set)))
+        if signature != getattr(self, "_last_segment_change_signature", None):
+            self._last_segment_change_signature = signature
             _LOGGER.info(
                 "Segment change detected: %d -> %d rooms",
                 len(last_set), len(current_set),

@@ -109,7 +109,6 @@ def is_clean_session_context(state: NarwalState | None) -> bool:
         return False
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
-        or state.working_status == WorkingStatus.REMAPPING
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
         or _state_attr_is_true(state, "is_returning")
@@ -164,6 +163,16 @@ def can_start_cleaning(state: NarwalState | None) -> bool:
     if has_blocking_error(state):
         return False
     return state.is_docked and not is_narwal_task_busy(state)
+
+
+def is_setup_available(state: NarwalState | None) -> bool:
+    """Return True when start-time clean setup controls should be available."""
+    if state is None or state.working_status in (
+        WorkingStatus.UNKNOWN,
+        WorkingStatus.ERROR,
+    ):
+        return False
+    return not is_narwal_task_busy(state)
 
 
 def _map_refresh_key(map_data: object | None) -> tuple | None:
@@ -373,9 +382,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if is_clean_session_context(state):
             self._active_room_plan_pending_until = 0.0
             return
+        active_room_ids = getattr(self, "active_room_ids", None)
+        pending_until = getattr(self, "_active_room_plan_pending_until", 0.0)
         if (
-            self.active_room_ids
-            and self._active_room_plan_pending_until > time.monotonic()
+            active_room_ids
+            and pending_until > time.monotonic()
         ):
             return
         self.set_active_room_ids(None)
@@ -728,6 +739,20 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 _LOGGER.debug("Consumable info poll failed")
         else:
             self._consumable_poll_countdown -= 1
+
+        is_cleaning = (
+            self.client.state.is_cleaning
+            or self.client.state.has_recent_active_working_status
+            or (
+                not self.client.state.is_docked
+                and self.client.state.working_status in ACTIVE_CLEANING_STATUSES
+            )
+        )
+        if is_cleaning or self.client.state.is_station_active:
+            now = time.monotonic()
+            if now - self._last_task_details_refresh > ACTIVE_TASK_REFRESH_INTERVAL:
+                self._last_task_details_refresh = now
+                await self._refresh_task_details(cleaning=is_cleaning)
 
         # Manage fast poll countdown
         if self._fast_poll_remaining > 0:

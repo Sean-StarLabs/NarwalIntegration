@@ -108,6 +108,7 @@
         "state": {
           "cleaning": "Nettoyage",
           "remapping": "Reconfiguration de la carte",
+          "charging_to_resume": "Recharge avant reprise",
           "returning": "Retour",
           "paused": "En pause",
           "station_active": "Station active",
@@ -124,6 +125,20 @@
         "state": {
           "on": "Stationné",
           "off": "Non stationné"
+        }
+      },
+      "busy": {
+        "name": "Occupé",
+        "state": {
+          "on": "Occupé",
+          "off": "Inactif"
+        }
+      },
+      "setup_available": {
+        "name": "Configuration disponible",
+        "state": {
+          "on": "Disponible",
+          "off": "Occupé"
         }
       },
       "error": {
@@ -192,6 +207,9 @@
       }
     },
     "button": {
+      "stop_dock_task": {
+        "name": "Arrêter la tâche de la station"
+      },
       "empty_dustbin": {
         "name": "Vider le bac à poussière"
       },

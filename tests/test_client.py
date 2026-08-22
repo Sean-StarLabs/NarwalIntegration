@@ -28,6 +28,7 @@ from narwal_client.const import (
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PLAN_START,
     TOPIC_CMD_TAKE_PICTURE,
+    TOPIC_CMD_RESET_CONSUMABLE_INFO,
     TOPIC_ROBOT_TASK_STATUS,
     AmbientLightCtrlType,
     CommandResult,
@@ -179,6 +180,89 @@ class TestNarwalClientInit:
 
         assert result == image
         mock_send.assert_awaited_once_with(TOPIC_CMD_TAKE_PICTURE, timeout=15.0)
+
+    @pytest.mark.asyncio
+    async def test_stop_dock_task_uses_plain_force_end_and_clears_timer(self) -> None:
+        """Dock stop uses force_end, then refreshes stale mop drying state."""
+        client = NarwalClient("10.0.0.1")
+        client.state.dock_activity = 4
+        client.state.dry_mop_remaining_time = 600
+
+        async def refresh_timer() -> CommandResponse:
+            client.state.clear_drying_task()
+            return CommandResponse(result_code=0)
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch.object(
+                client, "get_dry_mop_remain_time", new_callable=AsyncMock
+            ) as mock_refresh,
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_send.return_value = CommandResponse(result_code=CommandResult.SUCCESS)
+            mock_refresh.side_effect = refresh_timer
+
+            result = await client.stop_dock_task()
+
+        assert result.result_code == CommandResult.SUCCESS
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_FORCE_END,
+            timeout=15.0,
+        )
+        mock_refresh.assert_awaited_once_with()
+        assert not client.state.is_station_active
+
+    @pytest.mark.asyncio
+    async def test_stop_dock_task_clears_stale_washing_activity(self) -> None:
+        """Dock stop clears old mop-washing flags after the robot accepts it."""
+        client = NarwalClient("10.0.0.1")
+        client.state.dock_activity = 3
+        client.state.station_activity = 3
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch.object(
+                client,
+                "get_dry_mop_remain_time",
+                new_callable=AsyncMock,
+                return_value=CommandResponse(result_code=CommandResult.SUCCESS),
+            ),
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_send.return_value = CommandResponse(result_code=CommandResult.SUCCESS)
+
+            result = await client.stop_dock_task()
+
+        assert result.result_code == CommandResult.SUCCESS
+        assert client.state.dock_activity == 0
+        assert client.state.station_activity == 0
+        assert not client.state.is_washing_mop
+        assert not client.state.is_station_active
+
+    @pytest.mark.asyncio
+    async def test_stop_dock_task_ignores_failed_timer_refresh_after_success(self) -> None:
+        """A failed optional timer refresh must not turn a successful stop into failure."""
+        client = NarwalClient("10.0.0.1")
+        client.state.dock_activity = 3
+        client.state.station_activity = 3
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch.object(
+                client,
+                "get_dry_mop_remain_time",
+                new_callable=AsyncMock,
+                side_effect=NarwalConnectionError("lost connection"),
+            ),
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock),
+        ):
+            mock_send.return_value = CommandResponse(result_code=CommandResult.SUCCESS)
+
+            result = await client.stop_dock_task()
+
+        assert result.success
+        assert client.state.dock_activity == 0
+        assert client.state.station_activity == 0
 
 
 class TestCommandResponseRouting:
@@ -694,6 +778,25 @@ class TestConsumableInfoQuery:
         mock_send.assert_awaited_once()
         assert client.state.maintain_items == [4]
         assert client.state.replace_items == [20]
+
+    @pytest.mark.asyncio
+    async def test_reset_consumable_info_refreshes_after_applied_result(self) -> None:
+        client = NarwalClient("127.0.0.1")
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch.object(
+                client,
+                "get_consumable_info",
+                new_callable=AsyncMock,
+            ) as refresh,
+        ):
+            mock_send.return_value = CommandResponse(result_code=CommandResult.APPLIED)
+
+            result = await client.reset_consumable_info(maintain_items=(4,))
+
+        assert result.success
+        refresh.assert_awaited_once_with()
 
 
 class TestTaskDetailQueries:
