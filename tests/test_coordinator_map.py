@@ -9,15 +9,20 @@ Covers MAP-04 (post-cleaning map refresh) validation gaps:
 from __future__ import annotations
 
 import time
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
 
 # Install HA stubs before any custom_components import
 import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
-from custom_components.narwal.narwal_client import NarwalState  # noqa: E402
+from custom_components.narwal.coordinator import (  # noqa: E402
+    NarwalCoordinator,
+    _map_refresh_key,
+)
+from custom_components.narwal.narwal_client import MapData, NarwalState  # noqa: E402
 from custom_components.narwal.narwal_client.const import WorkingStatus  # noqa: E402
 
 
@@ -45,6 +50,10 @@ class TestCoordinatorMapRefresh:
         coordinator._fast_poll_remaining = 0
         coordinator._listen_task = None
         coordinator._map_fetch_pending = False
+        coordinator._remapping_map_key = None
+        coordinator._remapping_map_refresh_pending = False
+        coordinator._remapping_map_refresh_attempts = 0
+        coordinator._remapping_map_next_refresh = 0.0
         coordinator._last_display_map_resub = 0.0
         coordinator._last_status_resub = 0.0
         coordinator._last_task_details_refresh = time.monotonic()
@@ -103,6 +112,174 @@ class TestCoordinatorMapRefresh:
 
         # No new background task created
         coordinator.config_entry.async_create_background_task.assert_not_called()
+
+    def test_remapping_with_existing_map_arms_post_remap_refresh(self) -> None:
+        """A remap tracks the old map without consuming retries while active."""
+        coordinator = self._make_coordinator()
+        state = NarwalState(working_status=WorkingStatus.REMAPPING)
+        state.map_data = MapData(map_id=1, width=2, height=2, compressed_map=b"old")
+
+        coordinator._on_state_update(state)
+
+        assert coordinator._map_fetch_pending is False
+        assert coordinator._remapping_map_key == _map_refresh_key(state.map_data)
+        assert coordinator._remapping_map_refresh_pending is True
+        assert coordinator._remapping_map_refresh_attempts == 0
+        coordinator.config_entry.async_create_background_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_missing_map_fetch_during_remapping_arms_post_remap_refresh(
+        self,
+    ) -> None:
+        """A mid-remap startup without a map still refreshes after remap exit."""
+        coordinator = self._make_coordinator()
+        old_map = MapData(map_id=1, width=2, height=2, compressed_map=b"old")
+        state = NarwalState(working_status=WorkingStatus.REMAPPING)
+        state.map_data = None
+
+        coordinator._on_state_update(state)
+
+        assert coordinator._remapping_map_refresh_pending is True
+        assert coordinator._remapping_map_key is None
+        assert coordinator._map_fetch_pending is True
+
+        async def get_map() -> MapData:
+            coordinator.client.state = NarwalState(working_status=WorkingStatus.REMAPPING)
+            coordinator.client.state.map_data = old_map
+            return old_map
+
+        coordinator.client.get_map = AsyncMock(side_effect=get_map)
+        coordinator.client.supports_broadcasts = False
+
+        await coordinator._fetch_static_map(reason="missing")
+
+        assert coordinator._remapping_map_refresh_pending is True
+        assert coordinator._remapping_map_key == _map_refresh_key(old_map)
+
+        coordinator.config_entry.async_create_background_task.reset_mock()
+        coordinator._prev_working_status = WorkingStatus.REMAPPING
+        exit_state = NarwalState(working_status=WorkingStatus.STANDBY)
+        exit_state.map_data = old_map
+
+        coordinator._on_state_update(exit_state)
+
+        assert coordinator._map_fetch_pending is True
+        coordinator.config_entry.async_create_background_task.assert_called_once()
+
+    def test_remapping_exit_triggers_static_map_refresh(self) -> None:
+        """Static map refresh starts once remapping has finished."""
+        coordinator = self._make_coordinator()
+        old_map = MapData(map_id=1, width=2, height=2, compressed_map=b"old")
+        coordinator._prev_working_status = WorkingStatus.REMAPPING
+        coordinator._remapping_map_key = _map_refresh_key(old_map)
+        coordinator._remapping_map_refresh_pending = True
+        coordinator._remapping_map_refresh_attempts = 2
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.map_data = old_map
+
+        coordinator._on_state_update(state)
+
+        assert coordinator._map_fetch_pending is True
+        assert coordinator._remapping_map_refresh_attempts == 0
+        assert coordinator._remapping_map_next_refresh == 0.0
+        coordinator.config_entry.async_create_background_task.assert_called_once()
+        assert (
+            "map_fetch"
+            in coordinator.config_entry.async_create_background_task.call_args[0][2]
+        )
+
+    def test_remapping_retry_continues_after_status_leaves_remapping(self) -> None:
+        """A delayed replacement map must not require another REMAPPING update."""
+        coordinator = self._make_coordinator()
+        old_map = MapData(map_id=1, width=2, height=2, compressed_map=b"old")
+        previous_key = _map_refresh_key(old_map)
+        coordinator._prev_working_status = WorkingStatus.STANDBY
+        coordinator._remapping_map_key = previous_key
+        coordinator._remapping_map_refresh_pending = True
+        coordinator._remapping_map_refresh_attempts = 1
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.map_data = old_map
+
+        coordinator._on_state_update(state)
+
+        assert coordinator._map_fetch_pending is True
+        coordinator.config_entry.async_create_background_task.assert_called_once()
+
+    def test_remapping_retry_waits_for_refresh_delay(self) -> None:
+        """Unchanged map retries are paced instead of refetched every broadcast."""
+        coordinator = self._make_coordinator()
+        old_map = MapData(map_id=1, width=2, height=2, compressed_map=b"old")
+        previous_key = _map_refresh_key(old_map)
+        coordinator._prev_working_status = WorkingStatus.STANDBY
+        coordinator._remapping_map_key = previous_key
+        coordinator._remapping_map_refresh_pending = True
+        coordinator._remapping_map_refresh_attempts = 1
+        coordinator._remapping_map_next_refresh = time.monotonic() + 60.0
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.map_data = old_map
+
+        coordinator._on_state_update(state)
+
+        assert coordinator._map_fetch_pending is False
+        coordinator.config_entry.async_create_background_task.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_remapping_static_map_refresh_retries_unchanged_map(self) -> None:
+        """An unchanged remap fetch remains eligible for a later retry."""
+        coordinator = self._make_coordinator()
+        old_map = MapData(map_id=1, width=2, height=2, compressed_map=b"old")
+        previous_key = _map_refresh_key(old_map)
+        coordinator.client.state.map_data = old_map
+        coordinator.client.get_map = AsyncMock(return_value=old_map)
+        coordinator.client.supports_broadcasts = False
+        coordinator._map_fetch_pending = True
+        coordinator._remapping_map_key = previous_key
+        coordinator._remapping_map_refresh_pending = True
+
+        await coordinator._fetch_static_map(
+            reason="remapping",
+            previous_key=previous_key,
+        )
+
+        assert coordinator._map_fetch_pending is False
+        assert coordinator._remapping_map_refresh_pending is True
+        assert coordinator._remapping_map_key == previous_key
+        assert coordinator._remapping_map_refresh_attempts == 1
+        assert coordinator._remapping_map_next_refresh > time.monotonic()
+
+    @pytest.mark.asyncio
+    async def test_remapping_static_map_refresh_clears_when_map_changes(self) -> None:
+        """A changed static map ends the remap refresh retry loop."""
+        coordinator = self._make_coordinator()
+        old_map = MapData(map_id=1, width=2, height=2, compressed_map=b"old")
+        new_map = MapData(map_id=1, width=2, height=2, compressed_map=b"new")
+        previous_key = _map_refresh_key(old_map)
+        coordinator.client.state.map_data = old_map
+
+        async def get_map() -> MapData:
+            coordinator.client.state.map_data = new_map
+            return new_map
+
+        coordinator.client.get_map = AsyncMock(side_effect=get_map)
+        coordinator.client.supports_broadcasts = False
+        coordinator._map_fetch_pending = True
+        coordinator._remapping_map_key = previous_key
+        coordinator._remapping_map_refresh_pending = True
+        coordinator._remapping_map_refresh_attempts = 1
+
+        await coordinator._fetch_static_map(
+            reason="remapping",
+            previous_key=previous_key,
+        )
+
+        assert coordinator._map_fetch_pending is False
+        assert coordinator._remapping_map_refresh_pending is False
+        assert coordinator._remapping_map_key is None
+        assert coordinator._remapping_map_refresh_attempts == 0
+        assert coordinator._remapping_map_next_refresh == 0.0
+        coordinator.async_set_updated_data.assert_called_once_with(
+            coordinator.client.state
+        )
 
     def test_cleaning_to_standby_triggers_dock_refresh(self) -> None:
         """Transition from CLEANING to STANDBY triggers dock status refresh."""

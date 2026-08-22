@@ -166,6 +166,20 @@ class TestNarwalClientInit:
 
         wake_burst.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_take_picture_accepts_zero_success_code(self) -> None:
+        """take_picture returns field 2 image bytes for any successful code."""
+        client = NarwalClient("10.0.0.1")
+        image = b"encrypted-image"
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(result_code=0, data={"2": image})
+
+            result = await client.take_picture()
+
+        assert result == image
+        mock_send.assert_awaited_once_with(TOPIC_CMD_TAKE_PICTURE, timeout=15.0)
+
 
 class TestCommandResponseRouting:
     """Command responses must be matched to their command topic."""

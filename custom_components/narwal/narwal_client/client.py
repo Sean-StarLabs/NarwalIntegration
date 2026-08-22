@@ -1839,7 +1839,7 @@ class NarwalClient:
         except Exception:
             _LOGGER.warning("take_picture command failed")
             return None
-        if resp.result_code == CommandResult.SUCCESS:
+        if resp.success:
             return resp.data.get("2")
         _LOGGER.warning("take_picture returned result_code=%d", resp.result_code)
         return None

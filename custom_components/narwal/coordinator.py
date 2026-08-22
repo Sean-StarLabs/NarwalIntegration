@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import time
 from dataclasses import dataclass
@@ -44,6 +45,8 @@ CONSUMABLE_POLL_EVERY = 30
 TOPIC_SUBSCRIPTION_TTL = 600.0
 TOPIC_RESUBSCRIBE_AFTER = 240.0
 ACTIVE_TASK_REFRESH_INTERVAL = 30.0
+REMAP_MAP_REFRESH_ATTEMPTS = 3
+REMAP_MAP_REFRESH_RETRY_DELAY = 10.0
 
 
 @dataclass
@@ -58,6 +61,31 @@ class CleanSettings:
     water: MopHumidity = MopHumidity.NORMAL
     mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL
     passes: int = 1
+
+
+def _map_refresh_key(map_data: object | None) -> tuple | None:
+    """Return a compact key for detecting static map replacement."""
+    if map_data is None:
+        return None
+    compressed = getattr(map_data, "compressed_map", b"")
+    if isinstance(compressed, bytes):
+        digest_data = compressed
+    elif isinstance(compressed, bytearray):
+        digest_data = bytes(compressed)
+    else:
+        try:
+            digest_data = bytes(compressed)
+        except (TypeError, ValueError):
+            digest_data = repr(compressed).encode("utf-8", errors="replace")
+    digest = hashlib.blake2s(digest_data, digest_size=8).hexdigest()
+    return (
+        getattr(map_data, "map_id", None),
+        getattr(map_data, "created_at", None) or 0,
+        getattr(map_data, "width", None),
+        getattr(map_data, "height", None),
+        getattr(map_data, "resolution", None),
+        digest,
+    )
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
@@ -96,6 +124,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._fast_poll_remaining = 0
         self._prev_working_status = WorkingStatus.UNKNOWN
         self._map_fetch_pending = False
+        self._remapping_map_key: tuple | None = None
+        self._remapping_map_refresh_pending = False
+        self._remapping_map_refresh_attempts = 0
+        self._remapping_map_next_refresh = 0.0
         self._last_display_map_resub: float = 0.0
         self._last_topic_subscribe: float = 0.0
         self._last_task_details_refresh: float = 0.0
@@ -175,13 +207,52 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         """Handle a push state update from the WebSocket listener."""
         # Push data arriving means robot is reachable — reset failure counter
         self._consecutive_failures = 0
+        previous_status = self._prev_working_status
+        is_remapping = state.working_status == WorkingStatus.REMAPPING
+
+        if is_remapping and previous_status != WorkingStatus.REMAPPING:
+            self._remapping_map_key = _map_refresh_key(state.map_data)
+            self._remapping_map_refresh_pending = True
+            self._remapping_map_refresh_attempts = 0
+            self._remapping_map_next_refresh = 0.0
+        elif (
+            is_remapping
+            and self._remapping_map_refresh_pending
+            and self._remapping_map_key is None
+        ):
+            self._remapping_map_key = _map_refresh_key(state.map_data)
+
+        if (
+            not is_remapping
+            and previous_status == WorkingStatus.REMAPPING
+            and self._remapping_map_refresh_pending
+        ):
+            self._remapping_map_refresh_attempts = 0
+            self._remapping_map_next_refresh = 0.0
+
+        if (
+            not is_remapping
+            and self._remapping_map_refresh_pending
+            and self._remapping_map_refresh_attempts < REMAP_MAP_REFRESH_ATTEMPTS
+            and not self._map_fetch_pending
+            and time.monotonic() >= self._remapping_map_next_refresh
+        ):
+            self._map_fetch_pending = True
+            self.config_entry.async_create_background_task(
+                self.hass,
+                self._fetch_static_map(
+                    reason="remapping",
+                    previous_key=self._remapping_map_key,
+                ),
+                f"{DOMAIN}_map_fetch",
+            )
 
         # Fetch static map if missing (get_map failed at startup)
         if state.map_data is None and not self._map_fetch_pending:
             self._map_fetch_pending = True
             self.config_entry.async_create_background_task(
                 self.hass,
-                self._fetch_missing_map(),
+                self._fetch_static_map(reason="missing"),
                 f"{DOMAIN}_map_fetch",
             )
 
@@ -197,7 +268,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 WorkingStatus.CHARGED,
                 WorkingStatus.DOCKED_V2,
             )
-            and self._prev_working_status
+            and previous_status
             in (*ACTIVE_CLEANING_STATUSES, WorkingStatus.TASK_COMPLETED)
         ):
             _LOGGER.info("Return-to-dock detected, refreshing dock status")
@@ -215,7 +286,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 and state.working_status in ACTIVE_CLEANING_STATUSES
             )
         )
-        is_remapping = state.working_status == WorkingStatus.REMAPPING
         if is_cleaning or is_remapping:
             display_age = self.client.last_display_map_age
             now = time.monotonic()
@@ -255,15 +325,56 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 state.working_status.name,
             )
 
-    async def _fetch_missing_map(self) -> None:
-        """Fetch static map when it's missing (get_map failed at startup)."""
+    async def _fetch_static_map(
+        self,
+        *,
+        reason: str,
+        previous_key: tuple | None = None,
+    ) -> None:
+        """Fetch static map after startup misses or remapping changes."""
         try:
             await self.client.get_map()
-            _LOGGER.info("Static map loaded (was missing at startup)")
         except Exception:
             _LOGGER.debug("Map fetch failed — will retry on next broadcast")
             self._map_fetch_pending = False
+            if reason == "remapping":
+                self._remapping_map_next_refresh = (
+                    time.monotonic() + REMAP_MAP_REFRESH_RETRY_DELAY
+                )
             return
+        self._map_fetch_pending = False
+
+        if reason == "remapping":
+            self._remapping_map_refresh_attempts += 1
+            new_key = _map_refresh_key(self.client.state.map_data)
+            if new_key is not None and (previous_key is None or new_key != previous_key):
+                self._remapping_map_refresh_pending = False
+                self._remapping_map_key = None
+                self._remapping_map_refresh_attempts = 0
+                self._remapping_map_next_refresh = 0.0
+                _LOGGER.info("Static map refreshed after remapping")
+            elif self._remapping_map_refresh_attempts >= REMAP_MAP_REFRESH_ATTEMPTS:
+                self._remapping_map_refresh_pending = False
+                self._remapping_map_key = None
+                self._remapping_map_next_refresh = 0.0
+                _LOGGER.debug(
+                    "Static map unchanged after remapping refresh attempts"
+                )
+            else:
+                self._remapping_map_next_refresh = (
+                    time.monotonic() + REMAP_MAP_REFRESH_RETRY_DELAY
+                )
+                _LOGGER.debug("Static map unchanged after remapping; will retry")
+        else:
+            if (
+                reason == "missing"
+                and self.client.state.working_status == WorkingStatus.REMAPPING
+                and self._remapping_map_refresh_pending
+                and self._remapping_map_key is None
+            ):
+                self._remapping_map_key = _map_refresh_key(self.client.state.map_data)
+            _LOGGER.info("Static map loaded (was missing at startup)")
+
         if self.client.supports_broadcasts:
             try:
                 if await self.client.subscribe_to_topics():
@@ -271,6 +382,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             except Exception:
                 _LOGGER.debug("Topic subscription failed after map load")
         self.async_set_updated_data(self.client.state)
+
+    async def _fetch_missing_map(self) -> None:
+        """Fetch static map when it's missing (get_map failed at startup)."""
+        await self._fetch_static_map(reason="missing")
 
     async def _resub_topics(self) -> None:
         """Re-send topic subscription to recover display_map during cleaning."""

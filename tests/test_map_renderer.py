@@ -11,17 +11,22 @@ from __future__ import annotations
 import io
 import zlib
 
+from unittest.mock import patch
+
+import narwal_client.map_renderer as map_renderer
 from narwal_client.map_renderer import (
     MAP_RENDER_SCALE,
-    render_base_map,
-    render_overlay,
-    decompress_map,
+    OBSTACLE_COLOR_DEFAULT,
+    OBSTACLE_COLORS,
     _decode_packed_varints,
     _scaled_coord,
-    OBSTACLE_COLORS,
-    OBSTACLE_COLOR_DEFAULT,
-    render_map_png,
+    _simplify_trail_segment,
+    _trail_render_segments,
     _transform_point,
+    decompress_map,
+    render_base_map,
+    render_map_png,
+    render_overlay,
 )
 from narwal_client.models import ObstacleInfo
 
@@ -174,6 +179,87 @@ class TestRenderOverlay:
         assert isinstance(result, bytes)
         assert result[:8] == b"\x89PNG\r\n\x1a\n"
 
+    def test_trail_rendering_skips_single_position_spike(self) -> None:
+        """A one-sample position jump is omitted from the display trail."""
+        trail = [
+            (10.0, 10.0),
+            (12.0, 12.0),
+            (85.0, 85.0),
+            (13.0, 13.0),
+            (16.0, 16.0),
+        ]
+
+        segments = _trail_render_segments(
+            trail,
+            map_width=100,
+            map_height=100,
+            max_grid_segment=24.0,
+        )
+
+        assert len(segments) == 1
+        assert max(point[0] for point in segments[0]) < 20
+        assert max(point[1] for point in segments[0]) < 20
+
+    def test_trail_rendering_splits_sustained_large_jump(self) -> None:
+        """A real sustained jump becomes a separate segment, not one long join."""
+        trail = [
+            (10.0, 10.0),
+            (12.0, 12.0),
+            (75.0, 75.0),
+            (78.0, 78.0),
+        ]
+
+        segments = _trail_render_segments(
+            trail,
+            map_width=100,
+            map_height=100,
+            max_grid_segment=24.0,
+        )
+
+        assert len(segments) == 2
+        assert segments[0][-1] == (12.0, 12.0)
+        assert segments[1][0] == (75.0, 75.0)
+
+    def test_trail_simplification_handles_deep_unbalanced_splits(self) -> None:
+        """Worst-case retained turns must not recurse once per split."""
+        points = [(0.0, 0.0)]
+        points.extend(
+            (float(index), float(1300 - index)) for index in range(1, 1300)
+        )
+        points.append((1300.0, 0.0))
+
+        with patch.object(
+            map_renderer,
+            "_grid_perpendicular_distance",
+            side_effect=lambda point, _start, _end: point[1],
+        ):
+            simplified = _simplify_trail_segment(points, 0.5)
+
+        assert simplified == points
+
+    def test_trail_simplification_input_is_bounded_per_render(self) -> None:
+        """Long retained trails are downsampled before display simplification."""
+        trail = [(float(index), 2.0) for index in range(5_000)]
+
+        with patch.object(
+            map_renderer,
+            "_simplify_trail_segment",
+            side_effect=lambda points, _tolerance: points,
+        ) as simplify:
+            segments = _trail_render_segments(
+                trail,
+                map_width=10_000,
+                map_height=10,
+                max_grid_segment=24.0,
+            )
+
+        simplify.assert_called_once()
+        simplified_input = simplify.call_args.args[0]
+        assert len(simplified_input) <= map_renderer.TRAIL_RENDER_MAX_SIMPLIFY_POINTS
+        assert simplified_input[0][0] < 2.0
+        assert simplified_input[-1][0] > 4_997.0
+        assert segments
+
     def test_no_robot_position(self) -> None:
         """render_overlay works with no robot position (trail only or empty)."""
         base = self._make_base_image()
@@ -188,7 +274,6 @@ class TestRenderOverlay:
 
     def test_does_not_modify_base(self) -> None:
         """render_overlay does not mutate the base image."""
-        from PIL import Image
         base = self._make_base_image()
         # Save original pixel for comparison
         original_pixel = base.getpixel((15, 15))
@@ -284,8 +369,6 @@ class TestObstacleRendering:
 
     def test_empty_obstacles_same_as_no_obstacles(self) -> None:
         """render_base_map with empty obstacles list produces same output as without."""
-        from PIL import Image
-
         width, height = 20, 20
         compressed = _make_room_grid(width, height, room_id=1)
 
@@ -317,8 +400,6 @@ class TestObstacleRendering:
 
     def test_obstacle_modifies_image(self) -> None:
         """An in-bounds obstacle should change some pixels compared to no-obstacle render."""
-        from PIL import Image
-
         width, height = 40, 40
         compressed = _make_room_grid(width, height, room_id=1)
 

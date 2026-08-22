@@ -749,7 +749,7 @@ class MapDisplayData:
 
         display_map positions are in decimeters (validated via live capture).
         Same coordinate system as get_map field 8 (dock position).
-          pixel = (x_dm * 10) / cm_per_pixel - origin_offset
+          pixel = (x_dm * 100) / resolution_mm_per_pixel - origin_offset
 
         Args:
             resolution: Map resolution in mm/pixel (e.g. 60).
@@ -763,9 +763,9 @@ class MapDisplayData:
             return None
         if resolution <= 0:
             return None
-        # Positions are in grid-offset units: pixel = raw - origin
-        px = self.robot_x - origin_x
-        py = self.robot_y - origin_y
+        scale = 100.0 / resolution
+        px = self.robot_x * scale - origin_x
+        py = self.robot_y * scale - origin_y
         return (px, py)
 
     @classmethod
@@ -873,6 +873,13 @@ class NarwalState:
     task_remaining_time: int = 0
     dry_mop_remaining_time: int | None = None
     current_room_aux_name: str = ""
+    cleaning_trail: list[tuple[float, float]] = field(default_factory=list)
+    cleaning_trail_map_key: tuple | None = None
+    last_cleaning_trail_record: float = 0.0
+    cleaning_trail_active: bool = False
+    cleaning_trail_last_cleaning_time: int = 0
+    cleaning_trail_inactive_since: float = 0.0
+    cleaning_trail_terminal_since: float = 0.0
 
     # Consumables / station / fault (base_status; present on dock and during cleaning)
     dust_bag_health: float = 0.0  # field 35 stationBagHealthScore (%)
@@ -1172,6 +1179,16 @@ class NarwalState:
             room_id = _optional_int(payload.get("6"))
             if room_id is not None:
                 self.current_room_id = room_id or None
+
+    def reset_cleaning_trail(self) -> None:
+        """Clear the in-memory map trail for a new cleaning session."""
+        self.cleaning_trail.clear()
+        self.cleaning_trail_map_key = None
+        self.last_cleaning_trail_record = 0.0
+        self.cleaning_trail_active = False
+        self.cleaning_trail_last_cleaning_time = 0
+        self.cleaning_trail_inactive_since = 0.0
+        self.cleaning_trail_terminal_since = 0.0
 
     def update_from_working_status(self, decoded: dict[str, Any]) -> None:
         """Update state from a decoded working_status message.
