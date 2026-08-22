@@ -580,6 +580,10 @@ class TestNarwalPassesNumber:
         coord = _coordinator(settings=CleanSettings(passes=2))
         assert NarwalPassesNumber(coord).native_value == 2
 
+    def test_available_when_idle(self) -> None:
+        coord = _coordinator(state=_state())
+        assert NarwalPassesNumber(coord).available
+
     def test_unavailable_during_active_clean(self) -> None:
         coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         assert not NarwalPassesNumber(coord).available

@@ -17,7 +17,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import NarwalConfigEntry
 from .const import DOCK_LIGHT_MODE_NAMES, DOCK_LIGHT_MODES, is_dock_light_supported
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity
+from .entity import NarwalDockEntity
 from .narwal_client import CommandResult
 
 _EFFECTS = tuple(mode for mode in DOCK_LIGHT_MODES if mode != "Off")
@@ -35,7 +35,7 @@ async def async_setup_entry(
     async_add_entities([NarwalDockLight(entry.runtime_data)])
 
 
-class NarwalDockLight(NarwalEntity, LightEntity):
+class NarwalDockLight(NarwalDockEntity, LightEntity):
     """Narwal dock ambient light with app effects."""
 
     _attr_translation_key = "dock_light"

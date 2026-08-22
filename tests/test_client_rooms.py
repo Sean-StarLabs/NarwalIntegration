@@ -200,7 +200,6 @@ class TestStartRooms:
                     )
                 },
             )
-
         mock_send.assert_awaited_once()
         param = _items(_task(mock_send.await_args.kwargs["payload"]))[0]["2"]
         assert param["1"] == 3

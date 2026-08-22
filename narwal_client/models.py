@@ -19,8 +19,6 @@ from .const import (
     ACTIVE_CLEANING_STATUSES,
     ACTIVE_OFF_DOCK_STATUSES,
     CommandResult,
-    FanLevel,
-    MopHumidity,
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
     TOPIC_CMD_GET_ROBOT_TASK_STATUS,
@@ -29,6 +27,7 @@ from .const import (
 )
 
 _ACTIVE_WORKING_STATUS_TTL = 15.0
+_DRYING_EMPTY_SUPPRESSION_TTL = 120.0
 
 
 @dataclass
@@ -257,6 +256,19 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _mop_drying_timer_pair(decoded: dict[str, Any]) -> tuple[int, int] | None:
+    """Return the mop-drying timer pair as elapsed/target seconds."""
+    elapsed = _optional_int(decoded.get("8"))
+    target = _optional_int(decoded.get("9"))
+    if elapsed is None or target is None:
+        return None
+    if target <= 0 or elapsed < 0 or elapsed > target:
+        return None
+    if elapsed > 0 or "19" in decoded:
+        return elapsed, target
+    return None
 
 
 def _parse_obstacles(field32: dict) -> list[ObstacleInfo]:
@@ -872,6 +884,11 @@ class NarwalState:
     task_elapsed_time: int = 0
     task_remaining_time: int = 0
     dry_mop_remaining_time: int | None = None
+    mop_drying_elapsed: int = 0
+    mop_drying_target: int = 0
+    last_dry_mop_empty_time: float = 0.0
+    last_battery_change_time: float = 0.0
+    battery_level_increasing: bool = False
     current_room_aux_name: str = ""
     cleaning_trail: list[tuple[float, float]] = field(default_factory=list)
     cleaning_trail_map_key: tuple | None = None
@@ -1029,32 +1046,43 @@ class NarwalState:
         # Values differ across firmware versions:
         #   Old FW: dock_sub_state=1, dock_field11=2, dock_field47=3
         #   v01.07.23.00: dock_sub_state absent, dock_field11=3, dock_field47=1
-        if self.dock_sub_state == 1:
+        if self.station_activity > 0:
             return True
         if self.dock_activity > 0:
             return True
-        if self.station_activity > 0:
-            return True
-        if self.dock_field11 >= 2:
-            return True
-        if self.dock_field47 in (1, 3):
-            return True
-        return False
+        return self.has_dock_presence_signal
 
     @property
-    def has_explicit_off_dock_signal(self) -> bool:
-        """True when the latest base-status payload says the robot is off dock."""
-        field3 = self.raw_base_status.get("3")
-        if isinstance(field3, list):
-            field3 = field3[0] if field3 else None
-        field3_off_dock = (
-            isinstance(field3, dict)
-            and (field3.get("10") == 2 or field3.get("3") == 2)
-        )
+    def has_dock_presence_signal(self) -> bool:
+        """True when raw status fields explicitly place the robot on the dock."""
         return (
-            field3_off_dock
-            or self.raw_base_status.get("11") == 1
-            or self.raw_base_status.get("47") == 2
+            self.dock_sub_state == 1
+            or self.dock_presence in (1, 6)
+            or self.dock_field11 >= 2
+            or self.dock_field47 in (1, 3)
+        )
+
+    @property
+    def has_off_dock_signal(self) -> bool:
+        """True when raw status fields explicitly place the robot away from the dock."""
+        return (
+            self.working_status in ACTIVE_CLEANING_STATUSES
+            or self.working_status == WorkingStatus.REMAPPING
+            or self.dock_sub_state == 2
+            or self.dock_presence == 2
+            or self.dock_field11 == 1
+            or self.dock_field47 == 2
+        )
+
+    @property
+    def dock_state_unknown(self) -> bool:
+        """True when startup/status data has not confirmed dock position yet."""
+        return (
+            self.working_status == WorkingStatus.UNKNOWN
+            and not self.has_dock_presence_signal
+            and not self.has_off_dock_signal
+            and self.dock_activity <= 0
+            and self.station_activity <= 0
         )
 
     @property
@@ -1083,9 +1111,56 @@ class NarwalState:
     @property
     def is_station_active(self) -> bool:
         """True when the base station is running a dock-side task."""
-        return self.station_activity > 0 or (
+        if self.is_washing_mop or self.is_drying_mop:
+            return True
+        return self.station_activity > 0
+
+    @property
+    def is_washing_mop(self) -> bool:
+        """True when the station is washing the mop."""
+        return self.station_activity in (2, 3) or self.dock_activity == 3
+
+    @property
+    def is_drying_mop(self) -> bool:
+        """True when the station is drying the mop."""
+        if (
             self.dry_mop_remaining_time is not None
             and self.dry_mop_remaining_time > 0
+            and self.has_dock_presence_signal
+        ):
+            return True
+        if self.dock_activity != 4:
+            return False
+        return not self._drying_activity_suppressed
+
+    @property
+    def _drying_activity_suppressed(self) -> bool:
+        """True after a timer query confirms there is no mop drying."""
+        return (
+            self.last_dry_mop_empty_time > 0
+            and time.monotonic() - self.last_dry_mop_empty_time
+            <= _DRYING_EMPTY_SUPPRESSION_TTL
+        )
+
+    @property
+    def battery_recently_increasing(self) -> bool:
+        """True when the reported battery has recently risen."""
+        return (
+            self.battery_level_increasing
+            and self.last_battery_change_time > 0
+            and time.monotonic() - self.last_battery_change_time <= 600
+        )
+
+    @property
+    def is_charging_to_resume(self) -> bool:
+        """True when an active clean appears to be docked charging before resume."""
+        return (
+            self.working_status in ACTIVE_CLEANING_STATUSES
+            and self.battery_recently_increasing
+            and self.has_dock_presence_signal
+            and self.battery_level < 80
+            and not self.is_paused
+            and not self.is_returning
         )
 
     @property
@@ -1190,6 +1265,22 @@ class NarwalState:
         self.cleaning_trail_inactive_since = 0.0
         self.cleaning_trail_terminal_since = 0.0
 
+    def clear_drying_task(self) -> None:
+        """Clear mop drying fields after the dock reports no remaining time."""
+        self.dry_mop_remaining_time = None
+        self.mop_drying_elapsed = 0
+        self.mop_drying_target = 0
+        if self.dock_activity == 4:
+            self.dock_activity = 0
+        self.last_dry_mop_empty_time = time.monotonic()
+
+    def clear_washing_task(self) -> None:
+        """Clear mop washing fields after a confirmed station-task stop."""
+        if self.dock_activity == 3:
+            self.dock_activity = 0
+        if self.station_activity in (2, 3):
+            self.station_activity = 0
+
     def update_from_working_status(self, decoded: dict[str, Any]) -> None:
         """Update state from a decoded working_status message.
 
@@ -1231,6 +1322,23 @@ class NarwalState:
                 self.current_room_id = room_id if room_id != 0 else None
             except (ValueError, TypeError):
                 pass
+        station_timer = _mop_drying_timer_pair(decoded)
+        station_timer_active = False
+        if station_timer is not None:
+            self.mop_drying_elapsed, self.mop_drying_target = station_timer
+            if self.mop_drying_target > 0:
+                remaining = max(
+                    self.mop_drying_target - self.mop_drying_elapsed,
+                    0,
+                )
+                if remaining > 0:
+                    station_timer_active = True
+                    self.dry_mop_remaining_time = remaining
+                    self.last_dry_mop_empty_time = 0.0
+                else:
+                    self.clear_drying_task()
+        if station_timer_active:
+            active_payload = False
         metrics_can_mark_active = (
             self.working_status in ACTIVE_CLEANING_STATUSES
             or self.working_status == WorkingStatus.UNKNOWN
@@ -1248,6 +1356,9 @@ class NarwalState:
             self.dock_sub_state = 0
             self.dock_activity = 0
             self.station_activity = 0
+            self.dry_mop_remaining_time = None
+            self.mop_drying_elapsed = 0
+            self.mop_drying_target = 0
             self.dock_presence = 2
             self.dock_field11 = 1
             self.dock_field47 = 2
@@ -1382,7 +1493,11 @@ class NarwalState:
             # (e.g. 1118175232 → 83.0%; bbp may return int or float)
             bat = _to_float32(decoded["2"])
             if bat is not None:
-                self.battery_level = round(bat)
+                battery_level = round(bat)
+                if self.battery_level > 0 and battery_level != self.battery_level:
+                    self.battery_level_increasing = battery_level > self.battery_level
+                    self.last_battery_change_time = time.monotonic()
+                self.battery_level = battery_level
         self._update_consumables(decoded)
         if "13" in decoded:
             raw = decoded["13"]
@@ -1512,7 +1627,12 @@ class NarwalState:
                 return
             self._update_task_detail_payload(payload)
         elif topic == TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME:
-            self.dry_mop_remaining_time = _optional_int(decoded.get("2"))
+            remaining = _optional_int(decoded.get("2"))
+            if remaining is not None and remaining > 0:
+                self.dry_mop_remaining_time = remaining
+                self.last_dry_mop_empty_time = 0.0
+            else:
+                self.clear_drying_task()
 
     def update_from_consumable_info(self, decoded: dict[str, Any]) -> None:
         """Parse a consumable/get_consumable_info response into maintain/replace alert lists.

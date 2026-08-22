@@ -6,8 +6,8 @@ on the NarwalVacuum entity using HA stubs.
 
 from __future__ import annotations
 
-import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+import time
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -26,6 +26,7 @@ from custom_components.narwal.vacuum import NarwalVacuum  # noqa: E402
 import sys
 
 Segment = sys.modules["homeassistant.components.vacuum"].Segment
+VacuumActivity = sys.modules["homeassistant.components.vacuum"].VacuumActivity
 
 
 def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
@@ -47,6 +48,11 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
         }
     )
 
+    def set_active_room_ids(room_ids: list[int] | None) -> None:
+        coordinator.active_room_ids = room_ids
+
+    coordinator.set_active_room_ids.side_effect = set_active_room_ids
+
     vac = NarwalVacuum.__new__(NarwalVacuum)
     vac.coordinator = coordinator
     vac._attr_unique_id = "test_dev_001"
@@ -64,7 +70,122 @@ def _active_clean_state() -> NarwalState:
     """Return a state whose working_status still looks like active cleaning."""
     state = NarwalState()
     state.working_status = WorkingStatus.CLEANING_ALT
+    state.last_active_working_status_time = time.monotonic()
     return state
+
+
+class TestVacuumActivity:
+    """Tests for mapping Narwal task context to HA vacuum activity."""
+
+    def test_charging_to_resume_reports_docked_activity(self) -> None:
+        state = _active_clean_state()
+        state.battery_level = 25
+        state.battery_level_increasing = True
+        state.last_battery_change_time = time.monotonic()
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        vac = _make_vacuum(state=state)
+
+        assert state.is_charging_to_resume
+        assert vac.activity == VacuumActivity.DOCKED
+        assert vac.extra_state_attributes["task_status"] == "charging_to_resume"
+        assert vac.extra_state_attributes["docked"] is True
+
+    def test_paused_returning_task_reports_paused_activity(self) -> None:
+        state = _active_clean_state()
+        state.is_paused = True
+        state.is_returning_to_dock = True
+        state.dock_sub_state = 2
+        vac = _make_vacuum(state=state)
+
+        assert state.is_returning
+        assert vac.activity == VacuumActivity.PAUSED
+        assert vac.extra_state_attributes["task_status"] == "paused"
+
+    def test_remapping_reports_remapping_task_status(self) -> None:
+        state = NarwalState()
+        state.working_status = WorkingStatus.REMAPPING
+        vac = _make_vacuum(state=state)
+
+        assert vac.extra_state_attributes["task_status"] == "remapping"
+
+    def test_dock_drying_during_open_task_reports_docked_activity(self) -> None:
+        state = _active_clean_state()
+        state.dry_mop_remaining_time = 12_503
+        state.mop_drying_elapsed = 5_497
+        state.mop_drying_target = 18_000
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        vac = _make_vacuum(state=state)
+
+        assert state.is_cleaning
+        assert state.is_station_active
+        assert vac.activity == VacuumActivity.DOCKED
+        assert vac.extra_state_attributes["station_task"] == "drying_mop"
+        assert vac.extra_state_attributes["docked"] is True
+
+    def test_dock_washing_reports_docked_activity(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14, "12": 3}, "11": 3, "47": 1})
+        vac = _make_vacuum(state=state)
+
+        assert vac.activity == VacuumActivity.DOCKED
+        assert vac.extra_state_attributes["task_status"] == "station_active"
+        assert vac.extra_state_attributes["station_task"] == "washing_mop"
+        assert vac.extra_state_attributes["docked"] is True
+
+    def test_stale_clean_details_hidden_after_clean_ends(self) -> None:
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.task_progress_percent = 72
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+        state.cleaning_area = 12.5
+        state.cleaning_time = 900
+        state.station_activity = 4
+        vac = _make_vacuum(state=state)
+
+        attrs = vac.extra_state_attributes
+
+        assert attrs["task_status"] == "station_active"
+        assert attrs["station_task"] == "drying_or_disinfecting"
+        assert "progress" not in attrs
+        assert "current_room_id" not in attrs
+        assert "current_room" not in attrs
+        assert "active_room_ids" not in attrs
+        assert "cleaning_area" not in attrs
+        assert "cleaning_time" not in attrs
+
+    def test_stale_dock_timer_does_not_hide_active_clean_controls(self) -> None:
+        state = _active_clean_state()
+        state.dry_mop_remaining_time = 600
+        state.mop_drying_elapsed = 120
+        state.mop_drying_target = 720
+        state.dock_field11 = 1
+        state.dock_field47 = 2
+        vac = _make_vacuum(state=state)
+
+        assert not state.is_station_active
+        assert vac.activity == VacuumActivity.CLEANING
+        assert vac.extra_state_attributes["task_status"] == "cleaning"
+
+    def test_active_clean_details_remain_visible(self) -> None:
+        state = _active_clean_state()
+        state.task_progress_percent = 72
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+        state.cleaning_area = 12.5
+        state.cleaning_time = 900
+        vac = _make_vacuum(state=state)
+
+        attrs = vac.extra_state_attributes
+
+        assert attrs["progress"] == 72
+        assert attrs["current_room_id"] == 4
+        assert attrs["current_room"] == "Kitchen"
+        assert attrs["active_room_ids"] == [4]
+        assert attrs["cleaning_area"] == 12.5
+        assert attrs["cleaning_time"] == 900
 
 
 class TestAsyncGetSegments:
@@ -209,6 +330,28 @@ class TestAsyncCleanSegments:
                 9: RoomCleanSettings(),
             },
         )
+        assert vac.coordinator.active_room_ids == [11, 9]
+
+
+class TestVacuumReturnToBase:
+    async def test_preserves_active_room_plan_while_returning(self) -> None:
+        """Return-to-base starts a return phase; the coordinator clears rooms later."""
+        state = _active_clean_state()
+        state.is_returning_to_dock = True
+        state.dock_sub_state = 2
+        vac = _make_vacuum(state=state)
+        vac.coordinator.active_room_ids = [11, 9]
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.wake = AsyncMock()
+        vac.coordinator.client.return_to_base = AsyncMock(
+            return_value=MagicMock(result_code=1, success=True)
+        )
+
+        await vac.async_return_to_base()
+
+        assert vac.coordinator.active_room_ids == [11, 9]
+        vac.coordinator.set_active_room_ids.assert_not_called()
+        vac.async_write_ha_state.assert_called_once()
 
     async def test_non_numeric_segment_id_raises(self) -> None:
         state = NarwalState()
@@ -334,6 +477,26 @@ class TestCheckSegmentChanges:
 
         vac.async_create_segments_issue.assert_not_called()
 
+    def test_repeated_same_change_only_reports_once(self) -> None:
+        """Does not spam repairs/logs for an unchanged segment mismatch."""
+        rooms_old = [
+            Segment(id="1", name="Kitchen"),
+            Segment(id="2", name="Bathroom"),
+        ]
+        rooms_new = [
+            RoomInfo(room_id=1, name="Kitchen", room_sub_type=4, category=1),
+            RoomInfo(room_id=3, name="Study", room_sub_type=5, category=1),
+        ]
+        state = NarwalState()
+        state.map_data = MapData(rooms=rooms_new)
+        vac = _make_vacuum(state=state)
+        vac.last_seen_segments = rooms_old
+
+        vac._check_segment_changes()
+        vac._check_segment_changes()
+
+        vac.async_create_segments_issue.assert_called_once()
+
     def test_no_map_data_does_nothing(self) -> None:
         """When map_data is None but last_seen_segments exists, does nothing."""
         state = NarwalState()
@@ -367,6 +530,7 @@ class TestAsyncStartWholeHouse:
         vac.coordinator.client.start_rooms.assert_awaited_once()
         assert vac.coordinator.client.start_rooms.await_args.args[0] == [1, 2]
         vac.coordinator.client.start.assert_not_called()
+        assert vac.coordinator.active_room_ids == [1, 2]
 
     async def test_whole_house_start_passes_room_profiles(self) -> None:
         """Whole-house start uses room-specific profiles for each room."""

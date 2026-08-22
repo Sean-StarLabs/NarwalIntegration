@@ -710,7 +710,12 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             return False
         if key == "suction" and self._selected_mode not in LEGACY_VACUUM_MODES:
             return False
-        return key not in LEGACY_START_ONLY_SETTINGS or not self._is_cleaning_or_paused
+        if key in LEGACY_START_ONLY_SETTINGS:
+            return can_edit_pending_clean_settings(self.coordinator.data)
+        return (
+            can_edit_pending_clean_settings(self.coordinator.data)
+            or self._is_cleaning_or_paused
+        )
 
     def _apply_option(self, option: str) -> None:
         """Store a legacy option and mirror it into clean settings."""
@@ -788,13 +793,17 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             raise HomeAssistantError("Scrub level is not available in vacuum-only mode")
         if key == "suction" and self._selected_mode not in LEGACY_VACUUM_MODES:
             raise HomeAssistantError("Suction is not available in mop-only mode")
-        if key in LEGACY_START_ONLY_SETTINGS and self._is_cleaning_or_paused:
-            raise HomeAssistantError("This Narwal setting cannot be changed mid-clean")
-        if key == "suction" and option == "AI" and self._is_cleaning_or_paused:
+        setup_available = can_edit_pending_clean_settings(self.coordinator.data)
+        live_available = self._is_cleaning_or_paused
+        if key in LEGACY_START_ONLY_SETTINGS and not setup_available:
+            raise HomeAssistantError("This Narwal setting cannot be changed right now")
+        if key not in LEGACY_START_ONLY_SETTINGS and not setup_available and not live_available:
+            raise HomeAssistantError("This Narwal setting cannot be changed right now")
+        if key == "suction" and option == "AI" and not setup_available:
             raise HomeAssistantError("AI suction cannot be selected mid-clean")
 
         response = None
-        if self._is_cleaning_or_paused:
+        if not setup_available and live_available:
             if key == "suction":
                 response = await self.coordinator.client.set_fan_speed(
                     LEGACY_SUCTION_MAP[option]

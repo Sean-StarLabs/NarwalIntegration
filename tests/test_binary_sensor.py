@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import time
 from unittest.mock import MagicMock
 
 import tests.ha_stubs
 
 tests.ha_stubs.install()
 
+from narwal_client.const import WorkingStatus  # noqa: E402
 from narwal_client.models import NarwalState  # noqa: E402
 from custom_components.narwal.binary_sensor import (  # noqa: E402
     BINARY_SENSOR_DESCRIPTIONS,
     NarwalBinarySensor,
+    NarwalDockedSensor,
 )
 
 _DESCS = {d.key: d for d in BINARY_SENSOR_DESCRIPTIONS}
@@ -25,6 +28,14 @@ def _binary_sensor(state: NarwalState, key: str) -> NarwalBinarySensor:
     coordinator.config_entry.title = "Narwal Test"
     coordinator.client.state.firmware_version = "1.0.0"
     return NarwalBinarySensor(coordinator, _DESCS[key])
+
+
+def _docked_sensor(state: NarwalState) -> NarwalDockedSensor:
+    coordinator = MagicMock()
+    coordinator.data = state
+    sensor = NarwalDockedSensor.__new__(NarwalDockedSensor)
+    sensor.coordinator = coordinator
+    return sensor
 
 
 def test_error_gated_on_base_status_seen() -> None:
@@ -119,3 +130,71 @@ def test_unspecified_is_not_a_problem() -> None:
     s = NarwalState()
     s.update_from_base_status({"24": 0})
     assert fn(s) is False
+
+
+def test_busy_and_setup_available_when_idle() -> None:
+    """Idle/docked robots expose setup controls."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+
+    assert _DESCS["busy"].value_fn(state) is False
+    assert _DESCS["setup_available"].value_fn(state) is True
+
+
+def test_busy_and_setup_unavailable_when_cleaning() -> None:
+    """Active cleaning hides start-time setup controls."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.CLEANING_ALT
+    state.last_active_working_status_time = time.monotonic()
+
+    assert _DESCS["busy"].value_fn(state) is True
+    assert _DESCS["setup_available"].value_fn(state) is False
+
+
+def test_busy_and_setup_unavailable_when_station_active() -> None:
+    """Dock-side tasks also hide start-time setup controls."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+    state.dry_mop_remaining_time = 1_800
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+
+    assert state.is_station_active
+    assert _DESCS["busy"].value_fn(state) is True
+    assert _DESCS["setup_available"].value_fn(state) is False
+
+
+def test_setup_unavailable_when_state_unknown() -> None:
+    """Unknown startup state is not treated as configurable."""
+    state = NarwalState()
+
+    assert state.working_status == WorkingStatus.UNKNOWN
+    assert _DESCS["busy"].value_fn(state) is False
+    assert _DESCS["setup_available"].value_fn(state) is False
+
+
+def test_docked_sensor_on_when_charging_to_resume() -> None:
+    """A mid-task recharge is physically dock-side even if working_status is cleaning."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.CLEANING_ALT
+    state.battery_level = 25
+    state.battery_level_increasing = True
+    state.last_battery_change_time = time.monotonic()
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+
+    assert state.is_charging_to_resume
+    assert _docked_sensor(state).is_on is True
+
+
+def test_docked_sensor_on_when_station_task_active() -> None:
+    """Dock-side tasks imply the robot/dock should present as docked."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.CLEANING_ALT
+    state.last_active_working_status_time = time.monotonic()
+    state.dry_mop_remaining_time = 12_503
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+
+    assert state.is_station_active
+    assert _docked_sensor(state).is_on is True
