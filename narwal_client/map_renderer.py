@@ -111,6 +111,9 @@ FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
     "arial.ttf",
 )
+TRAIL_RECENT_POINTS = 200
+TRAIL_RENDER_MIN_GRID_DELTA = 1.0
+TRAIL_RENDER_SMOOTHING_PASSES = 2
 
 
 def _opaque(color: tuple[int, int, int]) -> tuple[int, int, int, int]:
@@ -846,6 +849,105 @@ def render_base_map(
     return img
 
 
+def _trail_render_segments(
+    trail: list[tuple[float, float]],
+    map_width: float,
+    map_height: int,
+    max_grid_segment: float,
+) -> list[list[tuple[float, float]]]:
+    """Return display-ready trail segments from raw grid samples."""
+    segments: list[list[tuple[float, float]]] = []
+    current: list[tuple[float, float]] = []
+
+    for index, point in enumerate(trail):
+        if not _valid_trail_point(point, map_width, map_height):
+            if len(current) >= 2:
+                segments.append(_smooth_trail_segment(current))
+            current = []
+            continue
+
+        if not current:
+            current.append(point)
+            continue
+
+        distance = _grid_distance(current[-1], point)
+        if distance < TRAIL_RENDER_MIN_GRID_DELTA:
+            continue
+
+        if distance > max_grid_segment:
+            next_point = trail[index + 1] if index + 1 < len(trail) else None
+            if (
+                next_point is not None
+                and _valid_trail_point(next_point, map_width, map_height)
+                and _grid_distance(current[-1], next_point) <= max_grid_segment
+            ):
+                continue
+            if len(current) >= 2:
+                segments.append(_smooth_trail_segment(current))
+            current = [point]
+            continue
+
+        current.append(point)
+
+    if len(current) >= 2:
+        segments.append(_smooth_trail_segment(current))
+
+    return segments
+
+
+def _valid_trail_point(
+    point: tuple[float, float],
+    map_width: float,
+    map_height: int,
+) -> bool:
+    grid_x, grid_y = point
+    return (
+        math.isfinite(grid_x)
+        and math.isfinite(grid_y)
+        and 0 <= grid_x < map_width
+        and 0 <= grid_y < map_height
+    )
+
+
+def _smooth_trail_segment(
+    points: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    """Round visual corners in a trail segment without changing raw storage."""
+    smoothed = points
+    for _ in range(TRAIL_RENDER_SMOOTHING_PASSES):
+        if len(smoothed) < 3:
+            break
+        next_points = [smoothed[0]]
+        for first, second in zip(smoothed, smoothed[1:], strict=False):
+            next_points.extend(
+                (
+                    _interpolate_grid_point(first, second, 0.25),
+                    _interpolate_grid_point(first, second, 0.75),
+                )
+            )
+        next_points.append(smoothed[-1])
+        smoothed = next_points
+    return smoothed
+
+
+def _interpolate_grid_point(
+    first: tuple[float, float],
+    second: tuple[float, float],
+    fraction: float,
+) -> tuple[float, float]:
+    return (
+        first[0] + (second[0] - first[0]) * fraction,
+        first[1] + (second[1] - first[1]) * fraction,
+    )
+
+
+def _grid_distance(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> float:
+    return math.hypot(second[0] - first[0], second[1] - first[1])
+
+
 def render_overlay(
     base_img: "Image.Image",
     height: int,
@@ -912,53 +1014,37 @@ def render_overlay(
 
     # Draw trail, splitting at invalid samples or impossible jumps.
     if trail and len(trail) >= 2:
-        recent_start = max(len(trail) - 200, 0)
+        trail_segments = _trail_render_segments(
+            trail,
+            map_width,
+            height,
+            max_grid_segment,
+        )
+        total_points = sum(len(segment) for segment in trail_segments)
+        recent_start = max(total_points - TRAIL_RECENT_POINTS, 0)
         trail_width = max(3, int(round(2 * scale)))
-        previous_grid: tuple[float, float] | None = None
-        previous_point: tuple[int, int] | None = None
-        for i in range(len(trail) - 1):
-            grid_x, grid_y = trail[i]
-            if not is_valid_grid_point(grid_x, grid_y):
-                previous_grid = None
-                previous_point = None
+        seen_points = 0
+        for segment in trail_segments:
+            line = [point for grid in segment if (point := final_point(*grid))]
+            if len(line) < 2:
+                seen_points += len(segment)
                 continue
-
-            point = final_point(grid_x, grid_y)
-            if point is None:
-                previous_grid = None
-                previous_point = None
-                continue
-
-            if previous_grid is not None and previous_point is not None:
-                distance = math.hypot(
-                    grid_x - previous_grid[0],
-                    grid_y - previous_grid[1],
+            draw.line(
+                line,
+                fill=(215, 220, 225, 130),
+                width=trail_width,
+                joint="curve",
+            )
+            segment_recent_start = max(recent_start - seen_points, 0)
+            recent_line = line[segment_recent_start:]
+            if len(recent_line) >= 2:
+                draw.line(
+                    recent_line,
+                    fill=(255, 255, 255, 220),
+                    width=trail_width,
+                    joint="curve",
                 )
-                if distance <= max_grid_segment:
-                    color = (
-                        (255, 255, 255, 220)
-                        if i >= recent_start
-                        else (215, 220, 225, 130)
-                    )
-                    draw.line([previous_point, point], fill=color, width=trail_width)
-
-            previous_grid = (grid_x, grid_y)
-            previous_point = point
-
-        last_grid_x, last_grid_y = trail[-1]
-        if previous_grid is not None and is_valid_grid_point(last_grid_x, last_grid_y):
-            last_point = final_point(last_grid_x, last_grid_y)
-            if last_point is not None:
-                distance = math.hypot(
-                    last_grid_x - previous_grid[0],
-                    last_grid_y - previous_grid[1],
-                )
-                if distance <= max_grid_segment:
-                    draw.line(
-                        [previous_point, last_point],
-                        fill=(255, 255, 255, 220),
-                        width=trail_width,
-                    )
+            seen_points += len(segment)
 
     if room_labels:
         font = _load_font(ImageFont, ROOM_LABEL_FONT_SCALE * int(round(scale)))
@@ -975,7 +1061,9 @@ def render_overlay(
         if point is not None:
             dx, dy = point
             if 0 <= dx < img.width and 0 <= dy < img.height:
-                robot_radius = max(5 * int(round(scale)), min(img.width, img.height) // 64)
+                robot_radius = max(
+                    5 * int(round(scale)), min(img.width, img.height) // 64
+                )
                 dock_size = robot_radius * 2
                 _draw_dock(draw, dx, dy, dock_size)
 

@@ -899,6 +899,11 @@ class NarwalState:
     task_elapsed_time: int = 0
     dry_mop_remaining_time: int | None = None
     current_room_aux_name: str = ""
+    cleaning_trail: list[tuple[float, float]] = field(default_factory=list)
+    last_cleaning_trail_record: float = 0.0
+    cleaning_trail_active: bool = False
+    cleaning_trail_last_cleaning_time: int = 0
+    cleaning_trail_inactive_since: float = 0.0
 
     # Consumables / station / fault (base_status; present on dock and during cleaning)
     dust_bag_health: float = 0.0  # field 35 stationBagHealthScore (%)
@@ -1092,6 +1097,14 @@ class NarwalState:
             if room.room_id == self.current_room_id:
                 return room.display_name
         return self.current_room_aux_name or None
+
+    def reset_cleaning_trail(self) -> None:
+        """Clear the in-memory map trail for a new cleaning session."""
+        self.cleaning_trail.clear()
+        self.last_cleaning_trail_record = 0.0
+        self.cleaning_trail_active = False
+        self.cleaning_trail_last_cleaning_time = 0
+        self.cleaning_trail_inactive_since = 0.0
 
     def update_from_working_status(self, decoded: dict[str, Any]) -> None:
         """Update state from a decoded working_status message.

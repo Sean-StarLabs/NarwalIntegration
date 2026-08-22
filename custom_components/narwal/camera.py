@@ -24,7 +24,8 @@ from .const import (
 )
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client.const import WorkingStatus
+from .narwal_client import NarwalState
+from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -38,6 +39,8 @@ _TRAIL_RECORD_INTERVAL = 3  # seconds between trail point recordings
 _TRAIL_MIN_GRID_DELTA = 0.25
 _TRAIL_MAX_GRID_JUMP_FRACTION = 0.18
 _TRAIL_MAX_GRID_JUMP_MIN = 24.0
+_TRAIL_NEW_SESSION_MAX_AGE = 60
+_TRAIL_INACTIVE_RESET_INTERVAL = 10 * 60
 
 # Debug view: blank canvas with robot dot + trail.
 # Set to False to use the real map renderer instead.
@@ -121,10 +124,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
             MAP_OPTION_DEFAULTS[CONF_SHOW_FURNITURE_LABELS],
         )
         self._room_label_points: list[tuple[str, float, float]] = []
-        # Trail state — accumulated grid-coordinate positions during cleaning
-        self._trail: list[tuple[float, float]] = []
-        self._last_trail_record: float = 0.0
-        self._last_cleaning_status: WorkingStatus = WorkingStatus.UNKNOWN
         # Debug view state — full session trail with growing viewport
         self._dock_pos: tuple[float, float] | None = None
         self._vp_min_x: float = 0.0
@@ -132,6 +131,20 @@ class NarwalMapCamera(NarwalEntity, Camera):
         self._vp_min_y: float = 0.0
         self._vp_max_y: float = 0.0
         self._vp_initialized: bool = False
+
+    @property
+    def _trail(self) -> list[tuple[float, float]]:
+        """Return the coordinator-owned trail so camera recreation keeps it."""
+        return self.coordinator.client.state.cleaning_trail
+
+    @property
+    def _last_trail_record(self) -> float:
+        """Return the timestamp of the last coordinator-owned trail point."""
+        return self.coordinator.client.state.last_cleaning_trail_record
+
+    @_last_trail_record.setter
+    def _last_trail_record(self, value: float) -> None:
+        self.coordinator.client.state.last_cleaning_trail_record = value
 
     def _map_option(self, key: str) -> bool:
         """Return a persisted map display option."""
@@ -190,10 +203,9 @@ class NarwalMapCamera(NarwalEntity, Camera):
 
     def _reset_debug_trail(self) -> None:
         """Clear trail and viewport for a new cleaning session."""
-        self._trail.clear()
+        self.coordinator.client.state.reset_cleaning_trail()
         self._dock_pos = None
         self._vp_initialized = False
-        self._last_trail_record = 0.0
 
     def _record_debug_position(self, x: float, y: float) -> None:
         """Record a position and expand viewport bounds."""
@@ -228,8 +240,44 @@ class NarwalMapCamera(NarwalEntity, Camera):
 
     def _reset_trail(self) -> None:
         """Clear trail for a new cleaning session."""
-        self._trail.clear()
-        self._last_trail_record = 0.0
+        self.coordinator.client.state.reset_cleaning_trail()
+
+    def _sync_trail_session(self, state: NarwalState, is_cleaning: bool) -> None:
+        """Keep the shared trail across status flaps and reset on new sessions."""
+        now = time.monotonic()
+        if not is_cleaning:
+            if state.cleaning_trail_active:
+                state.cleaning_trail_inactive_since = now
+            state.cleaning_trail_active = False
+            return
+
+        cleaning_time = max(state.cleaning_time, 0)
+        previous_time = state.cleaning_trail_last_cleaning_time
+        inactive_for = (
+            now - state.cleaning_trail_inactive_since
+            if state.cleaning_trail_inactive_since
+            else 0.0
+        )
+        should_reset = False
+        if state.cleaning_trail:
+            if previous_time > 0 and 0 < cleaning_time < previous_time:
+                should_reset = True
+            elif (
+                not state.cleaning_trail_active
+                and 0 < cleaning_time <= _TRAIL_NEW_SESSION_MAX_AGE
+            ):
+                should_reset = True
+            elif inactive_for >= _TRAIL_INACTIVE_RESET_INTERVAL:
+                should_reset = True
+
+        if should_reset:
+            _LOGGER.info("New cleaning session detected; clearing Narwal map trail")
+            self._reset_trail()
+
+        state.cleaning_trail_active = True
+        state.cleaning_trail_inactive_since = 0.0
+        if cleaning_time > 0:
+            state.cleaning_trail_last_cleaning_time = cleaning_time
 
     def _record_trail_position(
         self,
@@ -278,19 +326,12 @@ class NarwalMapCamera(NarwalEntity, Camera):
         state = self.coordinator.client.state
         display = state.map_display_data
 
-        # Detect cleaning session transitions — clear trail on new session
         current_status = state.working_status
-        was_cleaning = self._last_cleaning_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
+        is_cleaning = (
+            current_status in ACTIVE_CLEANING_STATUSES
+            or state.has_recent_active_working_status
         )
-        is_cleaning = current_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
-        )
-        if is_cleaning and not was_cleaning:
-            _LOGGER.info("New cleaning session — clearing trail and vision obstacles")
-            self._reset_trail()
-        if current_status != WorkingStatus.UNKNOWN:
-            self._last_cleaning_status = current_status
+        self._sync_trail_session(state, is_cleaning)
 
         if _DEBUG_VIEW:
             if not display or (display.robot_x == 0.0 and display.robot_y == 0.0):
