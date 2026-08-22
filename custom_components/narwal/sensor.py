@@ -14,16 +14,18 @@ from homeassistant.components.sensor import (
     SensorStateClass,
 )
 from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfArea, UnitOfTime
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import slugify
 
 from .narwal_client import NarwalState, WorkingStatus
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 from . import NarwalConfigEntry
+from .cloud import NarwalCloudConsumable
 from .const import TASK_RESULT_OPTIONS
 from .coordinator import NarwalCoordinator, dock_task
-from .entity import NarwalEntity, is_dock_consumable_name
+from .entity import NarwalEntity, is_dock_consumable_identity
 
 _MAX_MAP_METADATA_ATTRIBUTE_BYTES = 16 * 1024
 
@@ -268,6 +270,35 @@ async def async_setup_entry(
     entities.append(NarwalMapMetadataSensor(coordinator))
     async_add_entities(entities)
 
+    known_consumables: set[str] = set()
+
+    @callback
+    def async_add_consumables() -> None:
+        new_consumables = sorted(
+            (
+                consumable
+                for code, consumable in coordinator.cloud_consumables.items()
+                if code not in known_consumables and consumable.has_life_counter
+            ),
+            key=lambda item: item.name.lower(),
+        )
+        if not new_consumables:
+            return
+        known_consumables.update(item.code for item in new_consumables)
+        async_add_entities(
+            [
+                entity
+                for consumable in new_consumables
+                for entity in (
+                    NarwalConsumableLifeSensor(coordinator, consumable),
+                    NarwalConsumableUsedSensor(coordinator, consumable),
+                )
+            ]
+        )
+
+    async_add_consumables()
+    entry.async_on_unload(coordinator.async_add_listener(async_add_consumables))
+
 
 class NarwalSensor(NarwalEntity, SensorEntity):
     """A Narwal sensor entity."""
@@ -446,7 +477,6 @@ class NarwalChargingStateSensor(NarwalEntity, SensorEntity):
             return "mdi:battery-off-outline"
         return "mdi:battery-unknown"
 
-
 class NarwalTaskStatusSensor(NarwalEntity, SensorEntity):
     """Sensor showing the active cleaning or dock task state."""
 
@@ -520,3 +550,122 @@ class NarwalTaskStatusSensor(NarwalEntity, SensorEntity):
         if value == "error":
             return "mdi:alert-circle-outline"
         return "mdi:information-outline"
+
+
+class NarwalCloudConsumableSensor(NarwalEntity, SensorEntity):
+    """Base class for cloud consumable sensors."""
+
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        consumable: NarwalCloudConsumable,
+        suffix: str,
+    ) -> None:
+        """Initialize the cloud consumable sensor."""
+        super().__init__(coordinator)
+        device_id = coordinator.config_entry.data["device_id"]
+        self._consumable_code = consumable.code
+        self._attr_unique_id = (
+            f"{device_id}_consumable_{slugify(consumable.code)}_{suffix}"
+        )
+        self._attr_name = f"{consumable.name} {suffix.replace('_', ' ')}"
+        if is_dock_consumable_identity(consumable.code, consumable.name):
+            self._use_dock_device_info()
+
+    @property
+    def _consumable(self) -> NarwalCloudConsumable | None:
+        """Return the latest consumable payload."""
+        return self.coordinator.cloud_consumables.get(self._consumable_code)
+
+    @property
+    def available(self) -> bool:
+        """Return true when the latest cloud consumable state is current."""
+        consumable = self._consumable
+        return (
+            self.coordinator.cloud_consumables_error is None
+            and consumable is not None
+            and self._has_required_signal(consumable)
+        )
+
+    def _has_required_signal(self, consumable: NarwalCloudConsumable) -> bool:
+        """Return true when the latest payload still supports this entity."""
+        return True
+
+    @property
+    def extra_state_attributes(self) -> dict[str, int | float | str | bool] | None:
+        """Return diagnostic consumable details."""
+        consumable = self._consumable
+        if consumable is None:
+            return None
+        attributes: dict[str, int | float | str | bool] = {
+            "consumables_code": consumable.code,
+            "used_hours": consumable.used_hours,
+            "total_hours": consumable.total_hours,
+            "remaining_hours": consumable.remaining_hours,
+            "used_percent": consumable.used_percent,
+            "remaining_percent": consumable.remaining_percent,
+            "overdue": consumable.is_overdue,
+            "reset_supported": consumable.reset_supported,
+        }
+        if consumable.subtitle:
+            attributes["subtitle"] = consumable.subtitle
+        return attributes
+
+
+class NarwalConsumableLifeSensor(NarwalCloudConsumableSensor):
+    """Cloud consumable remaining life percentage."""
+
+    _attr_native_unit_of_measurement = PERCENTAGE
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:progress-clock"
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        consumable: NarwalCloudConsumable,
+    ) -> None:
+        """Initialize the consumable life sensor."""
+        super().__init__(coordinator, consumable, "life")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return remaining consumable life percentage."""
+        consumable = self._consumable
+        if consumable is None or not consumable.has_life_counter:
+            return None
+        return consumable.remaining_percent
+
+    def _has_required_signal(self, consumable: NarwalCloudConsumable) -> bool:
+        """Return true when the latest payload still includes a life counter."""
+        return consumable.has_life_counter
+
+
+class NarwalConsumableUsedSensor(NarwalCloudConsumableSensor):
+    """Cloud consumable used duration."""
+
+    _attr_device_class = SensorDeviceClass.DURATION
+    _attr_native_unit_of_measurement = UnitOfTime.HOURS
+    _attr_state_class = SensorStateClass.MEASUREMENT
+    _attr_icon = "mdi:timer-sand"
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        consumable: NarwalCloudConsumable,
+    ) -> None:
+        """Initialize the consumable used sensor."""
+        super().__init__(coordinator, consumable, "used")
+
+    @property
+    def native_value(self) -> float | None:
+        """Return used consumable lifetime in hours."""
+        consumable = self._consumable
+        if consumable is None or not consumable.has_life_counter:
+            return None
+        return consumable.used_hours
+
+    def _has_required_signal(self, consumable: NarwalCloudConsumable) -> bool:
+        """Return true when the latest payload still includes a life counter."""
+        return consumable.has_life_counter

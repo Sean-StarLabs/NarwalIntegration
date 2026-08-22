@@ -8,7 +8,10 @@
         "data": {
           "host": "IP Address",
           "port": "Port",
-          "model": "Model"
+          "model": "Model",
+          "cloud_email": "Narwal cloud email",
+          "cloud_password": "Narwal cloud password",
+          "cloud_region": "Narwal cloud region"
         }
       },
       "device_id": {
@@ -21,10 +24,29 @@
     },
     "error": {
       "cannot_connect": "Unable to connect to the vacuum. Check the IP address and ensure the vacuum is powered on.",
+      "cloud_credentials_incomplete": "Enter both Narwal cloud email and password, or leave both blank.",
+      "cloud_cannot_connect": "Unable to sign in to Narwal cloud. Check the email, password, and region.",
       "unknown": "An unexpected error occurred."
     },
     "abort": {
       "already_configured": "This vacuum is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Narwal cloud",
+        "description": "Optional cloud login used for consumable life data and reset buttons. Clear the email to disable cloud access.",
+        "data": {
+          "cloud_email": "Narwal cloud email",
+          "cloud_password": "Narwal cloud password",
+          "cloud_region": "Narwal cloud region"
+        }
+      }
+    },
+    "error": {
+      "cloud_credentials_incomplete": "Enter both Narwal cloud email and password, or leave both blank.",
+      "cloud_cannot_connect": "Unable to sign in to Narwal cloud. Check the email, password, and region."
     }
   },
   "entity": {

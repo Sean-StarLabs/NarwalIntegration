@@ -14,6 +14,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import slugify
 
 from . import NarwalConfigEntry
+from .cloud import NarwalCloudConsumable, NarwalCloudError
 from .const import CONSUMABLE_MAINTAIN_ITEMS, CONSUMABLE_REPLACE_ITEMS
 from .coordinator import (
     NarwalCoordinator,
@@ -28,7 +29,12 @@ from .coordinator import (
     dock_task,
     is_narwal_task_busy,
 )
-from .entity import NarwalDockEntity, NarwalEntity, is_dock_consumable_name
+from .entity import (
+    NarwalDockEntity,
+    NarwalEntity,
+    is_dock_consumable_identity,
+    is_dock_consumable_name,
+)
 from .narwal_client import CommandResponse, CommandResult, WorkingStatus
 
 
@@ -265,6 +271,28 @@ async def async_setup_entry(
     entry.async_on_unload(
         coordinator.async_add_listener(async_add_consumable_info_reset_buttons)
     )
+    known_consumables: set[str] = set()
+
+    @callback
+    def async_add_consumable_buttons() -> None:
+        new_consumables = sorted(
+            (
+                consumable
+                for code, consumable in coordinator.cloud_consumables.items()
+                if code not in known_consumables and consumable.reset_supported
+            ),
+            key=lambda item: item.name.lower(),
+        )
+        if not new_consumables:
+            return
+        known_consumables.update(item.code for item in new_consumables)
+        async_add_entities(
+            NarwalConsumableResetButton(coordinator, consumable)
+            for consumable in new_consumables
+        )
+
+    async_add_consumable_buttons()
+    entry.async_on_unload(coordinator.async_add_listener(async_add_consumable_buttons))
 
 
 class NarwalRobotActionButton(NarwalEntity, ButtonEntity):
@@ -493,6 +521,69 @@ class NarwalActionButton(NarwalDockEntity, ButtonEntity):
             )
 
         self.coordinator.async_set_updated_data(client.state)
+
+
+class NarwalConsumableResetButton(NarwalEntity, ButtonEntity):
+    """Button entity for resetting a cloud consumable counter."""
+
+    _attr_icon = "mdi:restore"
+    _attr_entity_category = EntityCategory.CONFIG
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        consumable: NarwalCloudConsumable,
+    ) -> None:
+        """Initialize the consumable reset button."""
+        super().__init__(coordinator)
+        device_id = coordinator.config_entry.data["device_id"]
+        self._consumable_code = consumable.code
+        self._attr_unique_id = (
+            f"{device_id}_consumable_{slugify(consumable.code)}_reset"
+        )
+        self._attr_name = f"{consumable.name} reset"
+        if is_dock_consumable_identity(consumable.code, consumable.name):
+            self._use_dock_device_info()
+
+    @property
+    def available(self) -> bool:
+        """Return True when this consumable can be reset."""
+        if self.coordinator.cloud_consumables_error is not None:
+            return False
+        consumable = self.coordinator.cloud_consumables.get(self._consumable_code)
+        return consumable is not None and consumable.reset_supported
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | float | bool] | None:
+        """Return diagnostic consumable details."""
+        consumable = self.coordinator.cloud_consumables.get(self._consumable_code)
+        if consumable is None:
+            return None
+        return {
+            "consumables_code": consumable.code,
+            "used_hours": consumable.used_hours,
+            "total_hours": consumable.total_hours,
+            "remaining_hours": consumable.remaining_hours,
+            "used_percent": consumable.used_percent,
+            "remaining_percent": consumable.remaining_percent,
+            "overdue": consumable.is_overdue,
+        }
+
+    async def async_press(self) -> None:
+        """Reset the Narwal cloud consumable counter."""
+        if not self.available:
+            raise HomeAssistantError("Narwal consumable reset is not available")
+        consumable = self.coordinator.cloud_consumables.get(self._consumable_code)
+        if consumable is None:
+            raise HomeAssistantError("Narwal consumable is not available")
+        if not consumable.reset_supported:
+            raise HomeAssistantError(
+                f"Narwal {consumable.name} reset is not supported"
+            )
+        try:
+            await self.coordinator.async_reset_cloud_consumable(self._consumable_code)
+        except NarwalCloudError as err:
+            raise HomeAssistantError(str(err)) from err
 
 
 class NarwalConsumableInfoResetButton(NarwalEntity, ButtonEntity):

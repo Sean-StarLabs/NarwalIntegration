@@ -1,6 +1,6 @@
 # Narwal Robot Vacuum — Home Assistant Integration
 
-A fully **local, cloud-independent** [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Communicates directly with your vacuum over your local network via WebSocket — no cloud account or internet connection required.
+A [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Robot control communicates directly with your vacuum over your local network via WebSocket; optional accessory life monitoring uses Narwal cloud credentials when configured.
 
 > **Latest release: [v1.0.4](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.4)** (HACS) — **consumable alerts never worked before this release** and always reported "no problem"; check those two entities after upgrading ([notes](docs/RELEASE-NOTES-v1.0.4.md)). Adds Freo Z Ultra (CX7) support and renames the fan tiers to Quiet/Standard/Strong/Super/Ultra. **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first.**
 
@@ -168,8 +168,9 @@ setup regardless.
 </details>
 
 The Freo Z Ultra (CX7) also requires its 32-character cloud-assigned Device ID. Selecting that
-model opens a dedicated Device ID page; other models use automatic discovery. The integration
-itself never contacts the cloud.
+model opens a dedicated Device ID page; other models use automatic discovery. Robot control
+still uses the local WebSocket API; only optional accessory life monitoring contacts Narwal cloud
+when cloud credentials are configured.
 
 #### Finding the Device ID
 
@@ -187,9 +188,10 @@ You can obtain it from one of these sources:
 - A Narwal MQTT capture, where it appears in the topic position shown above.
 - The stored device identifier or diagnostics from an existing Narwal cloud integration.
 
-Account and MQTT tooling is deliberately kept separate from this integration so Home Assistant
-never receives your Narwal credentials. Do not post the Device ID publicly; treat it as a device
-identifier even though it is not an account password or access token.
+Account and MQTT tooling for finding the Device ID can be kept separate from this integration.
+If you enable optional accessory life monitoring in this fork, Home Assistant stores the Narwal
+cloud credentials in the integration options. Do not post the Device ID publicly; treat it as a
+device identifier even though it is not an account password or access token.
 
 #### CX7 variants
 
@@ -283,7 +285,7 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 | Merged in v1.0.4 | What it does |
 |---|---|
 | [#80](https://github.com/sjmotew/NarwalIntegration/pull/80) | **Consumable alerts actually report** — the lists were packed varints and had always been discarded, so both alert sensors said "no problem" on every robot, always. See [#79](https://github.com/sjmotew/NarwalIntegration/issues/79) |
-| [#76](https://github.com/sjmotew/NarwalIntegration/pull/76) | **Freo Z Ultra (CX7) local control**, via a pasted Device ID — still no cloud. Polling only; no live map position |
+| [#76](https://github.com/sjmotew/NarwalIntegration/pull/76) | **Freo Z Ultra (CX7) local control**, via a pasted Device ID — still no cloud for robot control. Polling only; no live map position |
 | — | Fan tiers renamed to Quiet/Standard/Strong/Super/Ultra; Ultra withheld on AX26, where it silently applied Strong ([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)) |
 | — | `CleanParam` tag 8 identified as the coverage-precision toggle; consumables documented in [`docs/PROTOCOL.md`](docs/PROTOCOL.md) |
 
@@ -332,7 +334,8 @@ Corrections and captures are welcome; the doc explains how to take them.
 This is an **unofficial**, community-developed integration — not affiliated with or endorsed by Narwal. The local protocol was reverse-engineered from network traffic and the Narwal mobile application.
 
 - **Use at your own risk.** No warranty.
-- **No cloud dependency.** No external data transmission.
+- **Local robot control.** Optional accessory life monitoring contacts Narwal cloud only when
+  credentials are configured.
 - **Firmware updates** from Narwal may break this integration at any time.
 
 ## Contributing

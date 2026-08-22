@@ -6,6 +6,7 @@ UpdateFailed after the threshold, and resets counters on success/push.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
@@ -17,8 +18,16 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.const import NO_BROADCAST_PRODUCT_KEYS  # noqa: E402
+from custom_components.narwal.const import (  # noqa: E402
+    CONF_PRODUCT_KEY,
+    NO_BROADCAST_PRODUCT_KEYS,
+)
+from custom_components.narwal.cloud import (  # noqa: E402
+    NarwalCloudConsumable,
+    NarwalCloudError,
+)
 from custom_components.narwal.coordinator import (
+    CLOUD_CONSUMABLES_LOCK_RECHECK_INTERVAL,
     TOPIC_RESUBSCRIBE_AFTER,
     TOPIC_SUBSCRIPTION_TTL,
     CleanSettings,
@@ -243,9 +252,18 @@ class TestCoordinatorResilience:
         coordinator.config_entry = mock_entry
         coordinator.client = MagicMock()
         coordinator.client.state = NarwalState()
+        coordinator.last_update_success = True
         coordinator._consecutive_failures = 0
         coordinator._max_failures = 5
+        coordinator._local_available = False
         coordinator._consumable_poll_countdown = 99  # don't fire consumable poll in unit tests
+        coordinator._cloud_client = None
+        coordinator.cloud_consumables = {}
+        coordinator.cloud_consumables_error = None
+        coordinator._cloud_consumables_last_update = 0.0
+        coordinator._cloud_consumables_next_attempt = 0.0
+        coordinator._cloud_consumables_lock = asyncio.Lock()
+        coordinator._cloud_consumables_wake_event = asyncio.Event()
         coordinator._fast_poll_remaining = 0
         coordinator._listen_task = None
         coordinator._map_fetch_pending = False
@@ -263,6 +281,7 @@ class TestCoordinatorResilience:
         coordinator.active_room_ids = None
         coordinator._active_room_plan_pending_until = 0.0
         coordinator.update_interval = None
+        coordinator.async_update_listeners = MagicMock()
         # Prevent background task warnings
         mock_entry.async_create_background_task = MagicMock()
         return coordinator
@@ -301,6 +320,7 @@ class TestCoordinatorResilience:
             await coordinator._async_update_data()
 
         assert coordinator._consecutive_failures == 5
+        assert not coordinator.local_available
 
     async def test_success_resets_failure_counter(self) -> None:
         """_async_update_data resets _consecutive_failures to 0 on success."""
@@ -319,6 +339,7 @@ class TestCoordinatorResilience:
         result = await coordinator._async_update_data()
 
         assert coordinator._consecutive_failures == 0
+        assert coordinator.local_available
         assert result is coordinator.client.state
 
     async def test_task_status_refresh_runs_when_progress_endpoint_fails(self) -> None:
@@ -360,6 +381,7 @@ class TestCoordinatorResilience:
         coordinator._prev_working_status = MagicMock()
 
         state = NarwalState()
+        state.map_data = MagicMock()
         coordinator._on_state_update(state)
 
         assert coordinator._consecutive_failures == 0
@@ -460,6 +482,172 @@ class TestCoordinatorResilience:
         assert result is coordinator.client.state
         assert coordinator._consecutive_failures == 1
 
+    async def test_cloud_refresh_failure_does_not_mark_poll_success(self) -> None:
+        """A failed cloud refresh should retry soon instead of waiting six hours."""
+        coordinator = self._make_coordinator()
+        coordinator._cloud_client = MagicMock()
+        coordinator._cloud_client.async_get_consumables = AsyncMock(
+            side_effect=NarwalCloudError("cloud down")
+        )
+        coordinator._cloud_consumables_last_update = 0.0
+
+        result = await coordinator.async_refresh_cloud_consumables()
+
+        assert result is False
+        assert coordinator._cloud_consumables_last_update == 0.0
+        assert not coordinator._cloud_consumables_due
+        assert coordinator.cloud_consumables_error == "cloud down"
+        assert coordinator._cloud_consumables_wake_event.is_set()
+        coordinator.async_update_listeners.assert_called_once()
+
+    async def test_cloud_refresh_uses_app_product_identity(self) -> None:
+        """CX7 cloud consumables use J5, not the local WebSocket product key."""
+        coordinator = self._make_coordinator()
+        coordinator.config_entry.data[CONF_PRODUCT_KEY] = "hEA7OEshlx"
+        coordinator._cloud_client = MagicMock()
+        coordinator._cloud_client.async_get_consumables = AsyncMock(return_value=[])
+
+        assert await coordinator.async_refresh_cloud_consumables()
+
+        coordinator._cloud_client.async_get_consumables.assert_awaited_once_with(
+            device_id="test_device",
+            product_id="J5",
+        )
+
+    async def test_cloud_loop_starts_when_local_startup_connect_fails(self) -> None:
+        """Optional cloud entities can set up even while local control is down."""
+        coordinator = self._make_coordinator()
+        coordinator._cloud_client = MagicMock()
+        coordinator.client.connect = AsyncMock(
+            side_effect=NarwalConnectionError("offline")
+        )
+        coordinator.client.start_listening = AsyncMock()
+        coordinator.async_set_updated_data = MagicMock()
+        task_names: list[str] = []
+
+        def close_background_task(hass, coro, name):
+            task_names.append(name)
+            coro.close()
+            return None
+
+        coordinator.config_entry.async_create_background_task = MagicMock(
+            side_effect=close_background_task
+        )
+
+        await coordinator.async_setup()
+
+        coordinator.async_set_updated_data.assert_called_once_with(
+            coordinator.client.state
+        )
+        assert task_names == ["narwal_ws_listener", "narwal_cloud_consumables"]
+        assert not coordinator.local_available
+
+    async def test_cloud_loop_backs_off_when_due_refresh_is_already_running(
+        self,
+    ) -> None:
+        """The independent cloud loop must not spin while another refresh owns the lock."""
+        coordinator = self._make_coordinator()
+        coordinator._cloud_client = MagicMock()
+        coordinator._cloud_consumables_next_attempt = 0.0
+        await coordinator._cloud_consumables_lock.acquire()
+        wait_for_wake = AsyncMock(side_effect=asyncio.CancelledError)
+        coordinator._wait_for_cloud_consumables_wake = wait_for_wake
+
+        try:
+            with pytest.raises(asyncio.CancelledError):
+                await coordinator._cloud_consumables_loop()
+        finally:
+            coordinator._cloud_consumables_lock.release()
+
+        wait_for_wake.assert_awaited_once_with(CLOUD_CONSUMABLES_LOCK_RECHECK_INTERVAL)
+
+    async def test_cloud_wait_consumes_pending_wake_signal(self) -> None:
+        """A wake set before waiting must not be cleared and then ignored."""
+        coordinator = self._make_coordinator()
+        coordinator._cloud_consumables_wake_event.set()
+
+        await asyncio.wait_for(
+            coordinator._wait_for_cloud_consumables_wake(3600.0),
+            timeout=0.05,
+        )
+
+        assert not coordinator._cloud_consumables_wake_event.is_set()
+
+    async def test_cloud_reset_raises_when_verification_refresh_fails(self) -> None:
+        """A reset is not reported as done unless fresh cloud state is loaded."""
+        coordinator = self._make_coordinator()
+        consumable = NarwalCloudConsumable(
+            code="dock_filter",
+            name="Dock filter",
+            usage_duration=3600,
+            total_duration=7200,
+            reset_supported=True,
+        )
+        coordinator.cloud_consumables = {consumable.code: consumable}
+        coordinator._cloud_client = MagicMock()
+        coordinator._cloud_client.async_reset_consumable = AsyncMock()
+        coordinator._cloud_client.async_get_consumables = AsyncMock(
+            side_effect=NarwalCloudError("verification failed")
+        )
+
+        with patch("custom_components.narwal.coordinator.asyncio.sleep", new=AsyncMock()):
+            with pytest.raises(NarwalCloudError, match="verification failed"):
+                await coordinator.async_reset_cloud_consumable(consumable.code)
+
+        coordinator._cloud_client.async_reset_consumable.assert_awaited_once()
+        coordinator._cloud_client.async_get_consumables.assert_awaited_once()
+
+    async def test_cloud_reset_uses_app_product_identity(self) -> None:
+        """Cloud consumable reset also uses the app product identity."""
+        coordinator = self._make_coordinator()
+        coordinator.config_entry.data[CONF_PRODUCT_KEY] = "hEA7OEshlx"
+        consumable = NarwalCloudConsumable(
+            code="dock_filter",
+            name="Dock filter",
+            usage_duration=3600,
+            total_duration=7200,
+            reset_supported=True,
+        )
+        coordinator.cloud_consumables = {consumable.code: consumable}
+        coordinator._cloud_client = MagicMock()
+        coordinator._cloud_client.async_reset_consumable = AsyncMock()
+        coordinator._cloud_client.async_get_consumables = AsyncMock(return_value=[])
+
+        with patch("custom_components.narwal.coordinator.asyncio.sleep", new=AsyncMock()):
+            await coordinator.async_reset_cloud_consumable(consumable.code)
+
+        coordinator._cloud_client.async_reset_consumable.assert_awaited_once()
+        assert (
+            coordinator._cloud_client.async_reset_consumable.await_args.kwargs[
+                "product_id"
+            ]
+            == "J5"
+        )
+
+    async def test_cloud_reset_failure_marks_cloud_entities_unavailable(self) -> None:
+        """A failed reset should make stale cloud consumables unavailable."""
+        coordinator = self._make_coordinator()
+        consumable = NarwalCloudConsumable(
+            code="dock_filter",
+            name="Dock filter",
+            usage_duration=7200,
+            total_duration=7200,
+            reset_supported=True,
+        )
+        coordinator.cloud_consumables = {consumable.code: consumable}
+        coordinator._cloud_client = MagicMock()
+        coordinator._cloud_client.async_reset_consumable = AsyncMock(
+            side_effect=NarwalCloudError("reset failed")
+        )
+
+        with pytest.raises(NarwalCloudError, match="reset failed"):
+            await coordinator.async_reset_cloud_consumable(consumable.code)
+
+        assert coordinator.cloud_consumables_error == "reset failed"
+        assert not coordinator._cloud_consumables_due
+        assert coordinator._cloud_consumables_wake_event.is_set()
+        coordinator.async_update_listeners.assert_called_once()
+
 
 class TestTopicSubscriptionRenewal:
     """The broadcast subscription must be renewed before it lapses (#73).
@@ -492,6 +680,8 @@ class TestTopicSubscriptionRenewal:
         c._consecutive_failures = 0
         c._max_failures = 5
         c._consumable_poll_countdown = 99
+        c._cloud_client = None
+        c._cloud_consumables_last_update = 0.0
         c._fast_poll_remaining = 0
         c._listen_task = None
         c._map_fetch_pending = False

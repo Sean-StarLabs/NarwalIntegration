@@ -61,6 +61,7 @@ def install() -> None:
         SQUARE_METERS = "m²"
 
     class _UnitOfTime:
+        HOURS = "h"
         SECONDS = "s"
 
     ha_const.EntityCategory = _EntityCategory  # type: ignore[attr-defined]

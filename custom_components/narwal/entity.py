@@ -24,6 +24,21 @@ _DOCK_CONSUMABLE_NAME_MARKERS = (
     "water tank sponge",
 )
 
+_DOCK_CONSUMABLE_CODE_MARKERS = (
+    "base",
+    "clean_water",
+    "clear_water",
+    "detergent",
+    "dock",
+    "dust_bag",
+    "heavy_detergent",
+    "sewage",
+    "silver_ion",
+    "station",
+    "wash",
+    "water_tank",
+)
+
 
 def narwal_robot_device_info(coordinator: NarwalCoordinator) -> DeviceInfo:
     """Return device info for the robot vacuum."""
@@ -56,6 +71,14 @@ def is_dock_consumable_name(name: str) -> bool:
     return any(marker in normalized for marker in _DOCK_CONSUMABLE_NAME_MARKERS)
 
 
+def is_dock_consumable_identity(code: str, name: str = "") -> bool:
+    """Return true when stable consumable metadata identifies a dock item."""
+    normalized_code = code.casefold().replace("-", "_").replace(" ", "_")
+    return any(
+        marker in normalized_code for marker in _DOCK_CONSUMABLE_CODE_MARKERS
+    ) or is_dock_consumable_name(name)
+
+
 class NarwalEntity(CoordinatorEntity[NarwalCoordinator]):
     """Base class for Narwal entities."""
 
@@ -73,6 +96,9 @@ class NarwalEntity(CoordinatorEntity[NarwalCoordinator]):
     @property
     def available(self) -> bool:
         """Return True if the entity is available."""
+        local_available = getattr(self.coordinator, "local_available", None)
+        if isinstance(local_available, bool):
+            return local_available
         return self.coordinator.last_update_success
 
 

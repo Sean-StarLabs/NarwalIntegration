@@ -7,6 +7,7 @@ CLN-02: narwal_client embedded copy is in sync with canonical copy
 from __future__ import annotations
 
 import filecmp
+import json
 import os
 import sys
 from pathlib import Path
@@ -75,6 +76,16 @@ class TestCLN01PlatformRegistration:
             if f.endswith(".py") and f.startswith("image")
         ]
         assert map_modules == [], f"Unexpected map entity modules: {map_modules}"
+
+
+def test_manifest_includes_runtime_client_dependencies() -> None:
+    """HACS installs runtime dependencies from manifest.json."""
+    manifest = json.loads((INTEGRATION / "manifest.json").read_text())
+
+    assert not any(
+        requirement.startswith("websockets")
+        for requirement in manifest["requirements"]
+    )
 
 
 class TestCLN02NarwalClientSync:

@@ -7,6 +7,7 @@ import hashlib
 import logging
 import time
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, fields
 from datetime import timedelta
 
@@ -14,6 +15,17 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .cloud import NarwalCloudClient, NarwalCloudConsumable, NarwalCloudError
+from .const import (
+    CLOUD_CONSUMABLES_POLL_HOURS,
+    CONF_CLOUD_EMAIL,
+    CONF_CLOUD_PASSWORD,
+    CONF_CLOUD_REGION,
+    DEFAULT_CLOUD_REGION,
+    DOMAIN,
+    NO_BROADCAST_PRODUCT_KEYS,
+    configured_cloud_product_id,
+)
 from .narwal_client import (
     CleaningRoute,
     FanLevel,
@@ -27,8 +39,6 @@ from .narwal_client import (
 )
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
 
-from .const import DOMAIN, NO_BROADCAST_PRODUCT_KEYS
-
 _LOGGER = logging.getLogger(__name__)
 
 POLL_INTERVAL = timedelta(seconds=60)
@@ -39,6 +49,9 @@ FAST_POLL_MAX = 6  # up to 60s of fast polling before falling back to normal
 
 # Consumable alerts change over weeks — poll every ~30 min (30 * POLL_INTERVAL).
 CONSUMABLE_POLL_EVERY = 30
+CLOUD_CONSUMABLES_POLL_INTERVAL = timedelta(hours=CLOUD_CONSUMABLES_POLL_HOURS)
+CLOUD_CONSUMABLES_RETRY_INTERVAL = timedelta(minutes=5)
+CLOUD_CONSUMABLES_LOCK_RECHECK_INTERVAL = 1.0
 
 # The robot only broadcasts working_status and display_map while an
 # active_robot_publish subscription is live, and that subscription lasts
@@ -342,7 +355,51 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._last_task_details_refresh: float = 0.0
         self._consecutive_failures = 0
         self._max_failures = 5  # 5 * 60s = 5 minutes before entities go unavailable
+        self._local_available = False
         self._consumable_poll_countdown = 0  # 0 = fetch on next poll, then every CONSUMABLE_POLL_EVERY
+        self.cloud_consumables: dict[str, NarwalCloudConsumable] = {}
+        self.cloud_consumables_error: str | None = None
+        self._cloud_consumables_last_update = 0.0
+        self._cloud_consumables_next_attempt = 0.0
+        self._cloud_consumables_lock = asyncio.Lock()
+        self._cloud_consumables_wake_event = asyncio.Event()
+        self._cloud_client: NarwalCloudClient | None = None
+        raw_options = getattr(entry, "options", {}) or {}
+        entry_options = raw_options if isinstance(raw_options, Mapping) else {}
+        cloud_email = (
+            entry_options[CONF_CLOUD_EMAIL]
+            if CONF_CLOUD_EMAIL in entry_options
+            else entry.data.get(CONF_CLOUD_EMAIL)
+        )
+        cloud_password = (
+            entry_options[CONF_CLOUD_PASSWORD]
+            if CONF_CLOUD_PASSWORD in entry_options
+            else entry.data.get(CONF_CLOUD_PASSWORD)
+        )
+        cloud_region = (
+            entry_options[CONF_CLOUD_REGION]
+            if CONF_CLOUD_REGION in entry_options
+            else entry.data.get(CONF_CLOUD_REGION, DEFAULT_CLOUD_REGION)
+        )
+        self.cloud_credentials = (
+            cloud_email or None,
+            cloud_password or None,
+            cloud_region,
+        )
+        if cloud_email and cloud_password:
+            self._cloud_client = NarwalCloudClient(
+                hass,
+                email=cloud_email,
+                password=cloud_password,
+                region=cloud_region,
+            )
+
+    @property
+    def local_available(self) -> bool:
+        """Return true when local robot state/control is currently usable."""
+        return getattr(self, "last_update_success", True) and getattr(
+            self, "_local_available", True
+        )
 
     def default_room_clean_settings(self) -> RoomCleanSettings:
         """Return a room-clean profile copied from the current global defaults."""
@@ -484,6 +541,25 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return
         self.set_active_room_ids(None)
 
+    def _start_cloud_consumables_loop(self) -> None:
+        """Start the independent cloud consumable refresh loop if configured."""
+        if self._cloud_client is None:
+            return
+        self.config_entry.async_create_background_task(
+            self.hass,
+            self._cloud_consumables_loop(),
+            f"{DOMAIN}_cloud_consumables",
+        )
+
+    def _start_local_listener(self) -> None:
+        """Start the persistent local listener and reconnect loop."""
+        self.client.on_state_update = self._on_state_update
+        self._listen_task = self.config_entry.async_create_background_task(
+            self.hass,
+            self.client.start_listening(),
+            f"{DOMAIN}_ws_listener",
+        )
+
     async def async_setup(self) -> None:
         """Connect to the vacuum and start the WebSocket listener.
 
@@ -492,7 +568,23 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         try/except so setup never crashes if the robot is asleep.
         The listener's keepalive loop handles waking independently.
         """
-        await self.client.connect()
+        try:
+            await self.client.connect()
+        except NarwalConnectionError:
+            if self._cloud_client is None:
+                raise
+            _LOGGER.warning(
+                "Narwal local connection failed during startup; continuing with "
+                "cloud consumable refresh only"
+            )
+            self.async_set_updated_data(self.client.state)
+            self._fast_poll_remaining = FAST_POLL_MAX
+            self.update_interval = FAST_POLL_INTERVAL
+            self._start_local_listener()
+            self._start_cloud_consumables_loop()
+            return
+        else:
+            self._local_available = True
 
         # Fetch initial state BEFORE starting listener (no concurrent recv)
         try:
@@ -529,12 +621,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.async_set_updated_data(self.client.state)
 
         # Set up push callback and start persistent listener
-        self.client.on_state_update = self._on_state_update
-        self._listen_task = self.config_entry.async_create_background_task(
-            self.hass,
-            self.client.start_listening(),
-            f"{DOMAIN}_ws_listener",
-        )
+        self._start_local_listener()
 
         state = self.client.state
         _LOGGER.info(
@@ -552,10 +639,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 int(FAST_POLL_INTERVAL.total_seconds()),
             )
 
+        self._start_cloud_consumables_loop()
+
     def _on_state_update(self, state: NarwalState) -> None:
         """Handle a push state update from the WebSocket listener."""
         # Push data arriving means robot is reachable — reset failure counter
         self._consecutive_failures = 0
+        self._local_available = True
         self._sync_active_room_ids(state)
         previous_status = self._prev_working_status
         is_remapping = state.working_status == WorkingStatus.REMAPPING
@@ -803,6 +893,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         except Exception as err:
             self._consecutive_failures += 1
             if self._consecutive_failures >= self._max_failures:
+                self._local_available = False
                 raise UpdateFailed(
                     f"Vacuum unreachable for {self._consecutive_failures} consecutive polls"
                 ) from err
@@ -813,6 +904,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return self.client.state  # stale data keeps entities available
         else:
             self._consecutive_failures = 0
+            self._local_available = True
 
         # Retry map fetch if it failed during setup
         if self.client.state.map_data is None:
@@ -847,6 +939,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         else:
             self._consumable_poll_countdown -= 1
 
+        if self._cloud_consumables_due:
+            await self.async_refresh_cloud_consumables()
+
         is_cleaning = (
             self.client.state.is_cleaning
             or self.client.state.has_recent_active_working_status
@@ -873,6 +968,137 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         self._sync_active_room_ids(self.client.state)
         return self.client.state
+
+    @property
+    def _cloud_consumables_due(self) -> bool:
+        """Return true when cloud consumables should be refreshed."""
+        if self._cloud_client is None:
+            return False
+        return time.monotonic() >= self._cloud_consumables_next_attempt
+
+    def _wake_cloud_consumables_loop(self) -> None:
+        """Wake the cloud refresh loop so it can observe a changed deadline."""
+        wake_event = getattr(self, "_cloud_consumables_wake_event", None)
+        if wake_event is not None:
+            wake_event.set()
+
+    async def async_refresh_cloud_consumables(
+        self,
+        *,
+        force: bool = False,
+        raise_on_error: bool = False,
+    ) -> bool:
+        """Refresh cloud consumables if cloud credentials are configured."""
+        if self._cloud_client is None:
+            return False
+        if self._cloud_consumables_lock.locked() and not force:
+            return False
+        async with self._cloud_consumables_lock:
+            now = time.monotonic()
+            try:
+                consumables = await self._cloud_client.async_get_consumables(
+                    device_id=self.config_entry.data["device_id"],
+                    product_id=configured_cloud_product_id(self.config_entry.data),
+                )
+            except NarwalCloudError as err:
+                self.cloud_consumables_error = str(err)
+                self._cloud_consumables_next_attempt = (
+                    now + CLOUD_CONSUMABLES_RETRY_INTERVAL.total_seconds()
+                )
+                self._wake_cloud_consumables_loop()
+                _LOGGER.warning(
+                    "Narwal cloud consumables refresh failed for %s: %s",
+                    self.config_entry.title,
+                    err,
+                )
+                self.async_update_listeners()
+                if raise_on_error:
+                    raise
+                return False
+            except Exception as err:
+                self.cloud_consumables_error = type(err).__name__
+                self._cloud_consumables_next_attempt = (
+                    now + CLOUD_CONSUMABLES_RETRY_INTERVAL.total_seconds()
+                )
+                self._wake_cloud_consumables_loop()
+                _LOGGER.debug(
+                    "Narwal cloud consumables refresh failed for %s",
+                    self.config_entry.title,
+                    exc_info=True,
+                )
+                self.async_update_listeners()
+                if raise_on_error:
+                    raise NarwalCloudError(
+                        f"Narwal cloud consumables refresh failed: {type(err).__name__}"
+                    ) from err
+                return False
+            self.cloud_consumables = {item.code: item for item in consumables}
+            self.cloud_consumables_error = None
+            now = time.monotonic()
+            self._cloud_consumables_last_update = now
+            self._cloud_consumables_next_attempt = (
+                now + CLOUD_CONSUMABLES_POLL_INTERVAL.total_seconds()
+            )
+            self._wake_cloud_consumables_loop()
+            _LOGGER.debug(
+                "Loaded %d cloud consumables for %s",
+                len(self.cloud_consumables),
+                self.config_entry.title,
+            )
+            self.async_update_listeners()
+            return True
+
+    async def async_reset_cloud_consumable(self, consumable_code: str) -> None:
+        """Reset a cloud consumable and refresh cloud consumable state."""
+        if self._cloud_client is None:
+            raise NarwalCloudError("Narwal cloud credentials are not configured")
+        consumable = self.cloud_consumables.get(consumable_code)
+        if consumable is None:
+            raise NarwalCloudError("Narwal consumable is not available")
+        try:
+            await self._cloud_client.async_reset_consumable(
+                device_id=self.config_entry.data["device_id"],
+                product_id=configured_cloud_product_id(self.config_entry.data),
+                consumable_code=consumable_code,
+                item_type=consumable.item_type,
+                record_type=consumable.record_type,
+                consumable_type=consumable.consumable_type,
+            )
+        except NarwalCloudError as err:
+            self.cloud_consumables_error = str(err)
+            self._cloud_consumables_next_attempt = (
+                time.monotonic() + CLOUD_CONSUMABLES_RETRY_INTERVAL.total_seconds()
+            )
+            self._wake_cloud_consumables_loop()
+            self.async_update_listeners()
+            raise
+        await asyncio.sleep(1.0)
+        await self.async_refresh_cloud_consumables(force=True, raise_on_error=True)
+
+    async def _cloud_consumables_loop(self) -> None:
+        """Refresh cloud consumables independently from local status polling."""
+        while True:
+            if self._cloud_consumables_due:
+                refreshed = await self.async_refresh_cloud_consumables()
+                if not refreshed and self._cloud_consumables_due:
+                    await self._wait_for_cloud_consumables_wake(
+                        CLOUD_CONSUMABLES_LOCK_RECHECK_INTERVAL
+                    )
+                    continue
+            wait_for = max(self._cloud_consumables_next_attempt - time.monotonic(), 0.0)
+            await self._wait_for_cloud_consumables_wake(wait_for)
+
+    async def _wait_for_cloud_consumables_wake(self, timeout: float) -> None:
+        """Wait for the cloud loop wake event or a timeout."""
+        if self._cloud_consumables_wake_event.is_set():
+            self._cloud_consumables_wake_event.clear()
+            return
+        with suppress(asyncio.TimeoutError):
+            await asyncio.wait_for(
+                self._cloud_consumables_wake_event.wait(),
+                timeout=max(timeout, 0.0),
+            )
+            self._cloud_consumables_wake_event.clear()
 
     async def async_shutdown(self) -> None:
         """Disconnect from the vacuum."""

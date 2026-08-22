@@ -12,19 +12,21 @@ from homeassistant.components.binary_sensor import (
     BinarySensorEntityDescription,
 )
 from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.util import slugify
 
 from .narwal_client import NarwalState
 
 from . import NarwalConfigEntry
+from .cloud import NarwalCloudConsumable
 from .const import (
     CONSUMABLE_MAINTAIN_ITEMS,
     CONSUMABLE_REPLACE_ITEMS,
     ERROR_HELP_URL_TEMPLATE,
 )
 from .coordinator import NarwalCoordinator, is_narwal_task_busy, is_setup_available
-from .entity import NarwalEntity
+from .entity import NarwalEntity, is_dock_consumable_identity
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -167,6 +169,29 @@ async def async_setup_entry(
     ]
     async_add_entities(entities)
 
+    known_consumables: set[str] = set()
+
+    @callback
+    def async_add_consumables() -> None:
+        new_consumables = sorted(
+            (
+                consumable
+                for code, consumable in coordinator.cloud_consumables.items()
+                if code not in known_consumables and consumable.has_overdue_signal
+            ),
+            key=lambda item: item.name.lower(),
+        )
+        if not new_consumables:
+            return
+        known_consumables.update(item.code for item in new_consumables)
+        async_add_entities(
+            NarwalConsumableOverdueBinarySensor(coordinator, consumable)
+            for consumable in new_consumables
+        )
+
+    async_add_consumables()
+    entry.async_on_unload(coordinator.async_add_listener(async_add_consumables))
+
 
 class NarwalDockedSensor(NarwalEntity, BinarySensorEntity):
     """Binary sensor that reports whether the vacuum is on the dock."""
@@ -231,3 +256,63 @@ class NarwalBinarySensor(NarwalEntity, BinarySensorEntity):
         if state is None or self.entity_description.attrs_fn is None:
             return None
         return self.entity_description.attrs_fn(state)
+
+
+class NarwalConsumableOverdueBinarySensor(NarwalEntity, BinarySensorEntity):
+    """Binary sensor for an overdue cloud consumable."""
+
+    _attr_device_class = BinarySensorDeviceClass.PROBLEM
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        consumable: NarwalCloudConsumable,
+    ) -> None:
+        """Initialize the consumable overdue sensor."""
+        super().__init__(coordinator)
+        device_id = coordinator.config_entry.data["device_id"]
+        self._consumable_code = consumable.code
+        self._attr_unique_id = (
+            f"{device_id}_consumable_{slugify(consumable.code)}_overdue"
+        )
+        self._attr_name = f"{consumable.name} overdue"
+        if is_dock_consumable_identity(consumable.code, consumable.name):
+            self._use_dock_device_info()
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return True when the cloud consumable is overdue."""
+        consumable = self.coordinator.cloud_consumables.get(self._consumable_code)
+        if consumable is None or not consumable.has_overdue_signal:
+            return None
+        return consumable.is_overdue
+
+    @property
+    def available(self) -> bool:
+        """Return true when the latest cloud consumable state is current."""
+        return (
+            self.coordinator.cloud_consumables_error is None
+            and (
+                consumable := self.coordinator.cloud_consumables.get(
+                    self._consumable_code
+                )
+            )
+            is not None
+            and consumable.has_overdue_signal
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, int | float | str | bool] | None:
+        """Return diagnostic consumable details."""
+        consumable = self.coordinator.cloud_consumables.get(self._consumable_code)
+        if consumable is None:
+            return None
+        return {
+            "consumables_code": consumable.code,
+            "used_hours": consumable.used_hours,
+            "total_hours": consumable.total_hours,
+            "remaining_hours": consumable.remaining_hours,
+            "used_percent": consumable.used_percent,
+            "remaining_percent": consumable.remaining_percent,
+        }
