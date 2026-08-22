@@ -116,6 +116,30 @@ class TestCoordinatorMapRefresh:
         coordinator.hass.async_create_task.assert_called_once()
         assert coordinator._prev_working_status == WorkingStatus.STANDBY
 
+    def test_task_completed_to_standby_triggers_dock_refresh(self) -> None:
+        """Transition from TASK_COMPLETED to docked state refreshes stale dock fields."""
+        coordinator = self._make_coordinator()
+        coordinator._prev_working_status = WorkingStatus.TASK_COMPLETED
+        state = NarwalState()
+        state.map_data = MagicMock()
+        state.working_status = WorkingStatus.STANDBY
+
+        coordinator._on_state_update(state)
+
+        coordinator.hass.async_create_task.assert_called_once()
+
+    def test_task_completed_to_charged_triggers_dock_refresh(self) -> None:
+        """Direct transition to CHARGED also refreshes stale dock fields."""
+        coordinator = self._make_coordinator()
+        coordinator._prev_working_status = WorkingStatus.TASK_COMPLETED
+        state = NarwalState()
+        state.map_data = MagicMock()
+        state.working_status = WorkingStatus.CHARGED
+
+        coordinator._on_state_update(state)
+
+        coordinator.hass.async_create_task.assert_called_once()
+
     def test_cleaning_alt_to_standby_triggers_dock_refresh(self) -> None:
         """Transition from CLEANING_ALT to STANDBY also triggers dock refresh."""
         coordinator = self._make_coordinator()

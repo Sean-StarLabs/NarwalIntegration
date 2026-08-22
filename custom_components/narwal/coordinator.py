@@ -190,10 +190,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         # go directly to DOCKED_V2(2).
         if (
             state.working_status in (
-                WorkingStatus.STANDBY, WorkingStatus.DOCKED_V2,
+                WorkingStatus.STANDBY,
+                WorkingStatus.DOCKED,
+                WorkingStatus.CHARGED,
+                WorkingStatus.DOCKED_V2,
             )
             and self._prev_working_status
-            in ACTIVE_CLEANING_STATUSES
+            in (*ACTIVE_CLEANING_STATUSES, WorkingStatus.TASK_COMPLETED)
         ):
             _LOGGER.info("Return-to-dock detected, refreshing dock status")
             self.hass.async_create_task(self._refresh_dock_status())
@@ -210,7 +213,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 and state.working_status in ACTIVE_CLEANING_STATUSES
             )
         )
-        if is_cleaning:
+        is_remapping = state.working_status == WorkingStatus.REMAPPING
+        if is_cleaning or is_remapping:
             display_age = self.client.last_display_map_age
             now = time.monotonic()
             if (

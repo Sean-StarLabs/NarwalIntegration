@@ -17,6 +17,7 @@ _WARNED_WORKING_STATUS: set[Any] = set()
 
 from .const import (
     ACTIVE_CLEANING_STATUSES,
+    ACTIVE_OFF_DOCK_STATUSES,
     CommandResult,
     FanLevel,
     MopHumidity,
@@ -693,6 +694,8 @@ class NarwalState:
         transitions to STANDBY/DOCKED/CHARGED, it has already docked
         even if field 3.7 is momentarily still set.
         """
+        if self.working_status == WorkingStatus.TASK_COMPLETED:
+            return not self.is_docked
         if self.working_status not in ACTIVE_CLEANING_STATUSES:
             return False
         return self.is_returning_to_dock and self.dock_sub_state == 2
@@ -749,8 +752,12 @@ class NarwalState:
                 self.current_room_id = room_id if room_id != 0 else None
             except (ValueError, TypeError):
                 pass
-        if active_payload:
-            self.working_status = WorkingStatus.CLEANING
+        if active_payload and self.working_status not in (
+            WorkingStatus.REMAPPING,
+            WorkingStatus.TASK_COMPLETED,
+        ):
+            if self.working_status != WorkingStatus.CUSTOM_CLEANING:
+                self.working_status = WorkingStatus.CLEANING
             self.last_active_working_status_time = time.monotonic()
             self.is_paused = False
             self.is_returning_to_dock = False
@@ -847,7 +854,7 @@ class NarwalState:
                     self.dock_presence = int(field3["3"])
                 except (ValueError, TypeError):
                     pass
-            if self.working_status in ACTIVE_CLEANING_STATUSES:
+            if self.working_status in ACTIVE_OFF_DOCK_STATUSES:
                 if "10" not in field3:
                     self.dock_sub_state = 0
                 if "12" not in field3:

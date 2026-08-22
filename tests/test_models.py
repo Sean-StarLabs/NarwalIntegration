@@ -5,14 +5,25 @@ from __future__ import annotations
 import logging
 import struct
 
-from narwal_client.const import WorkingStatus
+from narwal_client.const import CommandResult, WorkingStatus
 from narwal_client.models import (
+    CommandResponse,
     MapData,
     NarwalState,
     ObstacleInfo,
     RoomInfo,
     _parse_obstacles,
 )
+
+
+class TestCommandResponse:
+    """Tests for Narwal command responses."""
+
+    def test_success_accepts_success_code(self) -> None:
+        """Narwal reports successful commands with the success enum."""
+        assert CommandResponse(result_code=CommandResult.SUCCESS).success
+        assert not CommandResponse(result_code=0).success
+        assert not CommandResponse(result_code=CommandResult.CONFLICT).success
 
 
 class TestNarwalState:
@@ -45,6 +56,88 @@ class TestNarwalState:
         state.update_from_working_status({"13": 18000})
         assert state.working_status == WorkingStatus.UNKNOWN
         assert not state.has_recent_active_working_status
+
+    def test_working_status_metrics_do_not_override_remapping(self) -> None:
+        """A stale working_status packet must not hide an explicit remap state."""
+        state = NarwalState(working_status=WorkingStatus.REMAPPING)
+
+        state.update_from_working_status(
+            {"2": _float_to_uint32(12.5), "3": 120}
+        )
+
+        assert state.cleaning_time == 120
+        assert state.cleaning_area == 12.5
+        assert state.working_status == WorkingStatus.REMAPPING
+        assert not state.has_recent_active_working_status
+        assert not state.is_cleaning
+        assert not state.is_docked
+
+    def test_remapping_clears_stale_dock_signals(self) -> None:
+        """REMAPPING is off-dock context even though it is not cleaning."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+        state.dock_sub_state = 4
+        state.dock_activity = 4
+
+        state.update_from_base_status({"3": {"1": 7}})
+
+        assert state.working_status == WorkingStatus.REMAPPING
+        assert not state.is_cleaning
+        assert not state.is_docked
+        assert state.dock_sub_state == 0
+        assert state.dock_activity == 0
+        assert state.dock_field11 == 1
+        assert state.dock_field47 == 2
+
+    def test_working_status_metrics_do_not_override_custom_cleaning(self) -> None:
+        """Status 17 should not be collapsed back to generic cleaning."""
+        state = NarwalState(working_status=WorkingStatus.CUSTOM_CLEANING)
+
+        state.update_from_working_status({"2": _float_to_uint32(12.5), "3": 120})
+
+        assert state.working_status == WorkingStatus.CUSTOM_CLEANING
+        assert state.has_recent_active_working_status
+        assert state.is_cleaning
+
+    def test_working_status_metrics_do_not_override_task_completed(self) -> None:
+        """Stale metrics must not hide the return-to-dock phase."""
+        state = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
+        state.is_returning_to_dock = True
+        state.dock_sub_state = 2
+
+        state.update_from_working_status({"2": _float_to_uint32(12.5), "3": 120})
+
+        assert state.cleaning_time == 120
+        assert state.cleaning_area == 12.5
+        assert state.working_status == WorkingStatus.TASK_COMPLETED
+        assert state.is_returning
+        assert not state.has_recent_active_working_status
+        assert state.dock_sub_state == 2
+
+    def test_task_completed_is_returning_until_docked(self) -> None:
+        """TASK_COMPLETED is a return phase, not editable idle time."""
+        state = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
+
+        assert state.is_returning
+        assert not state.is_docked
+        assert not state.is_cleaning
+
+        state.update_from_base_status({"3": {"1": 19, "10": 1}, "11": 3, "47": 1})
+
+        assert state.is_docked
+        assert not state.is_returning
+
+    def test_task_completed_clears_stale_dock_activity_while_off_dock(self) -> None:
+        """Return-phase packets must not inherit stale station activity."""
+        state = NarwalState()
+        state.dock_activity = 4
+
+        state.update_from_base_status({"3": {"1": 19, "10": 2}, "11": 1, "47": 2})
+
+        assert state.working_status == WorkingStatus.TASK_COMPLETED
+        assert state.is_returning
+        assert not state.is_docked
+        assert state.dock_activity == 0
 
     def test_zeroed_task_metrics_do_not_mark_cleaning(self) -> None:
         """A zeroed session counter is not evidence of an active clean.
@@ -188,6 +281,14 @@ class TestNarwalState:
         assert state.is_cleaning
         assert not state.is_docked
 
+    def test_custom_cleaning_working_status(self) -> None:
+        """CUSTOM_CLEANING(17) maps to active cleaning."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 17}, "11": 1, "47": 2})
+        assert state.working_status == WorkingStatus.CUSTOM_CLEANING
+        assert state.is_cleaning
+        assert not state.is_docked
+
     def test_new_fw_field3_unknown_subfields_logged(self) -> None:
         """New firmware sub-fields (4, 11) are parsed without error."""
         state = NarwalState()
@@ -251,11 +352,11 @@ class TestNarwalState:
         """
         from narwal_client import models as models_mod
 
-        models_mod._WARNED_WORKING_STATUS.discard(17)
+        models_mod._WARNED_WORKING_STATUS.discard(255)
         state = NarwalState()
         with caplog.at_level(logging.WARNING, logger=models_mod.__name__):
             for _ in range(50):
-                state.update_from_base_status({"3": {"1": 17}})
+                state.update_from_base_status({"3": {"1": 255}})
 
         warnings = [r for r in caplog.records if "Unknown working_status" in r.message]
         assert len(warnings) == 1

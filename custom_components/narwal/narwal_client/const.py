@@ -179,6 +179,7 @@ class WorkingStatus(IntEnum):
            active — developer/take_picture is accepted in this state)
       10 = DOCKED (on dock, charging)
       14 = CHARGED (on dock, fully charged)
+      17 = CUSTOM_CLEANING (active custom clean on Flow 2; observed upstairs)
       19 = TASK_COMPLETED (transitional: scheduled task finished, returning to base)
 
     Field 3 sub-fields (confirmed live):
@@ -204,6 +205,7 @@ class WorkingStatus(IntEnum):
     REMAPPING = 7     # mapping/exploration (live 2026-07-09); camera active, take_picture accepted
     DOCKED = 10       # on dock (does NOT reliably indicate charging vs charged)
     CHARGED = 14      # on dock (reported before 100% — use battery_level for charge state)
+    CUSTOM_CLEANING = 17  # active custom clean on Flow 2
     TASK_COMPLETED = 19  # transitional: task finished, robot returning to base (#41)
     # PLACEHOLDER: error state value not yet observed live.
     # Trigger a real error (e.g., pick up robot mid-clean) to discover the value.
@@ -215,9 +217,15 @@ ACTIVE_CLEANING_STATUSES = frozenset(
         WorkingStatus.CLEANING_V2,
         WorkingStatus.CLEANING,
         WorkingStatus.CLEANING_ALT,
-        WorkingStatus.REMAPPING,
+        WorkingStatus.CUSTOM_CLEANING,
     }
 )
+
+
+ACTIVE_OFF_DOCK_STATUSES = ACTIVE_CLEANING_STATUSES | {
+    WorkingStatus.REMAPPING,
+    WorkingStatus.TASK_COMPLETED,
+}
 
 
 class FanLevel(IntEnum):

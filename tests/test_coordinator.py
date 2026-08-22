@@ -23,7 +23,11 @@ from custom_components.narwal.coordinator import (
     TOPIC_SUBSCRIPTION_TTL,
     NarwalCoordinator,
 )  # noqa: E402
-from custom_components.narwal.narwal_client import NarwalConnectionError, NarwalState  # noqa: E402
+from custom_components.narwal.narwal_client import (  # noqa: E402
+    NarwalConnectionError,
+    NarwalState,
+    WorkingStatus,
+)
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
 
@@ -166,6 +170,28 @@ class TestCoordinatorResilience:
         coordinator._on_state_update(state)
 
         assert coordinator._consecutive_failures == 0
+
+    async def test_remapping_display_map_dropout_resubscribes(self) -> None:
+        """Remapping also needs display_map recovery when broadcasts stall."""
+        coordinator = self._make_coordinator()
+        coordinator.client.last_display_map_age = 31.0
+        coordinator._last_display_map_resub = time.monotonic() - 46.0
+        coordinator.async_set_updated_data = MagicMock()
+        scheduled_tasks = []
+
+        def record_background_task(hass, coro, name):
+            coro.close()
+            scheduled_tasks.append(name)
+
+        coordinator.config_entry.async_create_background_task.side_effect = (
+            record_background_task
+        )
+
+        state = NarwalState(working_status=WorkingStatus.REMAPPING)
+        state.map_data = MagicMock()
+        coordinator._on_state_update(state)
+
+        assert scheduled_tasks == ["narwal_resub"]
 
     async def test_poll_does_not_call_connect(self) -> None:
         """_async_update_data does NOT call client.connect() when disconnected."""
