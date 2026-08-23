@@ -1,8 +1,7 @@
-"""Button entities for Narwal station maintenance actions."""
+"""Button entities for Narwal robot actions and consumable resets."""
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from dataclasses import dataclass
 
@@ -23,27 +22,15 @@ from .coordinator import (
     can_resume_cleaning,
     can_return_home,
     can_start_cleaning,
-    can_start_dock_task,
     can_stop_cleaning,
-    can_stop_dock_task,
-    dock_task,
     is_narwal_task_busy,
 )
 from .entity import (
-    NarwalDockEntity,
     NarwalEntity,
     is_dock_consumable_identity,
     is_dock_consumable_name,
 )
 from .narwal_client import CommandResponse, CommandResult, WorkingStatus
-
-
-@dataclass(frozen=True, kw_only=True)
-class NarwalButtonEntityDescription(ButtonEntityDescription):
-    """Description for a Narwal action button."""
-
-    action: str
-    icon: str
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -63,45 +50,6 @@ class NarwalConsumableInfoResetDescription:
     maintain_items: tuple[int, ...] = ()
     replace_items: tuple[int, ...] = ()
 
-
-BUTTON_DESCRIPTIONS: tuple[NarwalButtonEntityDescription, ...] = (
-    NarwalButtonEntityDescription(
-        key="stop_dock_task",
-        translation_key="stop_dock_task",
-        action="stop_dock_task",
-        icon="mdi:stop-circle-outline",
-    ),
-    NarwalButtonEntityDescription(
-        key="empty_dustbin",
-        translation_key="empty_dustbin",
-        action="empty_dustbin",
-        icon="mdi:delete-empty",
-    ),
-    NarwalButtonEntityDescription(
-        key="wash_mop",
-        translation_key="wash_mop",
-        action="wash_mop",
-        icon="mdi:waves-arrow-up",
-    ),
-    NarwalButtonEntityDescription(
-        key="dry_mop",
-        translation_key="dry_mop",
-        action="dry_mop",
-        icon="mdi:fan",
-    ),
-    NarwalButtonEntityDescription(
-        key="dry_dust_bin",
-        translation_key="dry_dust_bin",
-        action="dry_dust_bag",
-        icon="mdi:air-filter",
-    ),
-    NarwalButtonEntityDescription(
-        key="dry_dock_bag",
-        translation_key="dry_dock_bag",
-        action="dry_station_bag",
-        icon="mdi:shield-sun-outline",
-    ),
-)
 
 ROBOT_BUTTON_DESCRIPTIONS: tuple[NarwalRobotButtonEntityDescription, ...] = (
     NarwalRobotButtonEntityDescription(
@@ -196,31 +144,6 @@ def _maintenance_reset_descriptions() -> tuple[NarwalConsumableInfoResetDescript
 CONSUMABLE_INFO_RESET_DESCRIPTIONS = _maintenance_reset_descriptions()
 
 
-STATION_TASK_LABELS: dict[str, str] = {
-    "emptying_dustbin": "Emptying dustbin",
-    "washing_mop": "Washing mop",
-    "drying_mop": "Drying mop",
-    "drying_or_disinfecting": "Drying / disinfecting",
-    "station_active": "Station active",
-}
-
-
-def _station_task(state) -> str | None:
-    """Return the active dock task."""
-    return dock_task(state)
-
-
-def _format_duration(seconds: int) -> str:
-    """Return a short human-readable duration."""
-    minutes = max(0, round(seconds / 60))
-    hours, minutes = divmod(minutes, 60)
-    if hours and minutes:
-        return f"{hours}h {minutes}m"
-    if hours:
-        return f"{hours}h"
-    return f"{minutes}m"
-
-
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: NarwalConfigEntry,
@@ -231,10 +154,6 @@ async def async_setup_entry(
     async_add_entities(
         NarwalRobotActionButton(coordinator, description)
         for description in ROBOT_BUTTON_DESCRIPTIONS
-    )
-    async_add_entities(
-        NarwalActionButton(coordinator, description)
-        for description in BUTTON_DESCRIPTIONS
     )
     known_consumable_info_resets: set[str] = set()
 
@@ -426,101 +345,6 @@ class NarwalRobotActionButton(NarwalEntity, ButtonEntity):
         if state and state.map_data:
             return [room.room_id for room in state.map_data.rooms if room.room_id > 0]
         return []
-
-
-class NarwalActionButton(NarwalDockEntity, ButtonEntity):
-    """Button entity for a dock/station maintenance command."""
-
-    entity_description: NarwalButtonEntityDescription
-
-    def __init__(
-        self,
-        coordinator: NarwalCoordinator,
-        description: NarwalButtonEntityDescription,
-    ) -> None:
-        """Initialize the button."""
-        super().__init__(coordinator)
-        self.entity_description = description
-        device_id = coordinator.config_entry.data["device_id"]
-        self._attr_unique_id = f"{device_id}_{description.key}"
-        self._attr_icon = description.icon
-
-    @property
-    def available(self) -> bool:
-        """Return True when the integration can send station actions."""
-        if not super().available:
-            return False
-        state = self.coordinator.data
-        if self.entity_description.key != "stop_dock_task":
-            return can_start_dock_task(state)
-        return can_stop_dock_task(state)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, int | str | bool] | None:
-        """Return dock task context for the station stop button."""
-        if self.entity_description.key != "stop_dock_task":
-            return None
-
-        state = self.coordinator.data
-        if state is None:
-            return None
-
-        attributes: dict[str, int | str | bool] = {
-            "dock_active": state.is_station_active,
-            "docked": state.is_docked,
-        }
-        if station_task := _station_task(state):
-            attributes["station_task"] = station_task
-            attributes["task"] = STATION_TASK_LABELS.get(station_task, station_task)
-        if state.dry_mop_remaining_time is not None:
-            attributes["drying_time_left"] = state.dry_mop_remaining_time
-            attributes["time_left"] = _format_duration(state.dry_mop_remaining_time)
-        if state.mop_drying_target > 0:
-            attributes["mop_drying_elapsed"] = state.mop_drying_elapsed
-            attributes["mop_drying_target"] = state.mop_drying_target
-        return attributes
-
-    async def async_press(self) -> None:
-        """Run the Narwal station action."""
-        if not self.available:
-            raise HomeAssistantError("Narwal dock task is not available")
-
-        client = self.coordinator.client
-        state = self.coordinator.data
-        if self.entity_description.key == "stop_dock_task":
-            if not can_stop_dock_task(state):
-                raise HomeAssistantError("Narwal dock task is not active")
-        elif not can_start_dock_task(state):
-            raise HomeAssistantError("Narwal dock task cannot be started right now")
-
-        if not client.robot_awake:
-            await client.wake(timeout=10.0)
-
-        if self.entity_description.key == "stop_dock_task":
-            if not can_stop_dock_task(client.state):
-                raise HomeAssistantError("Narwal dock task is not active")
-        elif not can_start_dock_task(client.state):
-            raise HomeAssistantError("Narwal dock task cannot be started right now")
-
-        command: Callable[[], Awaitable[CommandResponse]] = getattr(
-            client,
-            self.entity_description.action,
-        )
-        response = await command()
-        if self.entity_description.action == "wash_mop" and response.not_applicable:
-            response = await client.wash_mop_by_robot_status()
-        if self.entity_description.action == "dry_mop" and response.success:
-            client.state.last_dry_mop_empty_time = 0.0
-        if not response.success and response.result_code != 0:
-            try:
-                result_name = CommandResult(response.result_code).name
-            except ValueError:
-                result_name = f"UNKNOWN({response.result_code})"
-            raise HomeAssistantError(
-                f"Narwal {self.entity_description.key} failed: {result_name}"
-            )
-
-        self.coordinator.async_set_updated_data(client.state)
 
 
 class NarwalConsumableResetButton(NarwalEntity, ButtonEntity):

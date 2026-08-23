@@ -12,12 +12,10 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from custom_components.narwal.button import (  # noqa: E402
-    BUTTON_DESCRIPTIONS,
     CONSUMABLE_INFO_RESET_DESCRIPTIONS,
-    NarwalActionButton,
+    ROBOT_BUTTON_DESCRIPTIONS,
     NarwalConsumableInfoResetButton,
     NarwalRobotActionButton,
-    ROBOT_BUTTON_DESCRIPTIONS,
     async_setup_entry,
 )
 from custom_components.narwal.coordinator import CleanSettings  # noqa: E402
@@ -31,8 +29,6 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     WorkingStatus,
 )
 
-
-_DESCS = {d.key: d for d in BUTTON_DESCRIPTIONS}
 _ROBOT_DESCS = {d.key: d for d in ROBOT_BUTTON_DESCRIPTIONS}
 
 
@@ -82,80 +78,6 @@ def _coordinator(
         }
     )
     return coord
-
-
-def test_station_button_unavailable_away_from_dock() -> None:
-    coord = _coordinator(is_docked=False)
-    button = NarwalActionButton(coord, _DESCS["empty_dustbin"])
-    assert not button.available
-
-
-def test_station_button_available_when_docked_and_idle() -> None:
-    coord = _coordinator(is_docked=True)
-    button = NarwalActionButton(coord, _DESCS["empty_dustbin"])
-    assert button.available
-
-
-def test_station_button_unavailable_when_dock_state_unknown() -> None:
-    coord = _coordinator(is_docked=False, dock_state_unknown=True)
-    button = NarwalActionButton(coord, _DESCS["empty_dustbin"])
-    assert not button.available
-
-
-def test_stop_dock_task_available_only_during_station_task() -> None:
-    idle = _coordinator(is_docked=True)
-    active = _coordinator(is_docked=True, is_station_active=True)
-
-    assert not NarwalActionButton(idle, _DESCS["stop_dock_task"]).available
-    assert NarwalActionButton(active, _DESCS["stop_dock_task"]).available
-
-
-def test_stop_dock_task_available_during_active_status_station_task() -> None:
-    coord = _coordinator(is_docked=False, is_station_active=True)
-    coord.data.working_status = WorkingStatus.CLEANING
-    coord.data.has_recent_active_working_status = True
-    coord.data.has_dock_presence_signal = True
-    coord.data.has_explicit_off_dock_signal = False
-
-    assert NarwalActionButton(coord, _DESCS["stop_dock_task"]).available
-
-
-def test_stop_dock_task_unavailable_when_station_activity_is_stale_off_dock() -> None:
-    coord = _coordinator(is_docked=False, is_station_active=True)
-    coord.data.has_dock_presence_signal = False
-    coord.data.has_explicit_off_dock_signal = True
-
-    assert not NarwalActionButton(coord, _DESCS["stop_dock_task"]).available
-
-
-@pytest.mark.asyncio
-async def test_station_button_rejects_unavailable_press() -> None:
-    """Unavailable dock actions should be enforced, not only hidden in the UI."""
-    coord = _coordinator(is_docked=False)
-    coord.client.robot_awake = True
-    coord.client.empty_dustbin = AsyncMock(
-        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
-    )
-
-    with pytest.raises(Exception, match="not available"):
-        await NarwalActionButton(coord, _DESCS["empty_dustbin"]).async_press()
-
-    coord.client.empty_dustbin.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_station_button_rejects_press_when_entity_unavailable() -> None:
-    """Direct button.press must not bypass entity-level availability."""
-    coord = _coordinator(is_docked=True)
-    coord.last_update_success = False
-    coord.client.empty_dustbin = AsyncMock(
-        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
-    )
-
-    with pytest.raises(Exception, match="not available"):
-        await NarwalActionButton(coord, _DESCS["empty_dustbin"]).async_press()
-
-    coord.client.empty_dustbin.assert_not_awaited()
 
 
 def test_robot_action_buttons_follow_cleaning_phase() -> None:
@@ -355,26 +277,6 @@ async def test_start_cleaning_button_revalidates_after_client_map_resolution() -
         ).async_press()
 
     coord.client.start_rooms.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_stop_dock_task_calls_station_stop() -> None:
-    coord = _coordinator(is_docked=True, is_station_active=True)
-    coord.client.robot_awake = True
-    coord.client.state.is_station_active = True
-    coord.client.stop_dock_task = AsyncMock(
-        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
-    )
-    coord.client.cancel = AsyncMock()
-    coord.client.stop = AsyncMock()
-    coord.async_set_updated_data = MagicMock()
-
-    await NarwalActionButton(coord, _DESCS["stop_dock_task"]).async_press()
-
-    coord.client.stop_dock_task.assert_awaited_once_with()
-    coord.client.cancel.assert_not_called()
-    coord.client.stop.assert_not_called()
-    coord.async_set_updated_data.assert_called_once_with(coord.client.state)
 
 
 @pytest.mark.asyncio

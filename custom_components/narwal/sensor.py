@@ -18,14 +18,13 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import slugify
 
-from .narwal_client import NarwalState, WorkingStatus
-from .narwal_client.const import ACTIVE_CLEANING_STATUSES
-
 from . import NarwalConfigEntry
 from .cloud import NarwalCloudConsumable
 from .const import TASK_RESULT_OPTIONS
-from .coordinator import NarwalCoordinator, dock_task
+from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity, is_dock_consumable_identity
+from .narwal_client import NarwalState, WorkingStatus
+from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 _MAX_MAP_METADATA_ATTRIBUTE_BYTES = 16 * 1024
 
@@ -109,11 +108,6 @@ def _fit_map_metadata_attributes(attributes: dict[str, Any]) -> dict[str, Any]:
     compact["rooms"] = []
     compact["rugs"] = []
     return compact
-
-
-def _station_task(state: NarwalState) -> str | None:
-    """Return the active dock task."""
-    return dock_task(state) or "idle"
 
 
 def _has_base_status_field(state: NarwalState, field: str) -> bool:
@@ -217,39 +211,6 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         else None,
         available_fn=lambda state: (
             state.current_room_name is not None and _has_active_cleaning_metrics(state)
-        ),
-    ),
-    NarwalSensorEntityDescription(
-        key="station_task",
-        translation_key="station_task",
-        device_class=SensorDeviceClass.ENUM,
-        options=[
-            "emptying_dustbin",
-            "washing_mop",
-            "drying_mop",
-            "drying_or_disinfecting",
-            "station_active",
-            "idle",
-        ],
-        dock_device=True,
-        value_fn=_station_task,
-    ),
-    NarwalSensorEntityDescription(
-        key="dry_mop_remaining_time",
-        translation_key="dry_mop_remaining_time",
-        device_class=SensorDeviceClass.DURATION,
-        native_unit_of_measurement=UnitOfTime.SECONDS,
-        state_class=SensorStateClass.MEASUREMENT,
-        dock_device=True,
-        value_fn=lambda state: state.dry_mop_remaining_time
-        if state.is_station_active
-        and state.dry_mop_remaining_time is not None
-        and state.dry_mop_remaining_time > 0
-        else None,
-        available_fn=lambda state: (
-            state.is_station_active
-            and state.dry_mop_remaining_time is not None
-            and state.dry_mop_remaining_time > 0
         ),
     ),
 )

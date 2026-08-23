@@ -267,6 +267,21 @@
       }
     },
     "switch": {
+      "empty_dustbin": {
+        "name": "Empty dustbin"
+      },
+      "wash_mop": {
+        "name": "Wash mop"
+      },
+      "dry_mop": {
+        "name": "Dry mop"
+      },
+      "dry_dust_bin": {
+        "name": "Dry and disinfect dust bin"
+      },
+      "dry_dock_bag": {
+        "name": "Dry and disinfect dock bag"
+      },
       "show_room_labels": {
         "name": "Show room labels"
       },

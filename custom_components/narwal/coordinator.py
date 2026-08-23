@@ -71,6 +71,21 @@ MOP_WORK_MODES = frozenset(
 VACUUM_WORK_MODES = frozenset(
     {WorkMode.VACUUM, WorkMode.VACUUM_THEN_MOP, WorkMode.VACUUM_AND_MOP}
 )
+DOCK_TASK_KEY_BY_RAW_TASK = {
+    "emptying_dustbin": "empty_dustbin",
+    "washing_mop": "wash_mop",
+    "drying_mop": "dry_mop",
+}
+GENERIC_DRY_DOCK_TASK_KEYS = frozenset({"dry_dust_bin", "dry_dock_bag"})
+DOCK_TASK_KEYS = frozenset(
+    {
+        "empty_dustbin",
+        "wash_mop",
+        "dry_mop",
+        "dry_dust_bin",
+        "dry_dock_bag",
+    }
+)
 
 
 @dataclass
@@ -341,6 +356,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.room_clean_settings: dict[tuple[str | None, int], RoomCleanSettings] = {}
         self.room_clean_settings_customized: dict[tuple[str | None, int], set[str]] = {}
         self.active_room_ids: list[int] | None = None
+        self._active_dock_task_key: str | None = None
         self._active_room_plan_pending_until = 0.0
         self._listen_task: asyncio.Task[None] | None = None
         self._fast_poll_remaining = 0
@@ -356,7 +372,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._consecutive_failures = 0
         self._max_failures = 5  # 5 * 60s = 5 minutes before entities go unavailable
         self._local_available = False
-        self._consumable_poll_countdown = 0  # 0 = fetch on next poll, then every CONSUMABLE_POLL_EVERY
+        # 0 = fetch on next poll, then every CONSUMABLE_POLL_EVERY.
+        self._consumable_poll_countdown = 0
         self.cloud_consumables: dict[str, NarwalCloudConsumable] = {}
         self.cloud_consumables_error: str | None = None
         self._cloud_consumables_last_update = 0.0
@@ -541,6 +558,47 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return
         self.set_active_room_ids(None)
 
+    def set_active_dock_task_key(self, task_key: str | None) -> None:
+        """Store the dock task started through Home Assistant."""
+        if task_key is not None and task_key not in DOCK_TASK_KEYS:
+            raise ValueError(f"Unsupported Narwal dock task: {task_key}")
+        self._active_dock_task_key = task_key
+
+    def current_dock_task_key(self, state: NarwalState | None = None) -> str | None:
+        """Return the current task-switch key for the active dock task."""
+        state = state or self.data or self.client.state
+        if (
+            getattr(state, "has_explicit_off_dock_signal", False) is True
+            and getattr(state, "has_dock_presence_signal", False) is not True
+        ):
+            return None
+        raw_task = dock_task(state)
+        if raw_task is None:
+            return None
+        if raw_task in DOCK_TASK_KEY_BY_RAW_TASK:
+            return DOCK_TASK_KEY_BY_RAW_TASK[raw_task]
+        if (
+            raw_task == "drying_or_disinfecting"
+            and self._active_dock_task_key in GENERIC_DRY_DOCK_TASK_KEYS
+        ):
+            return self._active_dock_task_key
+        return None
+
+    def _sync_active_dock_task_key(self, state: NarwalState) -> None:
+        """Keep the remembered dock task aligned with fresh robot state."""
+        if (
+            getattr(state, "has_explicit_off_dock_signal", False) is True
+            and getattr(state, "has_dock_presence_signal", False) is not True
+        ):
+            self._active_dock_task_key = None
+            return
+        raw_task = dock_task(state)
+        if raw_task is None:
+            self._active_dock_task_key = None
+            return
+        if raw_task in DOCK_TASK_KEY_BY_RAW_TASK:
+            self._active_dock_task_key = DOCK_TASK_KEY_BY_RAW_TASK[raw_task]
+
     def _start_cloud_consumables_loop(self) -> None:
         """Start the independent cloud consumable refresh loop if configured."""
         if self._cloud_client is None:
@@ -647,6 +705,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._consecutive_failures = 0
         self._local_available = True
         self._sync_active_room_ids(state)
+        self._sync_active_dock_task_key(state)
         previous_status = self._prev_working_status
         is_remapping = state.working_status == WorkingStatus.REMAPPING
 
@@ -908,10 +967,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         # Retry map fetch if it failed during setup
         if self.client.state.map_data is None:
-            try:
+            with suppress(Exception):
                 await self.client.get_map()
-            except Exception:
-                pass
 
         # Renew the broadcast subscription before it lapses. This is deliberately
         # NOT conditional on believing we are cleaning: working_status is what tells
@@ -967,6 +1024,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     self.update_interval = POLL_INTERVAL
 
         self._sync_active_room_ids(self.client.state)
+        self._sync_active_dock_task_key(self.client.state)
         return self.client.state
 
     @property
