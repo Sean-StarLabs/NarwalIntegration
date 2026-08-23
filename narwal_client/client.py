@@ -484,7 +484,7 @@ class NarwalClient:
         self._last_broadcast_time = time.monotonic()
         if not self._robot_awake:
             self._robot_awake = True
-            _LOGGER.info("Robot is awake (received broadcast)")
+            _LOGGER.debug("Robot is awake (received broadcast)")
 
         if self.on_message:
             self.on_message(msg)
@@ -762,7 +762,7 @@ class NarwalClient:
                     and time.monotonic() - self._last_broadcast_time
                     > BROADCAST_STALE_TIMEOUT
                 ):
-                    _LOGGER.info(
+                    _LOGGER.debug(
                         "No broadcast for %.0fs — robot may have gone to sleep",
                         time.monotonic() - self._last_broadcast_time,
                     )
