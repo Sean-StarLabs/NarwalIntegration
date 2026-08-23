@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -10,6 +9,7 @@ import pytest
 from narwal_client.client import NarwalClient, NarwalConnectionError
 from narwal_client.const import (
     TOPIC_CMD_CLEAN_TASK,
+    TOPIC_CMD_GET_DEVICE_INFO,
     TOPIC_CMD_PLAN_START,
     AmbientLightCtrlType,
     CommandResult,
@@ -17,6 +17,7 @@ from narwal_client.const import (
     WorkingStatus,
 )
 from narwal_client.models import CommandResponse, MapData, RoomInfo
+from narwal_client.protocol import PROTOBUF_FIELD5_TAG, build_frame
 
 
 class TestNarwalClientInit:
@@ -136,6 +137,29 @@ class TestNarwalClientInit:
             assert await client.wake(timeout=10.0)
 
         wake_burst.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_discover_device_id_preserves_field5_product_key(self) -> None:
+        """Auto-discovery must keep the product key that answered the wake probe."""
+        client = NarwalClient("10.0.0.1")
+        client._ws = AsyncMock()
+        client._connected.set()
+        frame = bytearray(
+            build_frame(f"/DrzDKQ0MU8//{TOPIC_CMD_GET_DEVICE_INFO}", b"\x08\x01")
+        )
+        frame[2] = PROTOBUF_FIELD5_TAG
+        client._ws.recv.return_value = bytes(frame)
+
+        with patch.object(
+            client,
+            "_decode_protobuf",
+            return_value={"2": b"auto_device_456"},
+        ):
+            device_id = await client.discover_device_id(timeout=1.0)
+
+        assert device_id == "auto_device_456"
+        assert client.device_id == "auto_device_456"
+        assert client.topic_prefix == "/DrzDKQ0MU8"
 
 
 class TestBuildCleanPayloadV2:
