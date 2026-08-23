@@ -176,3 +176,27 @@ def test_dock_task_switch_exposes_drying_progress_attributes() -> None:
         "target_minutes": 12,
         "progress": 17,
     }
+
+
+def test_dock_task_switch_exposes_app_started_dock_bag_drying() -> None:
+    state = _state()
+    state.update_from_working_status({"12": 9_000, "13": 18_000, "19": {}})
+    coordinator = _coordinator(state)
+    NarwalCoordinator._sync_active_dock_task_key(coordinator, coordinator.data)
+    switch = NarwalDockTaskSwitch(coordinator, _DESCS["dry_dock_bag"])
+
+    assert switch.is_on is True
+    assert switch.available
+    assert switch.extra_state_attributes == {
+        "dock_active": True,
+        "docked": True,
+        "active": True,
+        "raw_task": "dry_dock_bag",
+        "task": "Drying / disinfecting dock bag",
+        "time_left": "2h 30m",
+        "time_left_minutes": 150,
+        "timer_fields": "12/13",
+        "elapsed_minutes": 150,
+        "target_minutes": 300,
+        "progress": 50,
+    }

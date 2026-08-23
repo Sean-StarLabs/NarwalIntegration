@@ -36,6 +36,7 @@ from .coordinator import (
     can_start_cleaning,
     can_stop_cleaning,
     clean_setting_applies_to_mode,
+    dock_task,
     is_live_clean_setting_available,
     is_narwal_task_busy,
     is_setup_available,
@@ -264,6 +265,29 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 {"id": room_id, "name": name}
                 for room_id, name in sorted(room_names.items(), key=lambda item: item[1].lower())
             ]
+        station_task = dock_task(state)
+        if station_task is not None:
+            attributes["station_task"] = station_task
+        dock_remaining = (
+            state.dock_drying_remaining_time
+            if state.dock_drying_remaining_time is not None
+            else state.dry_mop_remaining_time
+        )
+        if dock_remaining is not None:
+            attributes["drying_time_left"] = dock_remaining
+            attributes["drying_time_left_minutes"] = _duration_minutes(dock_remaining)
+            attributes["dock_time_left"] = _format_duration(dock_remaining)
+        dock_progress = state.dock_drying_progress_percent
+        if dock_progress is None and state.mop_drying_target > 0:
+            dock_progress = min(
+                100,
+                round(state.mop_drying_elapsed / state.mop_drying_target * 100),
+            )
+        if dock_progress is not None:
+            attributes["dock_progress"] = dock_progress
+            attributes["dock_progress_display"] = f"{dock_progress}%"
+        if state.dock_drying_timer_fields is not None:
+            attributes["dock_timer_fields"] = "/".join(state.dock_drying_timer_fields)
         active_cleaning_metrics = _has_active_cleaning_metrics(state)
         active_room_plan = _has_active_room_plan(state)
         if active_cleaning_metrics and state.current_room_id is not None:

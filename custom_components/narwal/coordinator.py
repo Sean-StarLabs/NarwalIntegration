@@ -47,6 +47,7 @@ CONSUMABLE_POLL_EVERY = 30
 TOPIC_SUBSCRIPTION_TTL = 600.0
 TOPIC_RESUBSCRIBE_AFTER = 240.0
 ACTIVE_TASK_REFRESH_INTERVAL = 30.0
+IDLE_DOCK_TASK_REFRESH_INTERVAL = 120.0
 REMAP_MAP_REFRESH_ATTEMPTS = 3
 REMAP_MAP_REFRESH_RETRY_DELAY = 10.0
 PENDING_ROOM_PLAN_TTL = 120.0
@@ -61,6 +62,8 @@ DOCK_TASK_KEY_BY_RAW_TASK = {
     "emptying_dustbin": "empty_dustbin",
     "washing_mop": "wash_mop",
     "drying_mop": "dry_mop",
+    "dry_dust_bin": "dry_dust_bin",
+    "dry_dock_bag": "dry_dock_bag",
 }
 GENERIC_DRY_DOCK_TASK_KEYS = frozenset({"dry_dust_bin", "dry_dock_bag"})
 DOCK_TASK_KEYS = frozenset(
@@ -300,6 +303,8 @@ def dock_task(state: NarwalState | None) -> str | None:
         return "emptying_dustbin"
     if state.is_washing_mop:
         return "washing_mop"
+    if state.active_dock_drying_task is not None:
+        return state.active_dock_drying_task
     if state.is_drying_mop:
         return "drying_mop"
     if state.station_activity == 4:
@@ -715,9 +720,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     f"{DOMAIN}_resub",
                 )
 
-        if is_cleaning or state.is_station_active:
+        if is_cleaning or state.is_station_active or state.is_docked:
             now = time.monotonic()
-            if now - self._last_task_details_refresh > ACTIVE_TASK_REFRESH_INTERVAL:
+            interval = (
+                ACTIVE_TASK_REFRESH_INTERVAL
+                if is_cleaning or state.is_station_active
+                else IDLE_DOCK_TASK_REFRESH_INTERVAL
+            )
+            if now - self._last_task_details_refresh > interval:
                 self._last_task_details_refresh = now
                 self.config_entry.async_create_background_task(
                     self.hass,
@@ -910,9 +920,18 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 and self.client.state.working_status in ACTIVE_CLEANING_STATUSES
             )
         )
-        if is_cleaning or self.client.state.is_station_active:
+        if (
+            is_cleaning
+            or self.client.state.is_station_active
+            or self.client.state.is_docked
+        ):
             now = time.monotonic()
-            if now - self._last_task_details_refresh > ACTIVE_TASK_REFRESH_INTERVAL:
+            interval = (
+                ACTIVE_TASK_REFRESH_INTERVAL
+                if is_cleaning or self.client.state.is_station_active
+                else IDLE_DOCK_TASK_REFRESH_INTERVAL
+            )
+            if now - self._last_task_details_refresh > interval:
                 self._last_task_details_refresh = now
                 await self._refresh_task_details(cleaning=is_cleaning)
 

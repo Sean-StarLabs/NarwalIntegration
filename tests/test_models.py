@@ -406,6 +406,10 @@ class TestNarwalState:
         assert state.mop_drying_elapsed == 900
         assert state.mop_drying_target == 12600
         assert state.dry_mop_remaining_time == 11700
+        assert state.dock_drying_elapsed == 900
+        assert state.dock_drying_target == 12600
+        assert state.dock_drying_remaining_time == 11700
+        assert state.active_dock_drying_task == "drying_mop"
         assert state.is_station_active
 
     def test_active_clean_clears_stale_mop_drying_timer(self) -> None:
@@ -421,6 +425,7 @@ class TestNarwalState:
         assert not state.is_station_active
         assert not state.is_drying_mop
         assert state.dry_mop_remaining_time is None
+        assert state.dock_drying_remaining_time is None
 
     def test_active_off_dock_status_ignores_stale_station_activity(self) -> None:
         """A stale station activity value must not hide an off-dock clean."""
@@ -444,19 +449,27 @@ class TestNarwalState:
         assert state.working_status == WorkingStatus.CHARGED
         assert state.is_station_active
         assert state.is_drying_mop
+        assert state.active_dock_drying_task == "drying_mop"
         assert not state.is_cleaning
         assert state.dock_field11 == 3
         assert state.dock_field47 == 1
 
-    def test_working_status_keeps_non_mop_station_timer_out_of_mop_drying(self) -> None:
-        """Non-mop station timers must not populate mop-drying state."""
+    def test_working_status_decodes_dock_bag_drying_timer(self) -> None:
+        """Non-mop station timers expose a generic dock task without mop state."""
         state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
         state.update_from_working_status({"12": 9490, "13": 18000, "19": {}})
 
         assert state.mop_drying_elapsed == 0
         assert state.mop_drying_target == 0
         assert state.dry_mop_remaining_time is None
-        assert not state.is_station_active
+        assert state.dock_drying_elapsed == 9490
+        assert state.dock_drying_target == 18000
+        assert state.dock_drying_remaining_time == 8510
+        assert state.dock_drying_progress_percent == 53
+        assert state.dock_drying_timer_fields == ("12", "13")
+        assert state.active_dock_drying_task == "dry_dock_bag"
+        assert state.is_station_active
 
     def test_base_status_dock_activity_3_is_washing_mop(self) -> None:
         """Live wash-and-dry capture reports mop washing as field 3.12 = 3."""
@@ -518,6 +531,20 @@ class TestNarwalState:
         assert not state.is_drying_mop
         assert state.station_activity == 4
 
+    def test_dry_mop_timer_clears_stale_non_mop_timer_fields(self) -> None:
+        """A dry-mop query must not inherit timer metadata from another dock task."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+        state.update_from_working_status({"12": 9_000, "13": 18_000, "19": {}})
+
+        state.update_from_aux_status(TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME, {"2": 600})
+
+        assert state.active_dock_drying_task == "drying_mop"
+        assert state.dock_drying_remaining_time == 600
+        assert state.dock_drying_elapsed == 0
+        assert state.dock_drying_target == 0
+        assert state.dock_drying_timer_fields is None
+
     def test_working_status_ignores_non_numeric_station_timer_fields(self) -> None:
         """Field 12 can be a room-list shape in other payloads."""
         state = NarwalState()
@@ -526,6 +553,7 @@ class TestNarwalState:
         assert state.mop_drying_elapsed == 0
         assert state.mop_drying_target == 0
         assert state.dry_mop_remaining_time is None
+        assert state.dock_drying_remaining_time is None
 
     def test_update_from_base_status_docked(self) -> None:
         state = NarwalState()

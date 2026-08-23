@@ -32,6 +32,8 @@ STATION_TASK_LABELS: dict[str, str] = {
     "emptying_dustbin": "Emptying dustbin",
     "washing_mop": "Washing mop",
     "drying_mop": "Drying mop",
+    "dry_dust_bin": "Drying / disinfecting dust bin",
+    "dry_dock_bag": "Drying / disinfecting dock bag",
     "drying_or_disinfecting": "Drying / disinfecting",
     "station_active": "Station active",
 }
@@ -203,14 +205,23 @@ class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
         if raw_task is not None:
             attributes["raw_task"] = raw_task
             attributes["task"] = STATION_TASK_LABELS.get(raw_task, raw_task)
-        if state.dry_mop_remaining_time is not None:
-            attributes["time_left"] = _format_duration(state.dry_mop_remaining_time)
-            attributes["time_left_minutes"] = _duration_minutes(
-                state.dry_mop_remaining_time
-            )
-        if state.mop_drying_target > 0:
+        remaining = (
+            state.dock_drying_remaining_time
+            if state.dock_drying_remaining_time is not None
+            else state.dry_mop_remaining_time
+        )
+        if remaining is not None:
+            attributes["time_left"] = _format_duration(remaining)
+            attributes["time_left_minutes"] = _duration_minutes(remaining)
+        if state.dock_drying_timer_fields is not None:
+            attributes["timer_fields"] = "/".join(state.dock_drying_timer_fields)
+        if state.dock_drying_target > 0:
+            elapsed = max(0, state.dock_drying_elapsed)
+            target = state.dock_drying_target
+        else:
             elapsed = max(0, state.mop_drying_elapsed)
-            target = max(0, state.mop_drying_target)
+            target = state.mop_drying_target
+        if target > 0:
             attributes["elapsed_minutes"] = _duration_minutes(elapsed)
             attributes["target_minutes"] = _duration_minutes(target)
             attributes["progress"] = min(100, round(elapsed / target * 100))
