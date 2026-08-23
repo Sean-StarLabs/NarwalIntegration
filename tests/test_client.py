@@ -19,7 +19,7 @@ from narwal_client.const import (
     WorkingStatus,
 )
 from narwal_client.models import CommandResponse, MapData, RoomInfo
-from narwal_client.protocol import build_frame
+from narwal_client.protocol import PROTOBUF_FIELD5_TAG, build_frame
 
 
 class TestNarwalClientInit:
@@ -139,6 +139,30 @@ class TestNarwalClientInit:
             assert await client.wake(timeout=10.0)
 
         wake_burst.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_discover_device_id_preserves_field5_product_key(self) -> None:
+        """Auto-discovery must keep the product key that answered the wake probe."""
+        client = NarwalClient("10.0.0.1")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._ws.recv.return_value = bytes(
+            [0x01, 0x02, PROTOBUF_FIELD5_TAG, 0x00, 0x08, 0x01]
+        )
+
+        with patch.object(
+            client,
+            "_decode_protobuf",
+            return_value={
+                "1": b"DrzDKQ0MU8",
+                "2": b"auto_device_456",
+            },
+        ):
+            device_id = await client.discover_device_id(timeout=1.0)
+
+        assert device_id == "auto_device_456"
+        assert client.device_id == "auto_device_456"
+        assert client.topic_prefix == "/DrzDKQ0MU8"
 
 
 class TestBuildCleanPayloadV2:
