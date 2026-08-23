@@ -256,6 +256,13 @@ class NarwalClient:
         """Build the full topic path."""
         return f"{self.topic_prefix}/{self.device_id}/{short_topic}"
 
+    def _update_topic_prefix_from_topic(self, topic: str, source: str) -> None:
+        """Preserve the product-key prefix from a robot response topic."""
+        parts = topic.split("/")
+        if len(parts) >= 2 and parts[0] == "" and parts[1]:
+            self.topic_prefix = f"/{parts[1]}"
+            _LOGGER.info("Topic prefix from %s: %s", source, self.topic_prefix)
+
     def _response_queue_for(self, short_topic: str) -> asyncio.Queue[_QueuedResponse]:
         """Return the field5 response queue for one command topic."""
         if short_topic not in self._response_queues:
@@ -522,6 +529,7 @@ class NarwalClient:
                     else:
                         raw_id = str(raw_id).strip()
                     if raw_id:
+                        self._update_topic_prefix_from_topic(msg.topic, "response")
                         self.device_id = raw_id
                         _LOGGER.info("Discovered device_id from response: %s", self.device_id)
                         return self.device_id
@@ -534,9 +542,7 @@ class NarwalClient:
                 # Topic format: /{product_key}/{device_id}/{category}/{type}
                 if len(parts) >= 4 and parts[2]:
                     # Extract product_key from topic to set correct prefix
-                    if parts[1]:
-                        self.topic_prefix = f"/{parts[1]}"
-                        _LOGGER.info("Topic prefix from broadcast: %s", self.topic_prefix)
+                    self._update_topic_prefix_from_topic(msg.topic, "broadcast")
                     self.device_id = parts[2]
                     _LOGGER.info("Discovered device_id from broadcast: %s", self.device_id)
                     return self.device_id

@@ -23,6 +23,7 @@ from narwal_client.const import (
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_BASE_STATUS,
     TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
+    TOPIC_CMD_GET_DEVICE_INFO,
     TOPIC_CMD_GET_ROBOT_TASK_STATUS,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_NOTIFY_APP_EVENT,
@@ -331,6 +332,27 @@ class TestCommandResponseRouting:
     @staticmethod
     def _broadcast_frame(full_topic: str, payload: bytes = b"") -> bytes:
         return build_frame(full_topic, payload)
+
+    @pytest.mark.asyncio
+    async def test_discover_device_id_preserves_field5_product_key(self) -> None:
+        """Auto-discovery must keep the product key that answered the wake probe."""
+        client = NarwalClient("10.0.0.1")
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._ws.recv.return_value = self._field5_frame(
+            f"/DrzDKQ0MU8//{TOPIC_CMD_GET_DEVICE_INFO}"
+        )
+
+        with patch.object(
+            client,
+            "_decode_protobuf",
+            return_value={"2": b"auto_device_456"},
+        ):
+            device_id = await client.discover_device_id(timeout=1.0)
+
+        assert device_id == "auto_device_456"
+        assert client.device_id == "auto_device_456"
+        assert client.topic_prefix == "/DrzDKQ0MU8"
 
     @pytest.mark.asyncio
     async def test_listener_mode_uses_matching_response_topic(self) -> None:
