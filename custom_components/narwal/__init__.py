@@ -6,7 +6,6 @@ import logging
 from typing import TypeAlias
 
 import voluptuous as vol
-
 from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components.vacuum import DOMAIN as VACUUM_DOMAIN
 from homeassistant.config_entries import ConfigEntry
@@ -29,9 +28,9 @@ from .const import (
     DOMAIN,
     MANUFACTURER,
     PLATFORMS,
+    SERVICE_CLEAN_ROOMS,
     configured_model_name,
     fan_speed_list_for,
-    SERVICE_CLEAN_ROOMS,
 )
 from .coordinator import NarwalCoordinator, can_start_cleaning, is_narwal_task_busy
 from .narwal_client import (
@@ -42,13 +41,13 @@ from .narwal_client import (
     MopStrengthLevel,
     NarwalConnectionError,
     RoomCleanSettings,
-    WorkMode,
     WorkingStatus,
+    WorkMode,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-NarwalConfigEntry: TypeAlias = ConfigEntry[NarwalCoordinator]
+NarwalConfigEntry: TypeAlias = ConfigEntry[NarwalCoordinator]  # noqa: UP040
 
 FIELD_ROOMS = "rooms"
 FIELD_MODE = "mode"
@@ -99,6 +98,14 @@ def _can_attempt_clean_rooms_start(state) -> bool:
 
 DEPRECATED_ENTITY_UNIQUE_ID_SUFFIXES: tuple[tuple[str, str], ...] = (
     ("button", "_wash_and_dry_mop"),
+    ("button", "_stop_dock_task"),
+    ("button", "_empty_dustbin"),
+    ("button", "_wash_mop"),
+    ("button", "_dry_mop"),
+    ("button", "_dry_dust_bin"),
+    ("button", "_dry_dock_bag"),
+    ("sensor", "_station_task"),
+    ("sensor", "_dry_mop_remaining_time"),
 )
 
 CLEAN_ROOMS_SCHEMA = vol.Schema(
