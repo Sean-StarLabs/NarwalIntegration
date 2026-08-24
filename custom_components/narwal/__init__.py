@@ -6,7 +6,6 @@ import logging
 from typing import TypeAlias
 
 import voluptuous as vol
-
 from homeassistant.auth.permissions.const import POLICY_CONTROL
 from homeassistant.components.vacuum import DOMAIN as VACUUM_DOMAIN
 from homeassistant.config_entries import ConfigEntry
@@ -27,10 +26,11 @@ from .const import (
     CONF_MODEL,
     CONF_PRODUCT_KEY,
     DOMAIN,
+    MANUFACTURER,
     PLATFORMS,
+    SERVICE_CLEAN_ROOMS,
     configured_model_name,
     fan_speed_list_for,
-    SERVICE_CLEAN_ROOMS,
 )
 from .coordinator import NarwalCoordinator, can_start_cleaning
 from .narwal_client import (
@@ -42,11 +42,12 @@ from .narwal_client import (
     NarwalConnectionError,
     RoomCleanSettings,
     WorkMode,
+    WorkingStatus,
 )
 
 _LOGGER = logging.getLogger(__name__)
 
-NarwalConfigEntry: TypeAlias = ConfigEntry[NarwalCoordinator]
+NarwalConfigEntry: TypeAlias = ConfigEntry[NarwalCoordinator]  # noqa: UP040
 
 FIELD_ROOMS = "rooms"
 FIELD_MODE = "mode"
@@ -85,6 +86,19 @@ ROUTE_OPTIONS: dict[str, CleaningRoute] = {
     "standard": CleaningRoute.STANDARD,
     "meticulous": CleaningRoute.METICULOUS,
 }
+
+
+DEPRECATED_ENTITY_UNIQUE_ID_SUFFIXES: tuple[tuple[str, str], ...] = (
+    ("button", "_wash_and_dry_mop"),
+    ("button", "_stop_dock_task"),
+    ("button", "_empty_dustbin"),
+    ("button", "_wash_mop"),
+    ("button", "_dry_mop"),
+    ("button", "_dry_dust_bin"),
+    ("button", "_dry_dock_bag"),
+    ("sensor", "_station_task"),
+    ("sensor", "_dry_mop_remaining_time"),
+)
 
 CLEAN_ROOMS_SCHEMA = vol.Schema(
     {
@@ -145,6 +159,21 @@ def _rooms_requested_all(raw_rooms: list) -> bool:
     )
 
 
+def _can_defer_start_validation(coordinator: NarwalCoordinator) -> bool:
+    """Return true when an asleep UNKNOWN robot needs waking before validation."""
+    state = coordinator.client.state
+    return (
+        state.working_status == WorkingStatus.UNKNOWN
+        and not coordinator.client.robot_awake
+    )
+
+
+async def _async_wake_unknown_robot(coordinator: NarwalCoordinator) -> None:
+    """Wake an initially unknown robot before reading map-dependent state."""
+    if _can_defer_start_validation(coordinator):
+        await coordinator.client.wake(timeout=10.0)
+
+
 async def _async_room_ids_for_coordinator(
     coordinator: NarwalCoordinator,
     raw_rooms: list,
@@ -155,7 +184,10 @@ async def _async_room_ids_for_coordinator(
         raise HomeAssistantError('Use either "all" or explicit room IDs, not both')
     state = coordinator.client.state
     if state.map_data is None:
+        await _async_wake_unknown_robot(coordinator)
+        state = coordinator.client.state
         await coordinator.client.get_map()
+        state = coordinator.client.state
     if state.map_data is None:
         raise HomeAssistantError("Narwal map is not available")
     known_room_ids = {room.room_id for room in state.map_data.rooms if room.room_id > 0}
@@ -274,7 +306,10 @@ def _async_register_services(hass: HomeAssistant) -> None:
 
         plans: list[tuple[NarwalCoordinator, list[int], RoomCleanSettings]] = []
         for coordinator in coordinators:
-            if not can_start_cleaning(coordinator.data):
+            if (
+                not can_start_cleaning(coordinator.data)
+                and not _can_defer_start_validation(coordinator)
+            ):
                 raise HomeAssistantError("Narwal room clean cannot be started right now")
             room_ids = await _async_room_ids_for_coordinator(
                 coordinator,
@@ -364,6 +399,54 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
     return True
 
 
+def _async_prepare_devices(
+    hass: HomeAssistant,
+    entry: NarwalConfigEntry,
+    coordinator: NarwalCoordinator,
+) -> None:
+    """Create/update the robot and dock devices before platforms add entities."""
+    device_id = entry.data["device_id"]
+    model = configured_model_name(entry.data)
+    sw_version = coordinator.client.state.firmware_version or None
+    device_registry = dr.async_get(hass)
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, device_id)},
+        manufacturer=MANUFACTURER,
+        model=model,
+        sw_version=sw_version,
+        name=entry.title,
+    )
+    device_registry.async_get_or_create(
+        config_entry_id=entry.entry_id,
+        identifiers={(DOMAIN, f"{device_id}_dock")},
+        manufacturer=MANUFACTURER,
+        model=f"{model} Dock",
+        sw_version=sw_version,
+        name=f"{entry.title} Dock",
+        via_device=(DOMAIN, device_id),
+    )
+
+
+def _async_remove_deprecated_entities(
+    hass: HomeAssistant,
+    entry: NarwalConfigEntry,
+) -> None:
+    """Remove entities no longer exposed by the integration."""
+    entity_registry = er.async_get(hass)
+    device_id = entry.data["device_id"]
+    for domain, suffix in DEPRECATED_ENTITY_UNIQUE_ID_SUFFIXES:
+        entity_id = entity_registry.async_get_entity_id(
+            domain,
+            DOMAIN,
+            f"{device_id}{suffix}",
+        )
+        if entity_id is None:
+            continue
+        _LOGGER.info("Removing deprecated Narwal entity %s", entity_id)
+        entity_registry.async_remove(entity_id)
+
+
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
     """Migrate old config entries to version 2 (add product_key)."""
     if config_entry.version < 2:
@@ -396,18 +479,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bo
     entry.runtime_data = coordinator
     _domain_data(hass)[entry.entry_id] = coordinator
 
+    _async_prepare_devices(hass, entry, coordinator)
+    _async_remove_deprecated_entities(hass, entry)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
-
-    device_registry = dr.async_get(hass)
-    device = device_registry.async_get_device(
-        identifiers={(DOMAIN, entry.data["device_id"])}
-    )
-    if device is not None:
-        device_registry.async_update_device(
-            device.id,
-            model=configured_model_name(entry.data),
-            sw_version=coordinator.client.state.firmware_version or None,
-        )
 
     return True
 

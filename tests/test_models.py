@@ -5,9 +5,11 @@ from __future__ import annotations
 import logging
 import struct
 import zlib
+from unittest.mock import patch
 
 from narwal_client.const import (
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+    TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
     CommandResult,
     WorkingStatus,
 )
@@ -62,6 +64,7 @@ class TestNarwalState:
         assert not state.is_cleaning
         assert not state.is_docked
         assert not state.is_returning
+        assert state.dock_state_unknown
 
     def test_update_from_working_status(self) -> None:
         """working_status topic sets cleaning metrics and marks active cleaning."""
@@ -205,6 +208,18 @@ class TestNarwalState:
         assert not state.is_docked
         assert state.dock_activity == 0
 
+    def test_clear_washing_task_clears_station_activity(self) -> None:
+        """Stopping a station task clears non-washing station activities locally."""
+        for station_activity in (1, 2, 3, 4):
+            state = NarwalState()
+            state.dock_activity = 3
+            state.station_activity = station_activity
+
+            state.clear_washing_task()
+
+            assert state.dock_activity == 0
+            assert state.station_activity == 0
+
     def test_zeroed_task_metrics_do_not_mark_cleaning(self) -> None:
         """A zeroed session counter is not evidence of an active clean.
 
@@ -305,12 +320,336 @@ class TestNarwalState:
         assert state.dock_field11 == 1
         assert state.dock_field47 == 2
 
+    def test_explicit_off_dock_signal_overrides_terminal_dock_status(self) -> None:
+        """Current off-dock fields are stronger than stale docked work status."""
+        state = NarwalState()
+
+        state.update_from_base_status({"3": {"1": 10}, "11": 1, "47": 2})
+
+        assert state.working_status == WorkingStatus.DOCKED
+        assert state.has_explicit_off_dock_signal
+        assert not state.is_docked
+
+    def test_terminal_dock_status_ignores_stale_off_dock_fields(self) -> None:
+        """A fresh terminal dock state should not inherit prior cleaning fields."""
+        state = NarwalState()
+        state.update_from_working_status({"3": 120})
+
+        state.update_from_base_status({"3": {"1": 10}})
+
+        assert state.working_status == WorkingStatus.DOCKED
+        assert state.is_docked
+
     def test_update_from_base_status_cleaning(self) -> None:
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(85.0)})
         assert state.working_status == WorkingStatus.CLEANING
         assert state.is_cleaning
         assert state.battery_level == 85
+
+    def test_active_clean_with_rising_battery_needs_dock_signal_to_resume(self) -> None:
+        """A single rising battery sample is not enough to infer mid-task recharge."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(20.0)})
+        assert not state.is_charging_to_resume
+
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(21.0)})
+
+        assert state.battery_recently_increasing
+        assert not state.is_charging_to_resume
+        assert not state.is_docked
+
+    def test_active_clean_with_rising_battery_and_dock_signal_is_charging_to_resume(
+        self,
+    ) -> None:
+        """A rising battery plus dock telemetry marks a paused-to-recharge task."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(20.0)})
+        state.update_from_base_status(
+            {
+                "3": {"1": 4},
+                "2": _float_to_uint32(21.0),
+                "11": 3,
+                "47": 1,
+            }
+        )
+
+        assert state.battery_recently_increasing
+        assert state.has_dock_presence_signal
+        assert state.is_charging_to_resume
+        assert not state.is_docked
+
+    def test_active_station_task_is_not_charging_to_resume(self) -> None:
+        """Charging during a station maintenance phase should keep dock state."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 4, "18": 2}, "2": _float_to_uint32(20.0), "11": 3, "47": 1}
+        )
+        state.update_from_base_status(
+            {"3": {"1": 4, "18": 2}, "2": _float_to_uint32(21.0), "11": 3, "47": 1}
+        )
+
+        assert state.battery_recently_increasing
+        assert state.is_station_active
+        assert not state.is_charging_to_resume
+
+    def test_active_clean_with_falling_battery_is_not_charging_to_resume(self) -> None:
+        """Ordinary active cleaning consumes battery and should stay as cleaning."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(85.0)})
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(84.0)})
+
+        assert not state.battery_recently_increasing
+        assert not state.is_charging_to_resume
+
+    def test_active_clean_with_high_rising_battery_is_not_charging_to_resume(self) -> None:
+        """A high battery should not be treated as a mid-task recharge."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(80.0)})
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(81.0)})
+
+        assert state.battery_recently_increasing
+        assert not state.is_charging_to_resume
+
+    def test_working_status_decodes_mop_drying_timer(self) -> None:
+        """Flow 2 working-status fields 8/9 expose mop drying elapsed/target time."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+        state.update_from_working_status({"8": 900, "9": 12600})
+
+        assert state.mop_drying_elapsed == 900
+        assert state.mop_drying_target == 12600
+        assert state.dry_mop_remaining_time == 11700
+        assert state.dock_drying_elapsed == 900
+        assert state.dock_drying_target == 12600
+        assert state.dock_drying_remaining_time == 11700
+        assert state.active_dock_drying_task == "drying_mop"
+        assert state.is_station_active
+
+    def test_active_clean_clears_stale_mop_drying_timer(self) -> None:
+        """Fresh off-dock clean metrics override a previously reported dock timer."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+        state.update_from_working_status({"8": 900, "9": 12600})
+        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2})
+
+        state.update_from_working_status({"3": 120})
+
+        assert state.is_cleaning
+        assert not state.is_station_active
+        assert not state.is_drying_mop
+        assert state.dry_mop_remaining_time is None
+        assert state.dock_drying_remaining_time is None
+
+    def test_active_off_dock_status_ignores_stale_station_activity(self) -> None:
+        """A stale station activity value must not hide an off-dock clean."""
+        state = NarwalState()
+
+        state.update_from_base_status(
+            {"3": {"1": 4, "3": 2, "18": 1}, "11": 1, "47": 2}
+        )
+
+        assert state.is_cleaning
+        assert state.station_activity == 0
+        assert not state.is_station_active
+
+    def test_working_status_station_timer_beats_stale_clean_elapsed(self) -> None:
+        """Dock timer packets must not be reclassified as active robot cleaning."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14, "12": 4}, "11": 3, "47": 1})
+
+        state.update_from_working_status({"3": 600, "8": 900, "9": 12600})
+
+        assert state.working_status == WorkingStatus.CHARGED
+        assert state.is_station_active
+        assert state.is_drying_mop
+        assert state.active_dock_drying_task == "drying_mop"
+        assert not state.is_cleaning
+        assert state.dock_field11 == 3
+        assert state.dock_field47 == 1
+
+    def test_working_status_decodes_dock_bag_drying_timer(self) -> None:
+        """Non-mop station timers expose a generic dock task without mop state."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+        state.update_from_working_status({"12": 9490, "13": 18000, "19": {}})
+
+        assert state.mop_drying_elapsed == 0
+        assert state.mop_drying_target == 0
+        assert state.dry_mop_remaining_time is None
+        assert state.dock_drying_elapsed == 9490
+        assert state.dock_drying_target == 18000
+        assert state.dock_drying_remaining_time == 8510
+        assert state.dock_drying_progress_percent == 53
+        assert state.dock_drying_timer_fields == ("12", "13")
+        assert state.active_dock_drying_task == "dry_dock_bag"
+        assert state.is_station_active
+
+    def test_non_mop_timer_suppresses_coarse_mop_dry_activity(self) -> None:
+        """Fresh dust drying timers beat stale dock_activity=4 mop fallback."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14, "12": 4}, "11": 3, "47": 1})
+
+        state.update_from_working_status({"10": 9_000, "11": 18_000, "19": {}})
+
+        assert state.active_dock_drying_tasks == ("dry_dust_bin",)
+        assert state.active_dock_drying_task == "dry_dust_bin"
+        assert not state.is_drying_mop
+        assert state.is_station_active
+
+    def test_working_status_tracks_parallel_dock_timers(self) -> None:
+        """Independent station timers should not collapse to a single task."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+
+        state.update_from_working_status(
+            {"8": 900, "9": 12600, "12": 9000, "13": 18000, "19": {}}
+        )
+
+        assert state.active_dock_drying_tasks == ("drying_mop", "dry_dock_bag")
+        assert state.active_dock_drying_task == "drying_mop"
+        assert state.dock_task_timer("drying_mop").progress_percent == 7
+        assert state.dock_task_timer("dry_dock_bag").progress_percent == 50
+        assert state.is_station_active
+
+    def test_idle_base_status_clears_stale_dock_bag_timer(self) -> None:
+        """An idle dock status clears old dock-bag timers after broadcasts stop."""
+        state = NarwalState()
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+            state.update_from_working_status({"12": 10, "13": 18000, "19": {}})
+
+        with patch("narwal_client.models.time.monotonic", return_value=150.0):
+            state.update_from_base_status({"3": {"1": 1}, "11": 3, "47": 1})
+
+        assert state.dock_drying_remaining_time is None
+        assert state.active_dock_drying_task is None
+        assert not state.is_station_active
+
+    def test_idle_base_status_keeps_recent_dock_bag_timer(self) -> None:
+        """Base status can be idle while a fresh station timer is still authoritative."""
+        state = NarwalState()
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+            state.update_from_working_status({"12": 10, "13": 18000, "19": {}})
+
+        with patch("narwal_client.models.time.monotonic", return_value=120.0):
+            state.update_from_base_status({"3": {"1": 1}, "11": 3, "47": 1})
+
+        assert state.active_dock_drying_task == "dry_dock_bag"
+        assert state.is_station_active
+
+    def test_assumed_dock_drying_task_is_bounded_and_clears_on_idle_status(self) -> None:
+        """Polling-only command fallback should not become permanent state."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            state.assume_dock_drying_task("dry_dock_bag")
+            assert state.active_dock_drying_task == "dry_dock_bag"
+            assert state.is_station_active
+
+        with patch("narwal_client.models.time.monotonic", return_value=101.0):
+            state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+
+        assert state.active_dock_drying_task is None
+        assert not state.is_station_active
+
+    def test_assumed_dock_drying_task_expires(self) -> None:
+        """A local command fallback is capped even without a later status."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            state.assume_dock_drying_task("dry_dock_bag")
+
+        with patch("narwal_client.models.time.monotonic", return_value=100.0 + 6 * 60 * 60 + 1):
+            assert state.active_dock_drying_task is None
+            assert not state.is_station_active
+
+    def test_base_status_dock_activity_3_is_washing_mop(self) -> None:
+        """Live wash-and-dry capture reports mop washing as field 3.12 = 3."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14, "12": 3}, "11": 3, "47": 1})
+
+        assert state.is_docked
+        assert state.is_station_active
+        assert state.is_washing_mop
+
+    def test_base_status_dock_activity_4_is_drying_mop(self) -> None:
+        """Live wash-and-dry capture reports the timed drying phase as field 3.12 = 4."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14, "12": 4}, "11": 3, "47": 1})
+
+        assert state.is_docked
+        assert state.is_station_active
+        assert state.is_drying_mop
+
+    def test_empty_dry_timer_suppresses_stale_dock_activity(self) -> None:
+        """A dry-time query without a timer means dock_activity=4 is stale."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14, "12": 4}, "11": 3, "47": 1})
+
+        state.update_from_aux_status(TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME, {})
+        state.update_from_base_status({"3": {"1": 14, "12": 4}, "11": 3, "47": 1})
+
+        assert state.is_docked
+        assert not state.is_station_active
+        assert not state.is_drying_mop
+        assert state.dry_mop_remaining_time is None
+
+        state.update_from_aux_status(TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME, {"2": 120})
+
+        assert state.is_station_active
+        assert state.is_drying_mop
+
+    def test_empty_dry_timer_suppression_expires_by_age(self) -> None:
+        """A later externally-started dry task should recover from stale suppression."""
+        state = NarwalState(dock_activity=4)
+        state.last_dry_mop_empty_time = 100.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=101.0):
+            assert not state.is_drying_mop
+            assert not state.is_station_active
+
+        with patch("narwal_client.models.time.monotonic", return_value=230.0):
+            assert state.is_drying_mop
+            assert state.is_station_active
+
+    def test_empty_dry_timer_preserves_non_mop_station_activity(self) -> None:
+        """A zero mop timer must not hide separate station drying/disinfection."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14, "18": 4}, "11": 3, "47": 1})
+
+        state.update_from_aux_status(TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME, {})
+
+        assert state.is_station_active
+        assert not state.is_drying_mop
+        assert state.station_activity == 4
+
+    def test_dry_mop_timer_clears_stale_non_mop_timer_fields(self) -> None:
+        """A dry-mop query must not inherit timer metadata from another dock task."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+        state.update_from_working_status({"12": 9_000, "13": 18_000, "19": {}})
+
+        state.update_from_aux_status(TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME, {"2": 600})
+
+        assert state.active_dock_drying_task == "drying_mop"
+        assert state.dock_drying_remaining_time == 600
+        assert state.dock_drying_elapsed == 0
+        assert state.dock_drying_target == 0
+        assert state.dock_drying_timer_fields is None
+
+    def test_working_status_ignores_non_numeric_station_timer_fields(self) -> None:
+        """Field 12 can be a room-list shape in other payloads."""
+        state = NarwalState()
+        state.update_from_working_status({"12": {"1": 1}, "13": 18000})
+
+        assert state.mop_drying_elapsed == 0
+        assert state.mop_drying_target == 0
+        assert state.dry_mop_remaining_time is None
+        assert state.dock_drying_remaining_time is None
 
     def test_update_from_base_status_docked(self) -> None:
         state = NarwalState()
@@ -473,7 +812,7 @@ class TestNarwalState:
     def test_unknown_working_status_value(self) -> None:
         """Unmapped working_status value falls back to UNKNOWN."""
         state = NarwalState()
-        state.update_from_base_status({"3": {"1": 99}})
+        state.update_from_base_status({"3": {"1": 254}})
         assert state.working_status == WorkingStatus.UNKNOWN
 
     def test_unknown_working_status_warns_once(self, caplog) -> None:
@@ -764,7 +1103,7 @@ class TestNarwalState:
         assert state.is_cleaning
         assert not state.is_returning
 
-    def test_unknown_working_status_value(self) -> None:
+    def test_second_unknown_working_status_value(self) -> None:
         """Unknown status values should fall back to UNKNOWN."""
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 255}})
@@ -864,6 +1203,15 @@ class TestMapData:
         m = MapData.from_response(decoded)
         assert m.dock_x is None
         assert m.dock_y is None
+
+    def test_consumable_info_success_marks_endpoint_available(self) -> None:
+        state = NarwalState()
+
+        state.update_from_consumable_info({"1": {"1": [4], "2": [20]}})
+
+        assert state.consumable_info_available
+        assert state.maintain_items == [4]
+        assert state.replace_items == [20]
 
     def test_empty_response(self) -> None:
         m = MapData.from_response({})

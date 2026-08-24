@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import logging
 import time
-from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, fields
 from datetime import timedelta
 
@@ -48,6 +48,7 @@ CONSUMABLE_POLL_EVERY = 30
 TOPIC_SUBSCRIPTION_TTL = 600.0
 TOPIC_RESUBSCRIBE_AFTER = 240.0
 ACTIVE_TASK_REFRESH_INTERVAL = 30.0
+IDLE_DOCK_TASK_REFRESH_INTERVAL = 120.0
 REMAP_MAP_REFRESH_ATTEMPTS = 3
 REMAP_MAP_REFRESH_RETRY_DELAY = 10.0
 PENDING_ROOM_PLAN_TTL = 120.0
@@ -58,6 +59,14 @@ MOP_WORK_MODES = frozenset(
 VACUUM_WORK_MODES = frozenset(
     {WorkMode.VACUUM, WorkMode.VACUUM_THEN_MOP, WorkMode.VACUUM_AND_MOP}
 )
+DOCK_TASK_KEY_BY_RAW_TASK = {
+    "emptying_dustbin": "empty_dustbin",
+    "washing_mop": "wash_mop",
+    "drying_mop": "dry_mop",
+    "dry_dust_bin": "dry_dust_bin",
+    "dry_dock_bag": "dry_dock_bag",
+}
+SCOPED_STOP_DOCK_TASK_KEYS = frozenset({"dry_dock_bag"})
 
 
 @dataclass
@@ -84,7 +93,7 @@ def _state_attr_is_true(state: NarwalState, attr: str) -> bool:
 
 
 def has_blocking_error(state: NarwalState | None) -> bool:
-    """Return True when the robot reports a command-blocking error."""
+    """Return True when the robot reports a fault that should block commands."""
     return (
         state is None
         or state.working_status == WorkingStatus.ERROR
@@ -119,7 +128,7 @@ def is_clean_session_context(state: NarwalState | None) -> bool:
 
 def is_live_clean_setting_available(state: NarwalState | None) -> bool:
     """Return True when live clean settings can be changed during a task."""
-    if state is None:
+    if has_blocking_error(state):
         return False
     return (
         (_state_attr_is_true(state, "is_cleaning") or is_active_clean_session(state))
@@ -156,14 +165,55 @@ def can_edit_pending_clean_settings(state: NarwalState | None) -> bool:
     """Return True when pending next-clean settings can be edited locally."""
     if has_blocking_error(state):
         return False
-    return not is_narwal_task_busy(state)
+    return not is_clean_session_context(state)
 
 
 def can_start_cleaning(state: NarwalState | None) -> bool:
     """Return True when a new robot clean command can be sent now."""
     if has_blocking_error(state):
         return False
-    return state.is_docked and not is_narwal_task_busy(state)
+    return state.is_docked and can_edit_pending_clean_settings(state)
+
+
+def is_setup_available(state: NarwalState | None) -> bool:
+    """Return True when start-time clean setup controls should be available."""
+    return can_edit_pending_clean_settings(state)
+
+
+def can_pause_cleaning(state: NarwalState | None) -> bool:
+    """Return True when the active robot clean can be paused."""
+    if has_blocking_error(state):
+        return False
+    return (
+        (
+            _state_attr_is_true(state, "is_cleaning")
+            or state.working_status == WorkingStatus.REMAPPING
+        )
+        and not _state_attr_is_true(state, "is_paused")
+        and not _state_attr_is_true(state, "is_station_active")
+        and not _state_attr_is_true(state, "is_charging_to_resume")
+    )
+
+
+def can_resume_cleaning(state: NarwalState | None) -> bool:
+    """Return True when a paused robot clean can be resumed."""
+    if has_blocking_error(state):
+        return False
+    return (
+        (
+            state.working_status in (*ACTIVE_CLEANING_STATUSES, WorkingStatus.REMAPPING)
+            or _state_attr_is_true(state, "has_paused_clean_task_context")
+        )
+        and _state_attr_is_true(state, "is_paused")
+        and not _state_attr_is_true(state, "is_station_active")
+    )
+
+
+def can_stop_cleaning(state: NarwalState | None) -> bool:
+    """Return True when a robot-side clean task can be stopped."""
+    if has_blocking_error(state):
+        return False
+    return is_clean_session_context(state)
 
 
 def _map_refresh_key(map_data: object | None) -> tuple | None:
@@ -188,6 +238,108 @@ def _map_refresh_key(map_data: object | None) -> tuple | None:
         getattr(map_data, "height", None),
         getattr(map_data, "resolution", None),
         digest,
+    )
+
+
+def can_return_home(state: NarwalState | None) -> bool:
+    """Return True when the robot can be recalled to the dock."""
+    if has_blocking_error(state):
+        return False
+    return (
+        not state.is_docked
+        and state.working_status != WorkingStatus.TASK_COMPLETED
+        and not _state_attr_is_true(state, "is_station_active")
+        and not _state_attr_is_true(state, "is_charging_to_resume")
+    )
+
+
+def can_locate_robot(state: NarwalState | None) -> bool:
+    """Return True when the locate command can be sent."""
+    if has_blocking_error(state):
+        return False
+    return not _state_attr_is_true(state, "is_station_active")
+
+
+def can_start_dock_task(state: NarwalState | None, task_key: str | None = None) -> bool:
+    """Return True when a new dock/base-station task can be started."""
+    if has_blocking_error(state):
+        return False
+    if not state.is_docked or is_clean_session_context(state):
+        return False
+    if state.is_station_active:
+        # Firmware rejects conflicting dock commands as not-applicable instead of
+        # queueing them, so only expose start controls while the station is idle.
+        return False
+    if task_key is None:
+        return True
+    active_keys = set(dock_task_keys(state))
+    if task_key in active_keys:
+        return False
+    return not active_keys
+
+
+def can_stop_dock_task(
+    state: NarwalState | None, task_key: str | None = None
+) -> bool:
+    """Return True when a dock/base-station task can be stopped."""
+    if has_blocking_error(state):
+        return False
+    if not state.is_station_active:
+        return False
+    if (
+        getattr(state, "has_explicit_off_dock_signal", False) is True
+        and getattr(state, "has_dock_presence_signal", False) is not True
+    ):
+        return False
+    if task_key is None:
+        return True
+    active_keys = dock_task_keys(state)
+    if task_key not in active_keys:
+        return False
+    return len(active_keys) == 1 or task_key in SCOPED_STOP_DOCK_TASK_KEYS
+
+
+def dock_task(state: NarwalState | None) -> str | None:
+    """Return the active dock task."""
+    tasks = dock_tasks(state)
+    if not tasks:
+        return None
+    return tasks[0]
+
+
+def dock_tasks(state: NarwalState | None) -> tuple[str, ...]:
+    """Return active dock tasks from robot-reported state."""
+    if state is None or not state.is_station_active:
+        return ()
+    tasks: list[str] = []
+    if state.station_activity == 1:
+        tasks.append("emptying_dustbin")
+    if state.is_washing_mop:
+        tasks.append("washing_mop")
+    tasks.extend(getattr(state, "active_dock_drying_tasks", ()))
+    if state.is_drying_mop and "drying_mop" not in tasks:
+        tasks.append("drying_mop")
+    if state.station_activity == 4 and not any(
+        task.startswith("dry") or task == "drying_mop" for task in tasks
+    ):
+        tasks.append("drying_or_disinfecting")
+    return tuple(dict.fromkeys(tasks)) or ("station_active",)
+
+
+def dock_task_key(state: NarwalState | None) -> str | None:
+    """Return the active dock-task switch key from robot-reported state only."""
+    keys = dock_task_keys(state)
+    if not keys:
+        return None
+    return keys[0]
+
+
+def dock_task_keys(state: NarwalState | None) -> tuple[str, ...]:
+    """Return active dock-task switch keys from robot-reported state only."""
+    return tuple(
+        key
+        for task in dock_tasks(state)
+        if (key := DOCK_TASK_KEY_BY_RAW_TASK.get(task)) is not None
     )
 
 
@@ -373,9 +525,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if is_clean_session_context(state):
             self._active_room_plan_pending_until = 0.0
             return
+        active_room_ids = getattr(self, "active_room_ids", None)
+        pending_until = getattr(self, "_active_room_plan_pending_until", 0.0)
         if (
-            self.active_room_ids
-            and self._active_room_plan_pending_until > time.monotonic()
+            active_room_ids
+            and pending_until > time.monotonic()
         ):
             return
         self.set_active_room_ids(None)
@@ -515,7 +669,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 WorkingStatus.DOCKED_V2,
             )
             and previous_status
-            in (*ACTIVE_CLEANING_STATUSES, WorkingStatus.TASK_COMPLETED)
+            in (
+                *ACTIVE_CLEANING_STATUSES,
+                WorkingStatus.REMAPPING,
+                WorkingStatus.TASK_COMPLETED,
+            )
         ):
             _LOGGER.info("Return-to-dock detected, refreshing dock status")
             self.hass.async_create_task(self._refresh_dock_status())
@@ -550,9 +708,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     f"{DOMAIN}_resub",
                 )
 
-        if is_cleaning or state.is_station_active:
+        if is_cleaning or state.is_station_active or state.is_docked:
             now = time.monotonic()
-            if now - self._last_task_details_refresh > ACTIVE_TASK_REFRESH_INTERVAL:
+            interval = (
+                ACTIVE_TASK_REFRESH_INTERVAL
+                if is_cleaning or state.is_station_active
+                else IDLE_DOCK_TASK_REFRESH_INTERVAL
+            )
+            if now - self._last_task_details_refresh > interval:
                 self._last_task_details_refresh = now
                 self.config_entry.async_create_background_task(
                     self.hass,
@@ -645,16 +808,26 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def _refresh_task_details(self, *, cleaning: bool) -> None:
         """Query app-style task detail endpoints while a task is active."""
+        updated = False
         try:
             if cleaning:
                 await self.client.get_clean_progress_info()
             else:
                 await self.client.get_dry_mop_remain_time()
+        except Exception as err:
+            _LOGGER.debug("Task progress refresh failed: %s", err)
+        else:
+            updated = True
+
+        try:
             await self.client.get_robot_task_status()
         except Exception as err:
-            _LOGGER.debug("Task detail refresh failed: %s", err)
-            return
-        self.async_set_updated_data(self.client.state)
+            _LOGGER.debug("Robot task status refresh failed: %s", err)
+        else:
+            updated = True
+
+        if updated:
+            self.async_set_updated_data(self.client.state)
 
     async def _refresh_dock_status(self) -> None:
         """Immediate get_status() after return-to-dock to refresh dock fields."""
@@ -665,6 +838,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.async_set_updated_data(self.client.state)
         except Exception:
             _LOGGER.debug("Failed to refresh dock status after transition")
+
+    async def async_refresh_dock_status(self) -> None:
+        """Refresh dock status from the robot after an explicit dock command."""
+        await self._refresh_dock_status()
 
     async def _async_update_data(self) -> NarwalState:
         """Polling fallback — fetch status if no push updates arrived.
@@ -680,7 +857,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             if not self.client.connected:
                 raise NarwalConnectionError("Not connected")
             await self.client.get_status(
-                full_update=not self.client.state.has_recent_active_working_status
+                full_update=(
+                    self.client.state.is_station_active
+                    or not self.client.state.has_recent_active_working_status
+                )
             )
         except Exception as err:
             self._consecutive_failures += 1
@@ -698,10 +878,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         # Retry map fetch if it failed during setup
         if self.client.state.map_data is None:
-            try:
+            with suppress(Exception):
                 await self.client.get_map()
-            except Exception:
-                pass
 
         # Renew the broadcast subscription before it lapses. This is deliberately
         # NOT conditional on believing we are cleaning: working_status is what tells
@@ -728,6 +906,29 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 _LOGGER.debug("Consumable info poll failed")
         else:
             self._consumable_poll_countdown -= 1
+
+        is_cleaning = (
+            self.client.state.is_cleaning
+            or self.client.state.has_recent_active_working_status
+            or (
+                not self.client.state.is_docked
+                and self.client.state.working_status in ACTIVE_CLEANING_STATUSES
+            )
+        )
+        if (
+            is_cleaning
+            or self.client.state.is_station_active
+            or self.client.state.is_docked
+        ):
+            now = time.monotonic()
+            interval = (
+                ACTIVE_TASK_REFRESH_INTERVAL
+                if is_cleaning or self.client.state.is_station_active
+                else IDLE_DOCK_TASK_REFRESH_INTERVAL
+            )
+            if now - self._last_task_details_refresh > interval:
+                self._last_task_details_refresh = now
+                await self._refresh_task_details(cleaning=is_cleaning)
 
         # Manage fast poll countdown
         if self._fast_poll_remaining > 0:

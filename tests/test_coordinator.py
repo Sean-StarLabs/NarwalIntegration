@@ -24,7 +24,14 @@ from custom_components.narwal.coordinator import (
     CleanSettings,
     NarwalCoordinator,
     can_edit_pending_clean_settings,
+    can_locate_robot,
+    can_pause_cleaning,
+    can_return_home,
+    can_resume_cleaning,
     can_start_cleaning,
+    can_start_dock_task,
+    can_stop_cleaning,
+    can_stop_dock_task,
     is_live_clean_setting_available,
 )  # noqa: E402
 from custom_components.narwal.narwal_client import (  # noqa: E402
@@ -149,9 +156,108 @@ def test_paused_standby_task_context_blocks_new_actions() -> None:
     assert state.working_status == WorkingStatus.STANDBY
     assert state.is_paused
     assert state.has_paused_clean_task_context
+    assert can_resume_cleaning(state)
+    assert can_stop_cleaning(state)
     assert is_live_clean_setting_available(state)
     assert not can_edit_pending_clean_settings(state)
     assert not can_start_cleaning(state)
+    assert not can_start_dock_task(state)
+
+
+def test_station_phase_cleaning_can_still_be_stopped() -> None:
+    """A dock-side phase can belong to the active clean, so stop must stay exposed."""
+    state = NarwalState(working_status=WorkingStatus.CLEANING)
+    state.last_active_working_status_time = time.monotonic()
+    state.dry_mop_remaining_time = 600
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+
+    assert state.is_station_active
+    assert can_stop_cleaning(state)
+    assert not can_pause_cleaning(state)
+
+
+def test_dock_maintenance_does_not_block_next_clean_setup() -> None:
+    """A dock-side task should not hide start-time clean controls."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+    state.dry_mop_remaining_time = 1_800
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+
+    assert state.is_docked
+    assert state.is_station_active
+    assert can_edit_pending_clean_settings(state)
+    assert can_start_cleaning(state)
+
+
+def test_return_home_available_when_idle_off_dock() -> None:
+    """An idle robot away from the dock should expose return-to-base."""
+    state = MagicMock()
+    state.working_status = WorkingStatus.STANDBY
+    state.is_docked = False
+    state.is_returning = False
+    state.is_station_active = False
+    state.is_charging_to_resume = False
+
+    assert can_return_home(state)
+
+    state.is_docked = True
+    assert not can_return_home(state)
+
+
+def test_task_completed_blocks_return_home_until_docked() -> None:
+    """Do not issue a second return command while TASK_COMPLETED is returning."""
+    state = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
+
+    assert state.is_returning
+    assert not can_return_home(state)
+
+
+def test_parsed_fault_blocks_robot_and_dock_commands() -> None:
+    """Base-status faults should gate the same commands as explicit ERROR state."""
+    idle = NarwalState(working_status=WorkingStatus.DOCKED)
+    assert can_edit_pending_clean_settings(idle)
+    assert can_start_cleaning(idle)
+    assert can_locate_robot(idle)
+    assert can_start_dock_task(idle)
+    idle.has_error = True
+    assert not can_edit_pending_clean_settings(idle)
+    assert not can_start_cleaning(idle)
+    assert not can_locate_robot(idle)
+    assert not can_start_dock_task(idle)
+
+    active = NarwalState(working_status=WorkingStatus.CLEANING)
+    assert can_pause_cleaning(active)
+    assert can_stop_cleaning(active)
+    assert is_live_clean_setting_available(active)
+    active.has_error = True
+    assert not can_pause_cleaning(active)
+    assert not can_stop_cleaning(active)
+    assert not is_live_clean_setting_available(active)
+
+    paused = NarwalState(working_status=WorkingStatus.CLEANING)
+    paused.is_paused = True
+    assert can_resume_cleaning(paused)
+    paused.has_error = True
+    assert not can_resume_cleaning(paused)
+
+    dock = NarwalState(working_status=WorkingStatus.DOCKED)
+    dock.station_activity = 1
+    assert can_stop_dock_task(dock)
+    assert can_stop_dock_task(dock, "empty_dustbin")
+    dock.has_error = True
+    assert not can_stop_dock_task(dock)
+
+    dock = NarwalState(working_status=WorkingStatus.DOCKED)
+    dock.dock_field11 = 3
+    dock.dock_field47 = 1
+    dock.update_from_working_status(
+        {"8": 9_000, "9": 18_000, "10": 9_000, "11": 18_000, "19": {}}
+    )
+    assert can_stop_dock_task(dock)
+    assert not can_stop_dock_task(dock, "dry_mop")
+    assert not can_stop_dock_task(dock, "dry_dust_bin")
 
 
 class TestCoordinatorResilience:
@@ -190,7 +296,10 @@ class TestCoordinatorResilience:
         coordinator._last_display_map_resub = 0.0
         # Fresh subscription so renewal does not fire in unrelated tests.
         coordinator._last_topic_subscribe = time.monotonic()
+        coordinator._last_task_details_refresh = time.monotonic()
         coordinator._prev_working_status = MagicMock()
+        coordinator.active_room_ids = None
+        coordinator._active_room_plan_pending_until = 0.0
         coordinator.update_interval = None
         # Prevent background task warnings
         mock_entry.async_create_background_task = MagicMock()
@@ -250,6 +359,23 @@ class TestCoordinatorResilience:
         assert coordinator._consecutive_failures == 0
         assert result is coordinator.client.state
 
+    async def test_task_status_refresh_runs_when_progress_endpoint_fails(self) -> None:
+        """Unsupported progress details should not block robot task status refresh."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_clean_progress_info = AsyncMock(
+            side_effect=Exception("unsupported")
+        )
+        coordinator.client.get_robot_task_status = AsyncMock()
+        coordinator.async_set_updated_data = MagicMock()
+
+        await coordinator._refresh_task_details(cleaning=True)
+
+        coordinator.client.get_clean_progress_info.assert_awaited_once()
+        coordinator.client.get_robot_task_status.assert_awaited_once()
+        coordinator.async_set_updated_data.assert_called_once_with(
+            coordinator.client.state
+        )
+
     async def test_poll_preserves_recent_active_working_status(self) -> None:
         """Poll only refreshes hardware fields while task metrics are fresh."""
         coordinator = self._make_coordinator()
@@ -260,6 +386,24 @@ class TestCoordinatorResilience:
         result = await coordinator._async_update_data()
 
         coordinator.client.get_status.assert_awaited_once_with(full_update=False)
+        assert result is coordinator.client.state
+
+    async def test_poll_fully_refreshes_station_active_state(self) -> None:
+        """Station-active state must be allowed to clear from a full status poll."""
+        coordinator = self._make_coordinator()
+        type(coordinator.client).connected = PropertyMock(return_value=True)
+        coordinator.client.state.dock_field11 = 2
+        coordinator.client.state.set_dock_drying_task(
+            "dry_dock_bag",
+            10,
+            18000,
+            ("12", "13"),
+        )
+        coordinator.client.get_status = AsyncMock()
+
+        result = await coordinator._async_update_data()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=True)
         assert result is coordinator.client.state
 
     async def test_push_update_resets_failure_counter(self) -> None:
@@ -297,6 +441,55 @@ class TestCoordinatorResilience:
         coordinator._on_state_update(state)
 
         assert scheduled_tasks == ["narwal_resub"]
+
+    def test_sync_active_rooms_preserves_station_phase_during_clean(self) -> None:
+        """Station work during an active clean does not erase the requested rooms."""
+        coordinator = self._make_coordinator()
+        coordinator.active_room_ids = [1, 2]
+        state = NarwalState()
+        state.working_status = WorkingStatus.CLEANING
+        state.last_active_working_status_time = time.monotonic()
+        state.station_activity = 3
+
+        coordinator._sync_active_room_ids(state)
+
+        assert coordinator.active_room_ids == [1, 2]
+
+    def test_sync_active_rooms_clears_after_clean_ends_with_station_phase(self) -> None:
+        """Dock-only work after the clean has ended should clear stale room context."""
+        coordinator = self._make_coordinator()
+        coordinator.active_room_ids = [1, 2]
+        coordinator._active_room_plan_pending_until = 0.0
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.station_activity = 4
+
+        coordinator._sync_active_room_ids(state)
+
+        assert coordinator.active_room_ids is None
+
+    def test_sync_active_rooms_preserves_pending_start(self) -> None:
+        """A room plan is retained briefly while a start command is taking effect."""
+        coordinator = self._make_coordinator()
+        coordinator.set_active_room_ids([1, 2])
+        state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
+
+        coordinator._sync_active_room_ids(state)
+
+        assert coordinator.active_room_ids == [1, 2]
+
+    def test_sync_active_rooms_clears_expired_pending_start(self) -> None:
+        """Pending room plans still clear if no active clean appears."""
+        coordinator = self._make_coordinator()
+        coordinator.set_active_room_ids([1, 2])
+        coordinator._active_room_plan_pending_until = time.monotonic() - 1
+        state = NarwalState()
+        state.working_status = WorkingStatus.DOCKED
+
+        coordinator._sync_active_room_ids(state)
+
+        assert coordinator.active_room_ids is None
 
     async def test_poll_does_not_call_connect(self) -> None:
         """_async_update_data does NOT call client.connect() when disconnected."""
@@ -366,8 +559,12 @@ class TestTopicSubscriptionRenewal:
         c._remapping_map_next_refresh = 0.0
         c._last_display_map_resub = 0.0
         c._last_topic_subscribe = last_subscribe
+        c._last_task_details_refresh = time.monotonic()
         c._prev_working_status = MagicMock()
+        c.active_room_ids = None
+        c._active_room_plan_pending_until = 0.0
         c.update_interval = None
+        c.async_set_updated_data = MagicMock()
         return c
 
     @pytest.mark.asyncio
@@ -376,6 +573,19 @@ class TestTopicSubscriptionRenewal:
         c = self._coordinator(time.monotonic() - (TOPIC_RESUBSCRIBE_AFTER + 30))
         await c._async_update_data()
         c.client.subscribe_to_topics.assert_awaited_once()
+
+    def test_remapping_completion_refreshes_dock_status(self) -> None:
+        """Dock fields can be stale when remapping ends on the dock."""
+        c = self._coordinator(time.monotonic())
+        c._prev_working_status = WorkingStatus.REMAPPING
+        c.client.state.working_status = WorkingStatus.DOCKED
+        task = object()
+        c._refresh_dock_status = MagicMock(return_value=task)
+
+        c._on_state_update(c.client.state)
+
+        c._refresh_dock_status.assert_called_once_with()
+        c.hass.async_create_task.assert_called_once_with(task)
 
     @pytest.mark.asyncio
     async def test_skipped_renewal_keeps_retry_window_open(self) -> None:

@@ -60,6 +60,7 @@ class TestCoordinatorMapRefresh:
         coordinator._last_status_resub = 0.0
         coordinator._last_task_details_refresh = time.monotonic()
         coordinator._prev_working_status = WorkingStatus.UNKNOWN
+        coordinator.active_room_ids = None
         coordinator.update_interval = None
         coordinator.async_set_updated_data = MagicMock()
         def _close_background_task(*args: object) -> None:

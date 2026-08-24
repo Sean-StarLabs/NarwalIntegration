@@ -23,7 +23,7 @@ from .const import (
     CONSUMABLE_REPLACE_ITEMS,
     ERROR_HELP_URL_TEMPLATE,
 )
-from .coordinator import NarwalCoordinator
+from .coordinator import NarwalCoordinator, is_narwal_task_busy, is_setup_available
 from .entity import NarwalEntity
 
 
@@ -33,6 +33,7 @@ class NarwalBinarySensorEntityDescription(BinarySensorEntityDescription):
 
     value_fn: Callable[[NarwalState], bool | None]
     attrs_fn: Callable[[NarwalState], dict[str, Any] | None] | None = None
+    dock_device: bool = False
 
 
 def _tank_problem(attr: str, bad: frozenset[int]) -> Callable[[NarwalState], bool | None]:
@@ -47,10 +48,25 @@ def _tank_problem(attr: str, bad: frozenset[int]) -> Callable[[NarwalState], boo
     return fn
 
 
+def _is_dock_side(state: NarwalState) -> bool:
+    """Return true when the robot or dock is doing dock-side work."""
+    return state.is_docked or state.is_charging_to_resume or state.is_station_active
+
+
 # Station tank/bag problem sensors. Bad-value sets come from the decoded enums
 # (RobotBaseStatus.pbenum): every named value ≥ 2 is an attention state
 # (empty / abnormal / not-installed / suggest-replace); 0=unspecified, 1=ok.
 BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
+    NarwalBinarySensorEntityDescription(
+        key="busy",
+        translation_key="busy",
+        value_fn=is_narwal_task_busy,
+    ),
+    NarwalBinarySensorEntityDescription(
+        key="setup_available",
+        translation_key="setup_available",
+        value_fn=is_setup_available,
+    ),
     NarwalBinarySensorEntityDescription(
         key="error",
         translation_key="error",
@@ -75,10 +91,12 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
         # consumable/get_consumable_info maintainItems (clean/check these parts).
-        value_fn=lambda s: bool(s.maintain_items) if s.raw_base_status else None,
+        value_fn=lambda s: bool(s.maintain_items)
+        if s.consumable_info_available
+        else None,
         attrs_fn=lambda s: {
             "items": [CONSUMABLE_MAINTAIN_ITEMS.get(i, str(i)) for i in s.maintain_items]
-        } if s.raw_base_status else None,
+        } if s.consumable_info_available else None,
     ),
     NarwalBinarySensorEntityDescription(
         key="replacement_required",
@@ -86,16 +104,19 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
         # consumable/get_consumable_info replaceItems (replace these parts).
-        value_fn=lambda s: bool(s.replace_items) if s.raw_base_status else None,
+        value_fn=lambda s: bool(s.replace_items)
+        if s.consumable_info_available
+        else None,
         attrs_fn=lambda s: {
             "items": [CONSUMABLE_REPLACE_ITEMS.get(i, str(i)) for i in s.replace_items]
-        } if s.raw_base_status else None,
+        } if s.consumable_info_available else None,
     ),
     NarwalBinarySensorEntityDescription(
         key="clean_water_tank",
         translation_key="clean_water_tank",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("clean_water_tank_state", frozenset({2, 3, 4})),
     ),
     NarwalBinarySensorEntityDescription(
@@ -103,6 +124,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         translation_key="sewage_tank",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("sewage_tank_state", frozenset({2, 3})),
     ),
     NarwalBinarySensorEntityDescription(
@@ -117,6 +139,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         translation_key="dust_bag",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("dust_bag_state", frozenset({2, 3, 4})),
     ),
     NarwalBinarySensorEntityDescription(
@@ -124,6 +147,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         translation_key="station_bag",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("station_bag_state", frozenset({2, 3, 4})),
     ),
 )
@@ -161,7 +185,9 @@ class NarwalDockedSensor(NarwalEntity, BinarySensorEntity):
         state = self.coordinator.data
         if state is None:
             return None
-        return state.is_docked
+        if getattr(state, "dock_state_unknown", False):
+            return None
+        return _is_dock_side(state)
 
 
 class NarwalBinarySensor(NarwalEntity, BinarySensorEntity):
@@ -177,6 +203,8 @@ class NarwalBinarySensor(NarwalEntity, BinarySensorEntity):
         """Initialize the binary sensor."""
         super().__init__(coordinator)
         self.entity_description = description
+        if description.dock_device:
+            self._use_dock_device_info()
         device_id = coordinator.config_entry.data["device_id"]
         self._attr_unique_id = f"{device_id}_{description.key}"
 

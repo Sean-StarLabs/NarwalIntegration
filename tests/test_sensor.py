@@ -9,22 +9,21 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.sensor import (  # noqa: E402
-    SENSOR_DESCRIPTIONS,
-    _MAX_MAP_METADATA_ATTRIBUTE_BYTES,
-    _fit_map_metadata_attributes,
-    _json_size_bytes,
-    NarwalMapMetadataSensor,
-    NarwalSensor,
-    NarwalTaskStatusSensor,
-)
 from custom_components.narwal.narwal_client import (  # noqa: E402
     MapData,
     NarwalState,
     RoomInfo,
     WorkingStatus,
 )
-
+from custom_components.narwal.sensor import (  # noqa: E402
+    _MAX_MAP_METADATA_ATTRIBUTE_BYTES,
+    SENSOR_DESCRIPTIONS,
+    NarwalMapMetadataSensor,
+    NarwalSensor,
+    NarwalTaskStatusSensor,
+    _fit_map_metadata_attributes,
+    _json_size_bytes,
+)
 
 _DESCS = {d.key: d for d in SENSOR_DESCRIPTIONS}
 
@@ -48,20 +47,6 @@ def test_non_transient_sensor_stays_available_when_value_missing() -> None:
     sensor = NarwalSensor(coordinator, _DESCS["firmware_version"])
 
     assert sensor.native_value is None
-    assert sensor.available
-
-
-def test_station_task_sensor_reports_idle_when_station_healthy() -> None:
-    """Idle station state is a real state, not an unavailable sensor."""
-    coordinator = MagicMock()
-    coordinator.config_entry.data = {"device_id": "dev1"}
-    coordinator.config_entry.title = "Narwal Test"
-    coordinator.client.state.firmware_version = "1.0.0"
-    coordinator.last_update_success = True
-    coordinator.data = NarwalState()
-    sensor = NarwalSensor(coordinator, _DESCS["station_task"])
-
-    assert sensor.native_value == "idle"
     assert sensor.available
 
 

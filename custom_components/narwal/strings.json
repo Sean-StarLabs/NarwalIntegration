@@ -108,6 +108,7 @@
         "state": {
           "cleaning": "Cleaning",
           "remapping": "Remapping",
+          "charging_to_resume": "Charging to resume",
           "returning": "Returning",
           "paused": "Paused",
           "station_active": "Station active",
@@ -124,6 +125,20 @@
         "state": {
           "on": "Docked",
           "off": "Undocked"
+        }
+      },
+      "busy": {
+        "name": "Busy",
+        "state": {
+          "on": "Busy",
+          "off": "Idle"
+        }
+      },
+      "setup_available": {
+        "name": "Setup available",
+        "state": {
+          "on": "Available",
+          "off": "Busy"
         }
       },
       "error": {
@@ -191,7 +206,7 @@
         "name": "Dock light"
       }
     },
-    "button": {
+    "switch": {
       "empty_dustbin": {
         "name": "Empty dustbin"
       },
@@ -206,9 +221,7 @@
       },
       "dry_dock_bag": {
         "name": "Dry and disinfect dock bag"
-      }
-    },
-    "switch": {
+      },
       "show_room_labels": {
         "name": "Show room labels"
       },

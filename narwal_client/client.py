@@ -45,7 +45,6 @@ from .const import (
     TOPIC_CMD_GET_ROBOT_TASK_STATUS,
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
-    TOPIC_CMD_PING,
     TOPIC_CMD_RECALL,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
@@ -131,7 +130,13 @@ _AUX_STATUS_TOPICS = {
     TOPIC_ROBOT_TASK_STATUS,
 }
 
+_DOCK_TASK_REFRESH_DELAY = 6.0
 _OPTIONAL_TASK_DETAIL_TIMEOUT = 3.0
+_DOCK_TASK_FORCE_END_PAYLOADS = {
+    # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
+    # with ParallelTaskType.DRY_STATION_BAG to stop dock-bag drying.
+    "dry_dock_bag": b"\x08\x01",
+}
 
 @dataclass
 class RoomCleanSettings:
@@ -143,7 +148,6 @@ class RoomCleanSettings:
     mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL
     passes: int = 1
     route: CleaningRoute | None = None
-
 
 @dataclass(frozen=True)
 class _QueuedResponse:
@@ -557,7 +561,7 @@ class NarwalClient:
         drained = 0
         while True:
             try:
-                data = await asyncio.wait_for(self._ws.recv(), timeout=0.05)
+                await asyncio.wait_for(self._ws.recv(), timeout=0.05)
                 drained += 1
             except asyncio.TimeoutError:
                 break
@@ -1691,6 +1695,92 @@ class NarwalClient:
         """Cancel current task."""
         return await self.send_command(TOPIC_CMD_CANCEL)
 
+    def _active_dock_task(self) -> str | None:
+        """Return the current dock task from robot-derived state."""
+        tasks = self._active_dock_tasks()
+        if not tasks:
+            return None
+        return tasks[0]
+
+    def _active_dock_tasks(self) -> tuple[str, ...]:
+        """Return current dock tasks from robot-derived state."""
+        state = self.state
+        if not state.is_station_active:
+            return ()
+        tasks: list[str] = []
+        if state.station_activity == 1:
+            tasks.append("emptying_dustbin")
+        if state.is_washing_mop:
+            tasks.append("washing_mop")
+        tasks.extend(state.active_dock_drying_tasks)
+        if state.is_drying_mop and "drying_mop" not in tasks:
+            tasks.append("drying_mop")
+        if state.station_activity == 4 and not any(
+            task.startswith("dry") or task == "drying_mop" for task in tasks
+        ):
+            tasks.append("drying_or_disinfecting")
+        return tuple(dict.fromkeys(tasks)) or ("station_active",)
+
+    async def _refresh_after_dock_stop(self) -> bool:
+        """Refresh robot state after a dock stop command."""
+        updated = False
+        try:
+            await self.get_status(full_update=True)
+            updated = True
+        except (NarwalCommandError, NarwalConnectionError) as err:
+            _LOGGER.debug("Status refresh after dock stop failed: %s", err)
+        try:
+            await self.get_dry_mop_remain_time()
+            updated = True
+        except (NarwalCommandError, NarwalConnectionError) as err:
+            _LOGGER.debug("Drying timer refresh after dock stop failed: %s", err)
+        return updated
+
+    async def stop_dock_task(self, task: str | None = None) -> CommandResponse:
+        """Stop the active station maintenance task."""
+        active_tasks = self._active_dock_tasks()
+        active_task = task or (active_tasks[0] if active_tasks else None)
+        payload = _DOCK_TASK_FORCE_END_PAYLOADS.get(active_task or "")
+        if payload is None:
+            if len(active_tasks) > 1:
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            response = await self.stop(timeout=15.0)
+        else:
+            response = await self.send_command(
+                TOPIC_CMD_FORCE_END,
+                payload=payload,
+                timeout=15.0,
+            )
+        response_seen_at = time.monotonic()
+        await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
+        await self._refresh_after_dock_stop()
+        if response.success:
+            if (
+                active_task in _DOCK_TASK_FORCE_END_PAYLOADS
+                and active_task in self._active_dock_tasks()
+                and self.state.dock_drying_status_time <= response_seen_at
+            ):
+                self.state.clear_dock_drying_task(active_task)
+            if not self.state.is_station_active:
+                self.state.clear_washing_task()
+                if self.state.dry_mop_remaining_time in (None, 0):
+                    self.state.clear_drying_task()
+            elif (
+                active_task in _DOCK_TASK_FORCE_END_PAYLOADS
+                and active_task in self._active_dock_tasks()
+            ):
+                _LOGGER.debug("Dock task %s still reported after stop", active_task)
+                return CommandResponse(
+                    result_code=CommandResult.NOT_APPLICABLE,
+                    data=response.data,
+                    raw_payload=response.raw_payload,
+                )
+            elif active_task not in _DOCK_TASK_FORCE_END_PAYLOADS:
+                self.state.clear_washing_task()
+                if self.state.dry_mop_remaining_time in (None, 0):
+                    self.state.clear_drying_task()
+        return response
+
     async def return_to_base(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
         """Return to charging dock."""
         return await self.send_command(TOPIC_CMD_RECALL, timeout=timeout)
@@ -1725,15 +1815,24 @@ class NarwalClient:
 
     async def dry_mop(self) -> CommandResponse:
         """Dry the mop pads at the station."""
-        return await self.send_command(TOPIC_CMD_DRY_MOP)
+        response = await self.send_command(TOPIC_CMD_DRY_MOP)
+        if response.result_code in (0, CommandResult.SUCCESS, CommandResult.APPLIED):
+            self.state.last_dry_mop_empty_time = 0.0
+        return response
 
     async def dry_dust_bag(self) -> CommandResponse:
         """Dry or disinfect the robot dust bin at the station."""
-        return await self.send_command(TOPIC_CMD_DRY_DUST_BAG)
+        response = await self.send_command(TOPIC_CMD_DRY_DUST_BAG)
+        if response.result_code in (0, CommandResult.SUCCESS, CommandResult.APPLIED):
+            self.state.assume_dock_drying_task("dry_dust_bin")
+        return response
 
     async def dry_station_bag(self) -> CommandResponse:
         """Dry or disinfect the dock dust bag at the station."""
-        return await self.send_command(TOPIC_CMD_DRY_STATION_BAG)
+        response = await self.send_command(TOPIC_CMD_DRY_STATION_BAG)
+        if response.result_code in (0, CommandResult.SUCCESS, CommandResult.APPLIED):
+            self.state.assume_dock_drying_task("dry_dock_bag")
+        return response
 
     async def empty_dustbin(self) -> CommandResponse:
         """Empty the dustbin at the station."""
