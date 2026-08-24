@@ -152,7 +152,7 @@ def test_dock_task_switch_exposes_drying_progress_attributes() -> None:
     assert switch.is_on is True
     assert switch.extra_state_attributes == {
         "time_left": "10m",
-        "progress": "17%",
+        "progress": 17,
     }
 
 
@@ -166,7 +166,7 @@ def test_dock_task_switch_exposes_app_started_dock_bag_drying() -> None:
     assert switch.available
     assert switch.extra_state_attributes == {
         "time_left": "2h 30m",
-        "progress": "50%",
+        "progress": 50,
     }
 
 

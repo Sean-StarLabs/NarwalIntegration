@@ -175,25 +175,25 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         return can_start_dock_task(state, self.entity_description.key)
 
     @property
-    def extra_state_attributes(self) -> dict[str, str] | None:
+    def extra_state_attributes(self) -> dict[str, str | int] | None:
         """Return user-facing dock task progress attributes."""
         state = self.coordinator.data
         if state is None or not self.is_on:
             return None
 
-        attributes: dict[str, str] = {}
+        attributes: dict[str, str | int] = {}
         raw_task = RAW_TASK_BY_DOCK_TASK_KEY[self.entity_description.key]
         timer = state.dock_task_timer(raw_task)
         if timer is not None:
             attributes["time_left"] = _format_duration(timer.remaining)
-            attributes["progress"] = f"{timer.progress_percent}%"
+            attributes["progress"] = timer.progress_percent
         elif raw_task == "drying_mop" and state.dry_mop_remaining_time is not None:
             attributes["time_left"] = _format_duration(state.dry_mop_remaining_time)
             if state.mop_drying_target > 0:
                 elapsed = max(0, state.mop_drying_elapsed)
                 target = state.mop_drying_target
                 progress = min(100, round(elapsed / target * 100))
-                attributes["progress"] = f"{progress}%"
+                attributes["progress"] = progress
         return attributes or None
 
     async def async_turn_on(self, **kwargs) -> None:
