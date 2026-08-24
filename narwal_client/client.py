@@ -1729,20 +1729,29 @@ class NarwalClient:
 
     def _active_dock_task(self) -> str | None:
         """Return the current dock task from robot-derived state."""
+        tasks = self._active_dock_tasks()
+        if not tasks:
+            return None
+        return tasks[0]
+
+    def _active_dock_tasks(self) -> tuple[str, ...]:
+        """Return current dock tasks from robot-derived state."""
         state = self.state
         if not state.is_station_active:
-            return None
+            return ()
+        tasks: list[str] = []
         if state.station_activity == 1:
-            return "emptying_dustbin"
+            tasks.append("emptying_dustbin")
         if state.is_washing_mop:
-            return "washing_mop"
-        if state.active_dock_drying_task is not None:
-            return state.active_dock_drying_task
-        if state.is_drying_mop:
-            return "drying_mop"
-        if state.station_activity == 4:
-            return "drying_or_disinfecting"
-        return "station_active"
+            tasks.append("washing_mop")
+        tasks.extend(state.active_dock_drying_tasks)
+        if state.is_drying_mop and "drying_mop" not in tasks:
+            tasks.append("drying_mop")
+        if state.station_activity == 4 and not any(
+            task.startswith("dry") or task == "drying_mop" for task in tasks
+        ):
+            tasks.append("drying_or_disinfecting")
+        return tuple(dict.fromkeys(tasks)) or ("station_active",)
 
     async def _refresh_after_dock_stop(self) -> bool:
         """Refresh robot state after a dock stop command."""
@@ -1759,9 +1768,9 @@ class NarwalClient:
             _LOGGER.debug("Drying timer refresh after dock stop failed: %s", err)
         return updated
 
-    async def stop_dock_task(self) -> CommandResponse:
+    async def stop_dock_task(self, task: str | None = None) -> CommandResponse:
         """Stop the active station maintenance task."""
-        active_task = self._active_dock_task()
+        active_task = task or self._active_dock_task()
         payload = _DOCK_TASK_FORCE_END_PAYLOADS.get(active_task or "")
         if payload is None:
             response = await self.stop(timeout=15.0)
@@ -1777,17 +1786,17 @@ class NarwalClient:
         if response.success:
             if (
                 active_task in _DOCK_TASK_FORCE_END_PAYLOADS
-                and self._active_dock_task() == active_task
+                and active_task in self._active_dock_tasks()
                 and self.state.dock_drying_status_time <= response_seen_at
             ):
-                self.state.clear_dock_drying_task()
+                self.state.clear_dock_drying_task(active_task)
             if not self.state.is_station_active:
                 self.state.clear_washing_task()
                 if self.state.dry_mop_remaining_time in (None, 0):
                     self.state.clear_drying_task()
             elif (
                 active_task in _DOCK_TASK_FORCE_END_PAYLOADS
-                and self._active_dock_task() == active_task
+                and active_task in self._active_dock_tasks()
             ):
                 _LOGGER.debug("Dock task %s still reported after stop", active_task)
                 return CommandResponse(

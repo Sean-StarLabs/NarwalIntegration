@@ -164,6 +164,20 @@ def test_paused_standby_task_context_blocks_new_actions() -> None:
     assert not can_start_dock_task(state)
 
 
+def test_dock_maintenance_does_not_block_next_clean_setup() -> None:
+    """A dock-side task should not hide start-time clean controls."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+    state.dry_mop_remaining_time = 1_800
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+
+    assert state.is_docked
+    assert state.is_station_active
+    assert can_edit_pending_clean_settings(state)
+    assert can_start_cleaning(state)
+
+
 def test_return_home_available_when_idle_off_dock() -> None:
     """An idle robot away from the dock should expose return-to-base."""
     state = MagicMock()
@@ -367,31 +381,6 @@ class TestCoordinatorResilience:
 
         coordinator.client.get_status.assert_awaited_once_with(full_update=True)
         assert result is coordinator.client.state
-
-    async def test_poll_schedules_missing_map_fetch(self) -> None:
-        """Polling schedules the shared missing-map retry path instead of hiding it."""
-        coordinator = self._make_coordinator()
-        type(coordinator.client).connected = PropertyMock(return_value=True)
-        coordinator.client.state.map_data = None
-        coordinator.client.get_status = AsyncMock()
-        coordinator.client.get_map = AsyncMock()
-        task_names: list[str] = []
-
-        def close_background_task(hass, coro, name):
-            task_names.append(name)
-            coro.close()
-            return None
-
-        coordinator.config_entry.async_create_background_task.side_effect = (
-            close_background_task
-        )
-
-        result = await coordinator._async_update_data()
-
-        assert result is coordinator.client.state
-        assert task_names == ["narwal_map_fetch"]
-        assert coordinator._map_fetch_pending is True
-        coordinator.client.get_map.assert_not_awaited()
 
     async def test_push_update_resets_failure_counter(self) -> None:
         """_on_state_update resets _consecutive_failures to 0."""

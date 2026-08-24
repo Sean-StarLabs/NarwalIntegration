@@ -134,7 +134,7 @@ async def test_dock_task_switch_stops_active_task() -> None:
 
     await switch.async_turn_off()
 
-    coordinator.client.stop_dock_task.assert_awaited_once_with()
+    coordinator.client.stop_dock_task.assert_awaited_once_with("emptying_dustbin")
     coordinator.client.cancel.assert_not_called()
     coordinator.client.stop.assert_not_called()
     coordinator.async_refresh_dock_status.assert_awaited_once_with()
@@ -151,17 +151,8 @@ def test_dock_task_switch_exposes_drying_progress_attributes() -> None:
 
     assert switch.is_on is True
     assert switch.extra_state_attributes == {
-        "dock_active": True,
-        "docked": True,
-        "active": True,
-        "raw_task": "drying_mop",
-        "task": "Drying mop",
         "time_left": "10m",
-        "time_left_minutes": 10,
-        "elapsed_minutes": 2,
-        "target_minutes": 12,
-        "progress": 17,
-        "progress_display": "17%",
+        "progress": "17%",
     }
 
 
@@ -174,25 +165,71 @@ def test_dock_task_switch_exposes_app_started_dock_bag_drying() -> None:
     assert switch.is_on is True
     assert switch.available
     assert switch.extra_state_attributes == {
-        "dock_active": True,
-        "docked": True,
-        "active": True,
-        "raw_task": "dry_dock_bag",
-        "task": "Drying / disinfecting dock bag",
         "time_left": "2h 30m",
-        "time_left_minutes": 150,
-        "timer_fields": "12/13",
-        "elapsed_minutes": 150,
-        "target_minutes": 300,
-        "progress": 50,
-        "progress_display": "50%",
+        "progress": "50%",
     }
 
 
-def test_generic_drying_does_not_infer_specific_dock_task() -> None:
+def test_working_status_field_10_11_reports_dust_bin_drying() -> None:
     state = _state()
     state.update_from_working_status({"10": 9_000, "11": 18_000, "19": {}})
     coordinator = _coordinator(state)
 
-    assert NarwalDockTaskSwitch(coordinator, _DESCS["dry_dust_bin"]).is_on is False
+    assert NarwalDockTaskSwitch(coordinator, _DESCS["dry_dust_bin"]).is_on is True
     assert NarwalDockTaskSwitch(coordinator, _DESCS["dry_dock_bag"]).is_on is False
+
+
+def test_dock_task_switch_allows_verified_parallel_dry_start() -> None:
+    state = _state()
+    state.update_from_working_status({"8": 9_000, "9": 18_000, "19": {}})
+    coordinator = _coordinator(state)
+
+    dry_mop = NarwalDockTaskSwitch(coordinator, _DESCS["dry_mop"])
+    dry_dust_bin = NarwalDockTaskSwitch(coordinator, _DESCS["dry_dust_bin"])
+    dry_dock_bag = NarwalDockTaskSwitch(coordinator, _DESCS["dry_dock_bag"])
+    empty = NarwalDockTaskSwitch(coordinator, _DESCS["empty_dustbin"])
+    wash = NarwalDockTaskSwitch(coordinator, _DESCS["wash_mop"])
+
+    assert dry_mop.available
+    assert dry_dust_bin.is_on is False
+    assert dry_dust_bin.available
+    assert dry_dock_bag.is_on is False
+    assert not dry_dock_bag.available
+    assert not empty.available
+    assert not wash.available
+
+
+def test_dock_task_switch_allows_verified_parallel_dry_start_reverse() -> None:
+    state = _state()
+    state.update_from_working_status({"10": 9_000, "11": 18_000, "19": {}})
+    coordinator = _coordinator(state)
+
+    dry_mop = NarwalDockTaskSwitch(coordinator, _DESCS["dry_mop"])
+    dry_dock_bag = NarwalDockTaskSwitch(coordinator, _DESCS["dry_dock_bag"])
+    empty = NarwalDockTaskSwitch(coordinator, _DESCS["empty_dustbin"])
+    wash = NarwalDockTaskSwitch(coordinator, _DESCS["wash_mop"])
+
+    assert dry_mop.is_on is False
+    assert dry_mop.available
+    assert not dry_dock_bag.available
+    assert not empty.available
+    assert not wash.available
+
+
+def test_dock_task_switch_blocks_unverified_parallel_starts() -> None:
+    coordinator = _coordinator(_state(station_activity=1))
+
+    empty = NarwalDockTaskSwitch(coordinator, _DESCS["empty_dustbin"])
+    wash = NarwalDockTaskSwitch(coordinator, _DESCS["wash_mop"])
+    dry_mop = NarwalDockTaskSwitch(coordinator, _DESCS["dry_mop"])
+    dry_dust_bin = NarwalDockTaskSwitch(coordinator, _DESCS["dry_dust_bin"])
+    dry_dock_bag = NarwalDockTaskSwitch(coordinator, _DESCS["dry_dock_bag"])
+
+    assert empty.is_on is True
+    assert empty.available
+    assert wash.is_on is False
+    assert not wash.available
+    assert dry_mop.is_on is False
+    assert not dry_mop.available
+    assert not dry_dust_bin.available
+    assert not dry_dock_bag.available

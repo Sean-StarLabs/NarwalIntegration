@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import logging
 import time
+from contextlib import suppress
 from dataclasses import dataclass, fields
 from datetime import timedelta
 
@@ -65,6 +66,9 @@ DOCK_TASK_KEY_BY_RAW_TASK = {
     "dry_dust_bin": "dry_dust_bin",
     "dry_dock_bag": "dry_dock_bag",
 }
+VERIFIED_PARALLEL_DOCK_TASK_KEY_PAIRS = frozenset(
+    {frozenset({"dry_mop", "dry_dust_bin"})}
+)
 
 
 @dataclass
@@ -163,14 +167,14 @@ def can_edit_pending_clean_settings(state: NarwalState | None) -> bool:
     """Return True when pending next-clean settings can be edited locally."""
     if has_blocking_error(state):
         return False
-    return not is_narwal_task_busy(state)
+    return not is_clean_session_context(state)
 
 
 def can_start_cleaning(state: NarwalState | None) -> bool:
     """Return True when a new robot clean command can be sent now."""
     if has_blocking_error(state):
         return False
-    return state.is_docked and not is_narwal_task_busy(state)
+    return state.is_docked and can_edit_pending_clean_settings(state)
 
 
 def is_setup_available(state: NarwalState | None) -> bool:
@@ -262,14 +266,24 @@ def can_locate_robot(state: NarwalState | None) -> bool:
     return not _state_attr_is_true(state, "is_station_active")
 
 
-def can_start_dock_task(state: NarwalState | None) -> bool:
+def can_start_dock_task(state: NarwalState | None, task_key: str | None = None) -> bool:
     """Return True when a new dock/base-station task can be started."""
     if has_blocking_error(state):
         return False
-    return (
-        state.is_docked
-        and not is_clean_session_context(state)
-        and not state.is_station_active
+    if not state.is_docked or is_clean_session_context(state):
+        return False
+    if task_key is None:
+        return not state.is_station_active
+    active_keys = set(dock_task_keys(state))
+    if task_key in active_keys:
+        return False
+    if "station_active" in active_keys or "drying_or_disinfecting" in active_keys:
+        return False
+    if not active_keys:
+        return True
+    return all(
+        frozenset({task_key, active_key}) in VERIFIED_PARALLEL_DOCK_TASK_KEY_PAIRS
+        for active_key in active_keys
     )
 
 
@@ -287,27 +301,46 @@ def can_stop_dock_task(state: NarwalState | None) -> bool:
 
 def dock_task(state: NarwalState | None) -> str | None:
     """Return the active dock task."""
-    if state is None or not state.is_station_active:
+    tasks = dock_tasks(state)
+    if not tasks:
         return None
+    return tasks[0]
+
+
+def dock_tasks(state: NarwalState | None) -> tuple[str, ...]:
+    """Return active dock tasks from robot-reported state."""
+    if state is None or not state.is_station_active:
+        return ()
+    tasks: list[str] = []
     if state.station_activity == 1:
-        return "emptying_dustbin"
+        tasks.append("emptying_dustbin")
     if state.is_washing_mop:
-        return "washing_mop"
-    if state.active_dock_drying_task is not None:
-        return state.active_dock_drying_task
-    if state.is_drying_mop:
-        return "drying_mop"
-    if state.station_activity == 4:
-        return "drying_or_disinfecting"
-    return "station_active"
+        tasks.append("washing_mop")
+    tasks.extend(getattr(state, "active_dock_drying_tasks", ()))
+    if state.is_drying_mop and "drying_mop" not in tasks:
+        tasks.append("drying_mop")
+    if state.station_activity == 4 and not any(
+        task.startswith("dry") or task == "drying_mop" for task in tasks
+    ):
+        tasks.append("drying_or_disinfecting")
+    return tuple(dict.fromkeys(tasks)) or ("station_active",)
 
 
 def dock_task_key(state: NarwalState | None) -> str | None:
     """Return the active dock-task switch key from robot-reported state only."""
-    raw_task = dock_task(state)
-    if raw_task is None:
+    keys = dock_task_keys(state)
+    if not keys:
         return None
-    return DOCK_TASK_KEY_BY_RAW_TASK.get(raw_task)
+    return keys[0]
+
+
+def dock_task_keys(state: NarwalState | None) -> tuple[str, ...]:
+    """Return active dock-task switch keys from robot-reported state only."""
+    return tuple(
+        key
+        for task in dock_tasks(state)
+        if (key := DOCK_TASK_KEY_BY_RAW_TASK.get(task)) is not None
+    )
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):

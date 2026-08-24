@@ -130,9 +130,7 @@ class TestVacuumActivity:
         assert state.is_cleaning
         assert state.is_station_active
         assert vac.activity == VacuumActivity.DOCKED
-        assert vac.extra_state_attributes["station_task"] == "drying_mop"
-        assert vac.extra_state_attributes["drying_time_left"] == 12_503
-        assert vac.extra_state_attributes["dock_progress"] == 31
+        assert vac.extra_state_attributes["task_status"] == "station_active"
         assert vac.extra_state_attributes["docked"] is True
 
     def test_dock_washing_reports_docked_activity(self) -> None:
@@ -142,10 +140,9 @@ class TestVacuumActivity:
 
         assert vac.activity == VacuumActivity.DOCKED
         assert vac.extra_state_attributes["task_status"] == "station_active"
-        assert vac.extra_state_attributes["station_task"] == "washing_mop"
         assert vac.extra_state_attributes["docked"] is True
 
-    def test_app_started_dock_bag_drying_exposes_vacuum_attrs(self) -> None:
+    def test_app_started_dock_bag_drying_keeps_details_on_dock_switches(self) -> None:
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
         state.update_from_working_status({"12": 9_000, "13": 18_000, "19": {}})
@@ -155,13 +152,12 @@ class TestVacuumActivity:
 
         assert vac.activity == VacuumActivity.DOCKED
         assert attrs["task_status"] == "station_active"
-        assert attrs["station_task"] == "dry_dock_bag"
-        assert attrs["drying_time_left"] == 9_000
-        assert attrs["drying_time_left_minutes"] == 150
-        assert attrs["dock_time_left"] == "2h 30m"
-        assert attrs["dock_progress"] == 50
-        assert attrs["dock_progress_display"] == "50%"
-        assert attrs["dock_timer_fields"] == "12/13"
+        assert "station_task" not in attrs
+        assert "station_tasks" not in attrs
+        assert "drying_time_left" not in attrs
+        assert "dock_progress" not in attrs
+        assert "dock_progress_display" not in attrs
+        assert "dock_timer_fields" not in attrs
 
     def test_stale_clean_details_hidden_after_clean_ends(self) -> None:
         state = NarwalState()
@@ -177,7 +173,6 @@ class TestVacuumActivity:
         attrs = vac.extra_state_attributes
 
         assert attrs["task_status"] == "station_active"
-        assert attrs["station_task"] == "drying_or_disinfecting"
         assert "progress" not in attrs
         assert "current_room_id" not in attrs
         assert "current_room" not in attrs

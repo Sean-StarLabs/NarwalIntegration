@@ -471,6 +471,21 @@ class TestNarwalState:
         assert state.active_dock_drying_task == "dry_dock_bag"
         assert state.is_station_active
 
+    def test_working_status_tracks_parallel_dock_timers(self) -> None:
+        """Independent station timers should not collapse to a single task."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+
+        state.update_from_working_status(
+            {"8": 900, "9": 12600, "12": 9000, "13": 18000, "19": {}}
+        )
+
+        assert state.active_dock_drying_tasks == ("drying_mop", "dry_dock_bag")
+        assert state.active_dock_drying_task == "drying_mop"
+        assert state.dock_task_timer("drying_mop").progress_percent == 7
+        assert state.dock_task_timer("dry_dock_bag").progress_percent == 50
+        assert state.is_station_active
+
     def test_idle_base_status_clears_stale_dock_bag_timer(self) -> None:
         """An idle dock status clears old dock-bag timers after broadcasts stop."""
         state = NarwalState()

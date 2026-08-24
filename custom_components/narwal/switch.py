@@ -22,20 +22,17 @@ from .coordinator import (
     NarwalCoordinator,
     can_start_dock_task,
     can_stop_dock_task,
-    dock_task,
-    dock_task_key,
+    dock_task_keys,
 )
 from .entity import NarwalDockEntity, NarwalEntity
 from .narwal_client import CommandResponse, CommandResult
 
-STATION_TASK_LABELS: dict[str, str] = {
-    "emptying_dustbin": "Emptying dustbin",
-    "washing_mop": "Washing mop",
-    "drying_mop": "Drying mop",
-    "dry_dust_bin": "Drying / disinfecting dust bin",
-    "dry_dock_bag": "Drying / disinfecting dock bag",
-    "drying_or_disinfecting": "Drying / disinfecting",
-    "station_active": "Station active",
+RAW_TASK_BY_DOCK_TASK_KEY = {
+    "empty_dustbin": "emptying_dustbin",
+    "wash_mop": "washing_mop",
+    "dry_mop": "drying_mop",
+    "dry_dust_bin": "dry_dust_bin",
+    "dry_dock_bag": "dry_dock_bag",
 }
 
 
@@ -165,7 +162,7 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         state = self.coordinator.data
         if state is None:
             return None
-        return dock_task_key(state) == self.entity_description.key
+        return self.entity_description.key in dock_task_keys(state)
 
     @property
     def available(self) -> bool:
@@ -175,47 +172,29 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         state = self.coordinator.data
         if self.is_on:
             return can_stop_dock_task(state)
-        return can_start_dock_task(state)
+        return can_start_dock_task(state, self.entity_description.key)
 
     @property
-    def extra_state_attributes(self) -> dict[str, int | str | bool] | None:
-        """Return dock task status and progress attributes."""
+    def extra_state_attributes(self) -> dict[str, str] | None:
+        """Return user-facing dock task progress attributes."""
         state = self.coordinator.data
-        if state is None:
+        if state is None or not self.is_on:
             return None
 
-        raw_task = dock_task(state)
-        attributes: dict[str, int | str | bool] = {
-            "dock_active": state.is_station_active,
-            "docked": state.is_docked,
-            "active": self.is_on is True,
-        }
-        if raw_task is not None:
-            attributes["raw_task"] = raw_task
-            attributes["task"] = STATION_TASK_LABELS.get(raw_task, raw_task)
-        remaining = (
-            state.dock_drying_remaining_time
-            if state.dock_drying_remaining_time is not None
-            else state.dry_mop_remaining_time
-        )
-        if remaining is not None:
-            attributes["time_left"] = _format_duration(remaining)
-            attributes["time_left_minutes"] = _duration_minutes(remaining)
-        if state.dock_drying_timer_fields is not None:
-            attributes["timer_fields"] = "/".join(state.dock_drying_timer_fields)
-        if state.dock_drying_target > 0:
-            elapsed = max(0, state.dock_drying_elapsed)
-            target = state.dock_drying_target
-        else:
-            elapsed = max(0, state.mop_drying_elapsed)
-            target = state.mop_drying_target
-        if target > 0:
-            attributes["elapsed_minutes"] = _duration_minutes(elapsed)
-            attributes["target_minutes"] = _duration_minutes(target)
-            progress = min(100, round(elapsed / target * 100))
-            attributes["progress"] = progress
-            attributes["progress_display"] = f"{progress}%"
-        return attributes
+        attributes: dict[str, str] = {}
+        raw_task = RAW_TASK_BY_DOCK_TASK_KEY[self.entity_description.key]
+        timer = state.dock_task_timer(raw_task)
+        if timer is not None:
+            attributes["time_left"] = _format_duration(timer.remaining)
+            attributes["progress"] = f"{timer.progress_percent}%"
+        elif raw_task == "drying_mop" and state.dry_mop_remaining_time is not None:
+            attributes["time_left"] = _format_duration(state.dry_mop_remaining_time)
+            if state.mop_drying_target > 0:
+                elapsed = max(0, state.mop_drying_elapsed)
+                target = state.mop_drying_target
+                progress = min(100, round(elapsed / target * 100))
+                attributes["progress"] = f"{progress}%"
+        return attributes or None
 
     async def async_turn_on(self, **kwargs) -> None:
         """Start this dock task."""
@@ -227,7 +206,7 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         client = self.coordinator.client
         if not client.robot_awake:
             await client.wake(timeout=10.0)
-        if not can_start_dock_task(client.state):
+        if not can_start_dock_task(client.state, self.entity_description.key):
             raise HomeAssistantError("Narwal dock task cannot be started right now")
 
         command: Callable[[], Awaitable[CommandResponse]] = getattr(
@@ -256,7 +235,9 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         if not can_stop_dock_task(client.state):
             raise HomeAssistantError("Narwal dock task cannot be stopped right now")
 
-        response = await client.stop_dock_task()
+        response = await client.stop_dock_task(
+            RAW_TASK_BY_DOCK_TASK_KEY[self.entity_description.key]
+        )
         self._raise_if_command_failed(response, "stop")
 
         await self.coordinator.async_refresh_dock_status()

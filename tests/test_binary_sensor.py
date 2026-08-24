@@ -165,8 +165,8 @@ def test_busy_and_setup_unavailable_when_cleaning() -> None:
     assert _DESCS["setup_available"].value_fn(state) is False
 
 
-def test_busy_and_setup_unavailable_when_station_active() -> None:
-    """Dock-side tasks also hide start-time setup controls."""
+def test_busy_and_setup_available_when_station_active() -> None:
+    """Dock-side tasks show status without hiding next-clean setup controls."""
     state = NarwalState()
     state.working_status = WorkingStatus.DOCKED
     state.dry_mop_remaining_time = 1_800
@@ -175,7 +175,7 @@ def test_busy_and_setup_unavailable_when_station_active() -> None:
 
     assert state.is_station_active
     assert _DESCS["busy"].value_fn(state) is True
-    assert _DESCS["setup_available"].value_fn(state) is False
+    assert _DESCS["setup_available"].value_fn(state) is True
 
 
 def test_setup_available_when_state_unknown() -> None:
