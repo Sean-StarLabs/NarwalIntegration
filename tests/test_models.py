@@ -471,6 +471,33 @@ class TestNarwalState:
         assert state.active_dock_drying_task == "dry_dock_bag"
         assert state.is_station_active
 
+    def test_idle_base_status_clears_stale_dock_bag_timer(self) -> None:
+        """An idle dock status clears old dock-bag timers after broadcasts stop."""
+        state = NarwalState()
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+            state.update_from_working_status({"12": 10, "13": 18000, "19": {}})
+
+        with patch("narwal_client.models.time.monotonic", return_value=150.0):
+            state.update_from_base_status({"3": {"1": 1}, "11": 3, "47": 1})
+
+        assert state.dock_drying_remaining_time is None
+        assert state.active_dock_drying_task is None
+        assert not state.is_station_active
+
+    def test_idle_base_status_keeps_recent_dock_bag_timer(self) -> None:
+        """Base status can be idle while a fresh station timer is still authoritative."""
+        state = NarwalState()
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            state.update_from_base_status({"3": {"1": 14}, "11": 3, "47": 1})
+            state.update_from_working_status({"12": 10, "13": 18000, "19": {}})
+
+        with patch("narwal_client.models.time.monotonic", return_value=120.0):
+            state.update_from_base_status({"3": {"1": 1}, "11": 3, "47": 1})
+
+        assert state.active_dock_drying_task == "dry_dock_bag"
+        assert state.is_station_active
+
     def test_base_status_dock_activity_3_is_washing_mop(self) -> None:
         """Live wash-and-dry capture reports mop washing as field 3.12 = 3."""
         state = NarwalState()

@@ -824,7 +824,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             if not self.client.connected:
                 raise NarwalConnectionError("Not connected")
             await self.client.get_status(
-                full_update=not self.client.state.has_recent_active_working_status
+                full_update=(
+                    self.client.state.is_station_active
+                    or not self.client.state.has_recent_active_working_status
+                )
             )
         except Exception as err:
             self._consecutive_failures += 1

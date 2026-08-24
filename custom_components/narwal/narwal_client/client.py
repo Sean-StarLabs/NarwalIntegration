@@ -134,6 +134,11 @@ _AUX_STATUS_TOPICS = {
 
 _DOCK_TASK_REFRESH_DELAY = 6.0
 _OPTIONAL_TASK_DETAIL_TIMEOUT = 3.0
+_DOCK_TASK_FORCE_END_PAYLOADS = {
+    # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
+    # with ParallelTaskType.DRY_STATION_BAG to stop dock-bag drying.
+    "dry_dock_bag": b"\x08\x01",
+}
 
 @dataclass
 class RoomCleanSettings:
@@ -1722,21 +1727,78 @@ class NarwalClient:
         """Cancel current task."""
         return await self.send_command(TOPIC_CMD_CANCEL)
 
-    async def stop_dock_task(self) -> CommandResponse:
-        """Stop the active station maintenance task."""
-        response = await self.stop(timeout=15.0)
-        await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
+    def _active_dock_task(self) -> str | None:
+        """Return the current dock task from robot-derived state."""
+        state = self.state
+        if not state.is_station_active:
+            return None
+        if state.station_activity == 1:
+            return "emptying_dustbin"
+        if state.is_washing_mop:
+            return "washing_mop"
+        if state.active_dock_drying_task is not None:
+            return state.active_dock_drying_task
+        if state.is_drying_mop:
+            return "drying_mop"
+        if state.station_activity == 4:
+            return "drying_or_disinfecting"
+        return "station_active"
+
+    async def _refresh_after_dock_stop(self) -> bool:
+        """Refresh robot state after a dock stop command."""
+        updated = False
+        try:
+            await self.get_status(full_update=True)
+            updated = True
+        except (NarwalCommandError, NarwalConnectionError) as err:
+            _LOGGER.debug("Status refresh after dock stop failed: %s", err)
         try:
             await self.get_dry_mop_remain_time()
+            updated = True
         except (NarwalCommandError, NarwalConnectionError) as err:
             _LOGGER.debug("Drying timer refresh after dock stop failed: %s", err)
+        return updated
+
+    async def stop_dock_task(self) -> CommandResponse:
+        """Stop the active station maintenance task."""
+        active_task = self._active_dock_task()
+        payload = _DOCK_TASK_FORCE_END_PAYLOADS.get(active_task or "")
+        if payload is None:
+            response = await self.stop(timeout=15.0)
+        else:
+            response = await self.send_command(
+                TOPIC_CMD_FORCE_END,
+                payload=payload,
+                timeout=15.0,
+            )
+        response_seen_at = time.monotonic()
+        await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
+        await self._refresh_after_dock_stop()
         if response.success:
-            self.state.clear_washing_task()
-        if (
-            response.success
-            and self.state.dry_mop_remaining_time in (None, 0)
-        ):
-            self.state.clear_drying_task()
+            if (
+                active_task in _DOCK_TASK_FORCE_END_PAYLOADS
+                and self._active_dock_task() == active_task
+                and self.state.dock_drying_status_time <= response_seen_at
+            ):
+                self.state.clear_dock_drying_task()
+            if not self.state.is_station_active:
+                self.state.clear_washing_task()
+                if self.state.dry_mop_remaining_time in (None, 0):
+                    self.state.clear_drying_task()
+            elif (
+                active_task in _DOCK_TASK_FORCE_END_PAYLOADS
+                and self._active_dock_task() == active_task
+            ):
+                _LOGGER.debug("Dock task %s still reported after stop", active_task)
+                return CommandResponse(
+                    result_code=CommandResult.NOT_APPLICABLE,
+                    data=response.data,
+                    raw_payload=response.raw_payload,
+                )
+            elif active_task not in _DOCK_TASK_FORCE_END_PAYLOADS:
+                self.state.clear_washing_task()
+                if self.state.dry_mop_remaining_time in (None, 0):
+                    self.state.clear_drying_task()
         return response
 
     async def return_to_base(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:

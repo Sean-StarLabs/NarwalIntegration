@@ -350,6 +350,49 @@ class TestCoordinatorResilience:
         coordinator.client.get_status.assert_awaited_once_with(full_update=False)
         assert result is coordinator.client.state
 
+    async def test_poll_fully_refreshes_station_active_state(self) -> None:
+        """Station-active state must be allowed to clear from a full status poll."""
+        coordinator = self._make_coordinator()
+        type(coordinator.client).connected = PropertyMock(return_value=True)
+        coordinator.client.state.dock_field11 = 2
+        coordinator.client.state.set_dock_drying_task(
+            "dry_dock_bag",
+            10,
+            18000,
+            ("12", "13"),
+        )
+        coordinator.client.get_status = AsyncMock()
+
+        result = await coordinator._async_update_data()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=True)
+        assert result is coordinator.client.state
+
+    async def test_poll_schedules_missing_map_fetch(self) -> None:
+        """Polling schedules the shared missing-map retry path instead of hiding it."""
+        coordinator = self._make_coordinator()
+        type(coordinator.client).connected = PropertyMock(return_value=True)
+        coordinator.client.state.map_data = None
+        coordinator.client.get_status = AsyncMock()
+        coordinator.client.get_map = AsyncMock()
+        task_names: list[str] = []
+
+        def close_background_task(hass, coro, name):
+            task_names.append(name)
+            coro.close()
+            return None
+
+        coordinator.config_entry.async_create_background_task.side_effect = (
+            close_background_task
+        )
+
+        result = await coordinator._async_update_data()
+
+        assert result is coordinator.client.state
+        assert task_names == ["narwal_map_fetch"]
+        assert coordinator._map_fetch_pending is True
+        coordinator.client.get_map.assert_not_awaited()
+
     async def test_push_update_resets_failure_counter(self) -> None:
         """_on_state_update resets _consecutive_failures to 0."""
         coordinator = self._make_coordinator()

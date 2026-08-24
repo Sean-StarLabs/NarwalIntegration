@@ -27,6 +27,7 @@ from .const import (
 )
 
 _ACTIVE_WORKING_STATUS_TTL = 15.0
+_DOCK_DRYING_STATUS_TTL = 45.0
 _DRYING_EMPTY_SUPPRESSION_TTL = 120.0
 
 
@@ -916,6 +917,7 @@ class NarwalState:
     dock_drying_target: int = 0
     dock_drying_task: str = ""
     dock_drying_timer_fields: tuple[str, str] | None = None
+    dock_drying_status_time: float = 0.0
     last_dry_mop_empty_time: float = 0.0
     last_battery_change_time: float = 0.0
     battery_level_increasing: bool = False
@@ -1200,6 +1202,15 @@ class NarwalState:
         return self.dock_drying_task or "drying_or_disinfecting"
 
     @property
+    def has_recent_dock_drying_status(self) -> bool:
+        """True while live station drying timer fields are still fresh."""
+        return (
+            self.dock_drying_status_time > 0
+            and time.monotonic() - self.dock_drying_status_time
+            <= _DOCK_DRYING_STATUS_TTL
+        )
+
+    @property
     def dock_drying_progress_percent(self) -> int | None:
         """Return the active dock drying progress percentage."""
         if self.dock_drying_target <= 0:
@@ -1357,6 +1368,7 @@ class NarwalState:
         self.dock_drying_target = 0
         self.dock_drying_task = ""
         self.dock_drying_timer_fields = None
+        self.dock_drying_status_time = 0.0
 
     def set_dock_drying_task(
         self,
@@ -1372,6 +1384,7 @@ class NarwalState:
         self.dock_drying_target = target
         self.dock_drying_remaining_time = remaining
         self.dock_drying_timer_fields = fields
+        self.dock_drying_status_time = time.monotonic()
         if task == "drying_mop":
             self.mop_drying_elapsed = elapsed
             self.mop_drying_target = target
@@ -1589,6 +1602,29 @@ class NarwalState:
                     self.dock_field11 = 1
                 if "47" not in decoded:
                     self.dock_field47 = 2
+            if (
+                self.working_status == WorkingStatus.TASK_COMPLETED
+                and self.has_dock_presence_signal
+            ):
+                self.dock_activity = 0
+                self.station_activity = 0
+            if (
+                self.dock_drying_remaining_time is not None
+                and self.station_activity <= 0
+                and self.dock_activity <= 0
+                and self.has_dock_presence_signal
+                and self.working_status
+                in (
+                    WorkingStatus.UNKNOWN,
+                    WorkingStatus.STANDBY,
+                    WorkingStatus.DOCKED,
+                    WorkingStatus.CHARGED,
+                    WorkingStatus.DOCKED_V2,
+                    WorkingStatus.TASK_COMPLETED,
+                )
+                and not self.has_recent_dock_drying_status
+            ):
+                self.clear_dock_drying_task()
             # Log unrecognized sub-fields for future firmware mapping
             _known_f3 = {"1", "2", "3", "7", "10", "12", "18"}
             _unknown_f3 = set(field3.keys()) - _known_f3
