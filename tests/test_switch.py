@@ -161,6 +161,7 @@ def test_dock_task_switch_exposes_drying_progress_attributes() -> None:
         "elapsed_minutes": 2,
         "target_minutes": 12,
         "progress": 17,
+        "progress_display": "17%",
     }
 
 
@@ -184,6 +185,7 @@ def test_dock_task_switch_exposes_app_started_dock_bag_drying() -> None:
         "elapsed_minutes": 150,
         "target_minutes": 300,
         "progress": 50,
+        "progress_display": "50%",
     }
 
 

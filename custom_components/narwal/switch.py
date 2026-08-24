@@ -212,7 +212,9 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         if target > 0:
             attributes["elapsed_minutes"] = _duration_minutes(elapsed)
             attributes["target_minutes"] = _duration_minutes(target)
-            attributes["progress"] = min(100, round(elapsed / target * 100))
+            progress = min(100, round(elapsed / target * 100))
+            attributes["progress"] = progress
+            attributes["progress_display"] = f"{progress}%"
         return attributes
 
     async def async_turn_on(self, **kwargs) -> None:
