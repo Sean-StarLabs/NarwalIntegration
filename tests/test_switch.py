@@ -11,7 +11,6 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
 from custom_components.narwal.narwal_client import (  # noqa: E402
     CommandResponse,
     CommandResult,
@@ -54,17 +53,7 @@ def _coordinator(state: NarwalState) -> SimpleNamespace:
     coordinator.data = state
     coordinator.last_update_success = True
     coordinator.local_available = True
-    coordinator._active_dock_task_key = None
-    coordinator.set_active_dock_task_key = (
-        lambda task_key: NarwalCoordinator.set_active_dock_task_key(
-            coordinator, task_key
-        )
-    )
-    coordinator.current_dock_task_key = (
-        lambda fresh_state=None: NarwalCoordinator.current_dock_task_key(
-            coordinator, fresh_state
-        )
-    )
+    coordinator.async_refresh_dock_status = AsyncMock()
     coordinator.async_set_updated_data = MagicMock()
     return coordinator
 
@@ -90,7 +79,6 @@ def test_dock_task_switch_available_when_docked_and_idle() -> None:
 
 def test_dock_task_switch_active_for_matching_station_task() -> None:
     coordinator = _coordinator(_state(station_activity=1))
-    NarwalCoordinator._sync_active_dock_task_key(coordinator, coordinator.data)
     switch = NarwalDockTaskSwitch(coordinator, _DESCS["empty_dustbin"])
 
     assert switch.is_on is True
@@ -130,14 +118,13 @@ async def test_dock_task_switch_starts_task() -> None:
     await switch.async_turn_on()
 
     coordinator.client.empty_dustbin.assert_awaited_once_with()
-    assert coordinator._active_dock_task_key == "empty_dustbin"
-    coordinator.async_set_updated_data.assert_called_once_with(coordinator.client.state)
+    coordinator.async_refresh_dock_status.assert_awaited_once_with()
+    coordinator.async_set_updated_data.assert_not_called()
 
 
 @pytest.mark.asyncio
 async def test_dock_task_switch_stops_active_task() -> None:
     coordinator = _coordinator(_state(station_activity=1))
-    NarwalCoordinator._sync_active_dock_task_key(coordinator, coordinator.data)
     coordinator.client.stop_dock_task = AsyncMock(
         return_value=CommandResponse(result_code=CommandResult.SUCCESS)
     )
@@ -150,7 +137,7 @@ async def test_dock_task_switch_stops_active_task() -> None:
     coordinator.client.stop_dock_task.assert_awaited_once_with()
     coordinator.client.cancel.assert_not_called()
     coordinator.client.stop.assert_not_called()
-    assert coordinator._active_dock_task_key is None
+    coordinator.async_refresh_dock_status.assert_awaited_once_with()
 
 
 def test_dock_task_switch_exposes_drying_progress_attributes() -> None:
@@ -160,7 +147,6 @@ def test_dock_task_switch_exposes_drying_progress_attributes() -> None:
     state.mop_drying_elapsed = 120
     state.mop_drying_target = 720
     coordinator = _coordinator(state)
-    NarwalCoordinator._sync_active_dock_task_key(coordinator, coordinator.data)
     switch = NarwalDockTaskSwitch(coordinator, _DESCS["dry_mop"])
 
     assert switch.is_on is True
@@ -182,7 +168,6 @@ def test_dock_task_switch_exposes_app_started_dock_bag_drying() -> None:
     state = _state()
     state.update_from_working_status({"12": 9_000, "13": 18_000, "19": {}})
     coordinator = _coordinator(state)
-    NarwalCoordinator._sync_active_dock_task_key(coordinator, coordinator.data)
     switch = NarwalDockTaskSwitch(coordinator, _DESCS["dry_dock_bag"])
 
     assert switch.is_on is True
@@ -200,3 +185,12 @@ def test_dock_task_switch_exposes_app_started_dock_bag_drying() -> None:
         "target_minutes": 300,
         "progress": 50,
     }
+
+
+def test_generic_drying_does_not_infer_specific_dock_task() -> None:
+    state = _state()
+    state.update_from_working_status({"10": 9_000, "11": 18_000, "19": {}})
+    coordinator = _coordinator(state)
+
+    assert NarwalDockTaskSwitch(coordinator, _DESCS["dry_dust_bin"]).is_on is False
+    assert NarwalDockTaskSwitch(coordinator, _DESCS["dry_dock_bag"]).is_on is False

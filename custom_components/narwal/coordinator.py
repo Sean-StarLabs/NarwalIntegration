@@ -65,16 +65,6 @@ DOCK_TASK_KEY_BY_RAW_TASK = {
     "dry_dust_bin": "dry_dust_bin",
     "dry_dock_bag": "dry_dock_bag",
 }
-GENERIC_DRY_DOCK_TASK_KEYS = frozenset({"dry_dust_bin", "dry_dock_bag"})
-DOCK_TASK_KEYS = frozenset(
-    {
-        "empty_dustbin",
-        "wash_mop",
-        "dry_mop",
-        "dry_dust_bin",
-        "dry_dock_bag",
-    }
-)
 
 
 @dataclass
@@ -312,6 +302,14 @@ def dock_task(state: NarwalState | None) -> str | None:
     return "station_active"
 
 
+def dock_task_key(state: NarwalState | None) -> str | None:
+    """Return the active dock-task switch key from robot-reported state only."""
+    raw_task = dock_task(state)
+    if raw_task is None:
+        return None
+    return DOCK_TASK_KEY_BY_RAW_TASK.get(raw_task)
+
+
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     """Push-mode coordinator for Narwal vacuum.
 
@@ -347,7 +345,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.room_clean_settings: dict[tuple[str | None, int], RoomCleanSettings] = {}
         self.room_clean_settings_customized: dict[tuple[str | None, int], set[str]] = {}
         self.active_room_ids: list[int] | None = None
-        self._active_dock_task_key: str | None = None
         self._active_room_plan_pending_until = 0.0
         self._listen_task: asyncio.Task[None] | None = None
         self._fast_poll_remaining = 0
@@ -504,47 +501,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return
         self.set_active_room_ids(None)
 
-    def set_active_dock_task_key(self, task_key: str | None) -> None:
-        """Store the dock task started through Home Assistant."""
-        if task_key is not None and task_key not in DOCK_TASK_KEYS:
-            raise ValueError(f"Unsupported Narwal dock task: {task_key}")
-        self._active_dock_task_key = task_key
-
-    def current_dock_task_key(self, state: NarwalState | None = None) -> str | None:
-        """Return the current task-switch key for the active dock task."""
-        state = state or self.data or self.client.state
-        if (
-            getattr(state, "has_explicit_off_dock_signal", False) is True
-            and getattr(state, "has_dock_presence_signal", False) is not True
-        ):
-            return None
-        raw_task = dock_task(state)
-        if raw_task is None:
-            return None
-        if raw_task in DOCK_TASK_KEY_BY_RAW_TASK:
-            return DOCK_TASK_KEY_BY_RAW_TASK[raw_task]
-        if (
-            raw_task == "drying_or_disinfecting"
-            and self._active_dock_task_key in GENERIC_DRY_DOCK_TASK_KEYS
-        ):
-            return self._active_dock_task_key
-        return None
-
-    def _sync_active_dock_task_key(self, state: NarwalState) -> None:
-        """Keep the remembered dock task aligned with fresh robot state."""
-        if (
-            getattr(state, "has_explicit_off_dock_signal", False) is True
-            and getattr(state, "has_dock_presence_signal", False) is not True
-        ):
-            self._active_dock_task_key = None
-            return
-        raw_task = dock_task(state)
-        if raw_task is None:
-            self._active_dock_task_key = None
-            return
-        if raw_task in DOCK_TASK_KEY_BY_RAW_TASK:
-            self._active_dock_task_key = DOCK_TASK_KEY_BY_RAW_TASK[raw_task]
-
     async def async_setup(self) -> None:
         """Connect to the vacuum and start the WebSocket listener.
 
@@ -618,7 +574,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         # Push data arriving means robot is reachable — reset failure counter
         self._consecutive_failures = 0
         self._sync_active_room_ids(state)
-        self._sync_active_dock_task_key(state)
         previous_status = self._prev_working_status
         is_remapping = state.working_status == WorkingStatus.REMAPPING
 
@@ -851,6 +806,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         except Exception:
             _LOGGER.debug("Failed to refresh dock status after transition")
 
+    async def async_refresh_dock_status(self) -> None:
+        """Refresh dock status from the robot after an explicit dock command."""
+        await self._refresh_dock_status()
+
     async def _async_update_data(self) -> NarwalState:
         """Polling fallback — fetch status if no push updates arrived.
 
@@ -946,7 +905,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     self.update_interval = POLL_INTERVAL
 
         self._sync_active_room_ids(self.client.state)
-        self._sync_active_dock_task_key(self.client.state)
         return self.client.state
 
     async def async_shutdown(self) -> None:

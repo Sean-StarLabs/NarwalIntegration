@@ -10,7 +10,6 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import NarwalConfigEntry
 from .const import (
@@ -24,6 +23,7 @@ from .coordinator import (
     can_start_dock_task,
     can_stop_dock_task,
     dock_task,
+    dock_task_key,
 )
 from .entity import NarwalDockEntity, NarwalEntity
 from .narwal_client import CommandResponse, CommandResult
@@ -142,7 +142,7 @@ def _duration_minutes(seconds: int) -> int:
     return (seconds + 59) // 60
 
 
-class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
+class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
     """Stateful start/stop control for one Narwal dock task."""
 
     entity_description: NarwalDockTaskSwitchEntityDescription
@@ -159,25 +159,13 @@ class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
         self._attr_unique_id = f"{device_id}_{description.key}"
         self._attr_icon = description.icon
 
-    async def async_added_to_hass(self) -> None:
-        """Restore the locally started task when firmware reports a generic dock phase."""
-        await super().async_added_to_hass()
-        last_state = await self.async_get_last_state()
-        if (
-            last_state is not None
-            and last_state.state == "on"
-            and dock_task(self.coordinator.data) == "drying_or_disinfecting"
-            and self.entity_description.key in {"dry_dust_bin", "dry_dock_bag"}
-        ):
-            self.coordinator.set_active_dock_task_key(self.entity_description.key)
-
     @property
     def is_on(self) -> bool | None:
         """Return whether this dock task is active."""
         state = self.coordinator.data
         if state is None:
             return None
-        return self.coordinator.current_dock_task_key(state) == self.entity_description.key
+        return dock_task_key(state) == self.entity_description.key
 
     @property
     def available(self) -> bool:
@@ -251,8 +239,7 @@ class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
             client.state.last_dry_mop_empty_time = 0.0
         self._raise_if_command_failed(response, "start")
 
-        self.coordinator.set_active_dock_task_key(self.entity_description.key)
-        self.coordinator.async_set_updated_data(client.state)
+        await self.coordinator.async_refresh_dock_status()
 
     async def async_turn_off(self, **kwargs) -> None:
         """Stop this dock task."""
@@ -270,8 +257,7 @@ class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
         response = await client.stop_dock_task()
         self._raise_if_command_failed(response, "stop")
 
-        self.coordinator.set_active_dock_task_key(None)
-        self.coordinator.async_set_updated_data(client.state)
+        await self.coordinator.async_refresh_dock_status()
 
     def _raise_if_command_failed(self, response: CommandResponse, action: str) -> None:
         """Raise a Home Assistant service error for rejected dock commands."""
