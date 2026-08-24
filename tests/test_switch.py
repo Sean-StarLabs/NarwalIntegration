@@ -216,6 +216,22 @@ def test_dock_task_switch_allows_verified_parallel_dry_start_reverse() -> None:
     assert not wash.available
 
 
+def test_dock_task_switch_disables_unscoped_parallel_stops() -> None:
+    state = _state()
+    state.update_from_working_status(
+        {"8": 9_000, "9": 18_000, "10": 9_000, "11": 18_000, "19": {}}
+    )
+    coordinator = _coordinator(state)
+
+    dry_mop = NarwalDockTaskSwitch(coordinator, _DESCS["dry_mop"])
+    dry_dust_bin = NarwalDockTaskSwitch(coordinator, _DESCS["dry_dust_bin"])
+
+    assert dry_mop.is_on is True
+    assert dry_dust_bin.is_on is True
+    assert not dry_mop.available
+    assert not dry_dust_bin.available
+
+
 def test_dock_task_switch_blocks_unverified_parallel_starts() -> None:
     coordinator = _coordinator(_state(station_activity=1))
 

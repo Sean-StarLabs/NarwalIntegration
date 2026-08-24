@@ -171,7 +171,7 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
             return False
         state = self.coordinator.data
         if self.is_on:
-            return can_stop_dock_task(state)
+            return can_stop_dock_task(state, self.entity_description.key)
         return can_start_dock_task(state, self.entity_description.key)
 
     @property
@@ -226,13 +226,13 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         """Stop this dock task."""
         if not self.is_on:
             return
-        if not can_stop_dock_task(self.coordinator.data):
+        if not can_stop_dock_task(self.coordinator.data, self.entity_description.key):
             raise HomeAssistantError("Narwal dock task cannot be stopped right now")
 
         client = self.coordinator.client
         if not client.robot_awake:
             await client.wake(timeout=10.0)
-        if not can_stop_dock_task(client.state):
+        if not can_stop_dock_task(client.state, self.entity_description.key):
             raise HomeAssistantError("Narwal dock task cannot be stopped right now")
 
         response = await client.stop_dock_task(

@@ -69,6 +69,7 @@ DOCK_TASK_KEY_BY_RAW_TASK = {
 VERIFIED_PARALLEL_DOCK_TASK_KEY_PAIRS = frozenset(
     {frozenset({"dry_mop", "dry_dust_bin"})}
 )
+SCOPED_STOP_DOCK_TASK_KEYS = frozenset({"dry_dock_bag"})
 
 
 @dataclass
@@ -287,16 +288,25 @@ def can_start_dock_task(state: NarwalState | None, task_key: str | None = None) 
     )
 
 
-def can_stop_dock_task(state: NarwalState | None) -> bool:
+def can_stop_dock_task(
+    state: NarwalState | None, task_key: str | None = None
+) -> bool:
     """Return True when a dock/base-station task can be stopped."""
     if has_blocking_error(state):
         return False
     if not state.is_station_active:
         return False
-    return not (
+    if (
         getattr(state, "has_explicit_off_dock_signal", False) is True
         and getattr(state, "has_dock_presence_signal", False) is not True
-    )
+    ):
+        return False
+    if task_key is None:
+        return True
+    active_keys = dock_task_keys(state)
+    if task_key not in active_keys:
+        return False
+    return len(active_keys) == 1 or task_key in SCOPED_STOP_DOCK_TASK_KEYS
 
 
 def dock_task(state: NarwalState | None) -> str | None:

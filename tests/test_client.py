@@ -295,6 +295,24 @@ class TestNarwalClientInit:
         assert not client.state.is_station_active
 
     @pytest.mark.asyncio
+    async def test_stop_dock_task_rejects_unscoped_parallel_stop(self) -> None:
+        """A named unscoped stop must not stop another parallel dock task."""
+        client = NarwalClient("10.0.0.1")
+        client.state.dock_field11 = 3
+        client.state.dock_field47 = 1
+        client.state.update_from_working_status(
+            {"8": 9_000, "9": 18_000, "10": 9_000, "11": 18_000, "19": {}}
+        )
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            result = await client.stop_dock_task("drying_mop")
+
+        assert result.not_applicable
+        mock_send.assert_not_awaited()
+        assert client.state.is_drying_mop
+        assert "dry_dust_bin" in client.state.active_dock_drying_tasks
+
+    @pytest.mark.asyncio
     async def test_stop_dock_task_clears_stale_washing_activity(self) -> None:
         """Dock stop clears old mop-washing flags after the robot accepts it."""
         client = NarwalClient("10.0.0.1")

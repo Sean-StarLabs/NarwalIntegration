@@ -1770,9 +1770,12 @@ class NarwalClient:
 
     async def stop_dock_task(self, task: str | None = None) -> CommandResponse:
         """Stop the active station maintenance task."""
-        active_task = task or self._active_dock_task()
+        active_tasks = self._active_dock_tasks()
+        active_task = task or (active_tasks[0] if active_tasks else None)
         payload = _DOCK_TASK_FORCE_END_PAYLOADS.get(active_task or "")
         if payload is None:
+            if len(active_tasks) > 1:
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             response = await self.stop(timeout=15.0)
         else:
             response = await self.send_command(

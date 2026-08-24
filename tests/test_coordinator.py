@@ -232,8 +232,19 @@ def test_parsed_fault_blocks_robot_and_dock_commands() -> None:
     dock = NarwalState(working_status=WorkingStatus.DOCKED)
     dock.station_activity = 1
     assert can_stop_dock_task(dock)
+    assert can_stop_dock_task(dock, "empty_dustbin")
     dock.has_error = True
     assert not can_stop_dock_task(dock)
+
+    dock = NarwalState(working_status=WorkingStatus.DOCKED)
+    dock.dock_field11 = 3
+    dock.dock_field47 = 1
+    dock.update_from_working_status(
+        {"8": 9_000, "9": 18_000, "10": 9_000, "11": 18_000, "19": {}}
+    )
+    assert can_stop_dock_task(dock)
+    assert not can_stop_dock_task(dock, "dry_mop")
+    assert not can_stop_dock_task(dock, "dry_dust_bin")
 
 
 class TestCoordinatorResilience:
