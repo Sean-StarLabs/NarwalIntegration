@@ -397,7 +397,9 @@ class TestNarwalState:
 
         state.update_from_working_status({"3": 120})
 
-        assert state.terminate_reason == 0
+        assert state.terminate_reason == 2
+        assert state.terminal_task_result == 0
+        assert state.stale_terminate_reason == 2
         assert not state.has_terminal_task_result
         assert state.is_cleaning
 
@@ -441,7 +443,9 @@ class TestNarwalState:
             },
         )
 
-        assert state.terminate_reason == 0
+        assert state.terminate_reason == 2
+        assert state.terminal_task_result == 0
+        assert state.stale_terminate_reason == 2
         assert not state.has_terminal_task_result
         assert state.is_cleaning
 
@@ -800,15 +804,26 @@ class TestNarwalState:
             }
         )
 
-        assert state.terminate_reason == 0
+        assert state.terminate_reason == 2
+        assert state.terminal_task_result == 0
+        assert state.stale_terminate_reason == 2
         assert not state.has_terminal_task_result
         assert state.has_unfinished_charge_resume_context
         assert state.is_cleaning
 
         state.update_from_base_status(
-            {"3": {"1": 14}, "2": _float_to_uint32(30.0), "11": 3, "47": 1}
+            {
+                "3": {"1": 14},
+                "2": _float_to_uint32(30.0),
+                "11": 3,
+                "47": 1,
+                "15": 2,
+            }
         )
 
+        assert state.terminate_reason == 2
+        assert state.terminal_task_result == 0
+        assert state.stale_terminate_reason == 2
         assert not state.has_terminal_task_result
         assert state.has_unfinished_charge_resume_context
         assert state.is_charging_to_resume

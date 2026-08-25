@@ -195,6 +195,27 @@ def test_native_plan_cleaning_context_controls_robot_session() -> None:
     assert not can_start_dock_task(state)
 
 
+def test_paused_native_plan_context_controls_robot_session() -> None:
+    """Paused native-plan inferred sessions can be resumed and stopped."""
+    state = NarwalState()
+    state.update_from_base_status({"3": {"1": 14, "2": 1}, "11": 1, "47": 2})
+    state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
+    state.native_plan_trajectory_updated = time.monotonic()
+
+    assert state.is_paused
+    assert not state.is_cleaning
+    assert state.has_paused_clean_task_context
+    assert is_narwal_task_busy(state)
+    assert can_resume_cleaning(state)
+    assert can_stop_cleaning(state)
+    assert is_live_clean_setting_available(state)
+    assert not can_pause_cleaning(state)
+    assert not can_edit_pending_clean_settings(state)
+    assert not is_setup_available(state)
+    assert not can_start_cleaning(state)
+    assert not can_start_dock_task(state)
+
+
 def test_charging_to_resume_does_not_resume_during_dock_task() -> None:
     """Do not expose robot resume while the dock is running a separate task."""
     state = NarwalState()
