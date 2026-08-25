@@ -28,7 +28,6 @@ from .const import (
 )
 
 _ACTIVE_WORKING_STATUS_TTL = 15.0
-_ACTIVE_DISPLAY_MAP_TTL = 15.0
 _DOCK_DRYING_STATUS_TTL = 45.0
 _DRYING_EMPTY_SUPPRESSION_TTL = 120.0
 _ASSUMED_DOCK_DRYING_TASK_TTL = 6 * 60 * 60
@@ -1112,7 +1111,6 @@ class NarwalState:
     # Map
     map_data: MapData | None = None
     map_display_data: MapDisplayData | None = None
-    map_display_updated: float = 0.0
 
     # Download / upgrade status
     download_status: int = 0  # download_status field 3 (state)
@@ -1173,31 +1171,17 @@ class NarwalState:
     @property
     def has_recent_active_working_status(self) -> bool:
         """True while live telemetry still indicates active robot movement."""
-        if (
-            self.working_status not in ACTIVE_CLEANING_STATUSES
-            and self.working_status
-            not in (WorkingStatus.ERROR, WorkingStatus.REMAPPING)
-            and self.has_recent_display_map
-            and self.has_off_dock_signal
-            and not self.has_dock_presence_signal
-        ):
-            return True
         if self.working_status not in ACTIVE_CLEANING_STATUSES:
             return False
-        if self.last_active_working_status_time <= 0:
-            return False
-        return (
-            time.monotonic() - self.last_active_working_status_time
-            <= _ACTIVE_WORKING_STATUS_TTL
-        )
+        return self.has_recent_active_task_context
 
     @property
-    def has_recent_display_map(self) -> bool:
-        """True while live map/display_map broadcasts are still fresh."""
+    def has_recent_active_task_context(self) -> bool:
+        """True shortly after telemetry last reported active cleaning."""
         return (
-            self.map_display_data is not None
-            and self.map_display_updated > 0
-            and time.monotonic() - self.map_display_updated <= _ACTIVE_DISPLAY_MAP_TTL
+            self.last_active_working_status_time > 0
+            and time.monotonic() - self.last_active_working_status_time
+            <= _ACTIVE_WORKING_STATUS_TTL
         )
 
     @property
@@ -1218,13 +1202,6 @@ class NarwalState:
             return not self.is_paused and not self.is_returning
         if self.is_docked:
             return False
-        if (
-            self.working_status != WorkingStatus.REMAPPING
-            and self.has_recent_display_map
-            and self.has_off_dock_signal
-            and not self.has_dock_presence_signal
-        ):
-            return not self.is_paused and not self.is_returning_to_dock
         return (
             self.working_status in ACTIVE_CLEANING_STATUSES
             and not self.is_paused
@@ -1484,6 +1461,7 @@ class NarwalState:
         return (
             self.working_status in ACTIVE_CLEANING_STATUSES
             or self.has_recent_active_working_status
+            or self.has_recent_active_task_context
             or self.has_paused_clean_task_context
             or self.task_progress_percent is not None
             or self.task_remaining_time > 0
@@ -1496,7 +1474,11 @@ class NarwalState:
         """True when an active clean appears to be docked charging before resume."""
         return (
             self.has_charge_resume_context
-            and (self.has_dock_presence_signal or self.is_station_active)
+            and (
+                (self.has_dock_presence_signal or self.is_station_active)
+                or self.battery_recently_increasing
+                or self.battery_level <= 30
+            )
             and 0 < self.battery_level < 80
             and not self.is_paused
             and not self.is_returning
@@ -1828,6 +1810,15 @@ class NarwalState:
         Note: field 32 mirrors field 3 exactly (redundant).
         """
         self.raw_base_status = decoded
+        incoming_battery_level = self.battery_level
+        if "2" in decoded:
+            incoming_battery = _to_float32(decoded["2"])
+            if incoming_battery is not None:
+                incoming_battery_level = round(incoming_battery)
+        incoming_battery_increasing = (
+            self.battery_level > 0 and incoming_battery_level > self.battery_level
+        )
+        had_charge_resume_context = self.has_charge_resume_context
         # Field 11 = dock indicator (2=docked, 1=undocked)
         if "11" in decoded:
             try:
@@ -1857,6 +1848,20 @@ class NarwalState:
             field3 = field3[0] if field3 else None
         if isinstance(field3, dict):
             is_paused = bool(field3.get("2"))
+            raw_dock_activity = _optional_int(field3.get("12")) or 0
+            raw_station_activity = _optional_int(field3.get("18")) or 0
+            retain_charge_resume_context = (
+                had_charge_resume_context
+                and 0 < incoming_battery_level < 80
+                and (
+                    incoming_battery_level <= 30
+                    or self.battery_recently_increasing
+                    or incoming_battery_increasing
+                    or self.has_dock_presence_signal
+                    or raw_dock_activity > 0
+                    or raw_station_activity > 0
+                )
+            )
             if "1" in field3:
                 try:
                     self.working_status = WorkingStatus(int(field3["1"]))
@@ -1871,10 +1876,9 @@ class NarwalState:
                             raw_val,
                         )
                     self.working_status = WorkingStatus.UNKNOWN
-                if (
-                    self.working_status not in ACTIVE_CLEANING_STATUSES
-                    and not is_paused
-                ):
+                if self.working_status in ACTIVE_CLEANING_STATUSES and not is_paused:
+                    self.last_active_working_status_time = time.monotonic()
+                elif not is_paused and not retain_charge_resume_context:
                     self.last_active_working_status_time = 0.0
                     self.clear_task_details()
             # Sub-field 2: paused overlay (0 or absent = not paused, 1 = paused)

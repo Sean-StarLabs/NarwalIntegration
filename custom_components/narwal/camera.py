@@ -39,9 +39,6 @@ _MIN_RENDER_INTERVAL = 2
 _TRAIL_MAX_POINTS = 50000  # full cleaning session worth
 _TRAIL_RECORD_INTERVAL = 3  # seconds between trail point recordings
 _TRAIL_MIN_GRID_DELTA = 0.25
-_TRAIL_MAX_GRID_JUMP_FRACTION = 0.06
-_TRAIL_MAX_GRID_JUMP_MIN = 24.0
-_TRAIL_MAX_GRID_JUMP_MAX = 72.0
 _TRAIL_NEW_SESSION_MAX_AGE = 60
 _TRAIL_INACTIVE_RESET_INTERVAL = 10 * 60
 _NATIVE_TRAJECTORY_FALLBACK_AFTER = 15
@@ -69,6 +66,7 @@ def _is_cleaning_for_trail(state: NarwalState) -> bool:
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
         or state.has_recent_active_working_status
+        or state.is_charging_to_resume
     )
 
 
@@ -470,61 +468,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
             return True
         return static_key == self._remapping_static_key
 
-    def _append_trail_position(
-        self,
-        grid_x: float,
-        grid_y: float,
-        map_width: int,
-        map_height: int,
-    ) -> bool:
-        """Append a grid-coordinate position to the cleaning trail."""
-        if not math.isfinite(grid_x) or not math.isfinite(grid_y):
-            return False
-        if grid_x < 0 or grid_y < 0 or grid_x >= map_width or grid_y >= map_height:
-            _LOGGER.debug(
-                "Skipping Narwal trail point outside map bounds: %.1f, %.1f (%dx%d)",
-                grid_x,
-                grid_y,
-                map_width,
-                map_height,
-            )
-            return False
-        if len(self._trail) >= _TRAIL_MAX_POINTS:
-            return False
-        if self._trail:
-            last_x, last_y = self._trail[-1]
-            distance = math.hypot(grid_x - last_x, grid_y - last_y)
-            if distance < _TRAIL_MIN_GRID_DELTA:
-                return False
-            max_jump = min(
-                max(
-                    _TRAIL_MAX_GRID_JUMP_MIN,
-                    min(map_width, map_height) * _TRAIL_MAX_GRID_JUMP_FRACTION,
-                ),
-                _TRAIL_MAX_GRID_JUMP_MAX,
-            )
-            if distance > max_jump:
-                _LOGGER.debug(
-                    "Splitting Narwal trail at large jump: %.1f grid px",
-                    distance,
-                )
-        self._trail.append((grid_x, grid_y))
-        self.coordinator.client.state.cleaning_trail_revision += 1
-        return True
-
-    def _record_trail_position(
-        self,
-        grid_x: float,
-        grid_y: float,
-        map_width: int,
-        map_height: int,
-    ) -> None:
-        """Record a sampled grid-coordinate position to the cleaning trail."""
-        now = time.monotonic()
-        if now - self._last_trail_record >= _TRAIL_RECORD_INTERVAL:
-            self._append_trail_position(grid_x, grid_y, map_width, map_height)
-            self._last_trail_record = now
-
     @staticmethod
     def _trail_points_match(
         left: tuple[float, float],
@@ -602,15 +545,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 continue
             points.append(point)
         return points
-
-    @staticmethod
-    def _has_recent_native_plan_trajectory(state: NarwalState) -> bool:
-        """Return true while native trajectory frames are fresh enough to prefer."""
-        return (
-            state.native_plan_trajectory_recorded > 0
-            and time.monotonic() - state.native_plan_trajectory_recorded
-            <= _NATIVE_TRAJECTORY_FALLBACK_AFTER
-        )
 
     def _append_native_grid_segment(
         self,
@@ -738,9 +672,9 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 self.async_write_ha_state()
                 return
 
-            # Prefer native point_navi_plan_traj segments; sampled display position
-            # only fills gaps if that topic goes quiet.
-            recorded_native_trail = False
+            # Narwal-native path segments are the only trail source. Joining
+            # point-in-time robot positions muddies the route whenever it reports from
+            # discontinuous phases such as charge-to-resume.
             if is_cleaning_for_trail:
                 recorded_native_trail = self._record_native_plan_trajectory(
                     state,
@@ -748,29 +682,10 @@ class NarwalMapCamera(NarwalEntity, Camera):
                     trail_key,
                 )
                 if not recorded_native_trail:
-                    recorded_native_trail = self._record_native_display_trajectory(
+                    self._record_native_display_trajectory(
                         state,
                         static_map,
                         trail_key,
-                    )
-            if (
-                is_cleaning_for_trail
-                and not recorded_native_trail
-                and not self._has_recent_native_plan_trajectory(state)
-                and display
-                and not (display.robot_x == 0.0 and display.robot_y == 0.0)
-            ):
-                grid_pos = display.to_grid_coords(
-                    static_map.resolution, static_map.origin_x, static_map.origin_y,
-                )
-                if grid_pos is not None:
-                    if state.cleaning_trail_map_key is None:
-                        state.cleaning_trail_map_key = trail_key
-                    self._record_trail_position(
-                        grid_pos[0],
-                        grid_pos[1],
-                        static_map.width,
-                        static_map.height,
                     )
 
             trail_len = len(self._trail)
@@ -1000,8 +915,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
                     except Exception:
                         _LOGGER.debug("POSITION DIAG failed", exc_info=True)
 
-        # Draw the retained trail from Narwal's native navigation path where
-        # available; sampled robot positions only fill short native gaps.
+        # Draw the retained trail from Narwal's native navigation paths only.
         trail = self._trail
         cleaned_area = display.cleaned_area if display else None
 

@@ -128,6 +128,8 @@ TRAIL_RENDER_MAX_SIMPLIFY_POINTS = 1000
 TRAIL_RENDER_SMOOTHING_PASSES = 2
 TRAIL_RENDER_DENOISE_WINDOW = 5
 CLEANED_AREA_FILL = (255, 255, 255, 78)
+TRAIL_LINE_FILL = (255, 255, 255, 140)
+TRAIL_RECENT_LINE_FILL = (255, 255, 255, 220)
 
 
 def _opaque(color: tuple[int, int, int]) -> tuple[int, int, int, int]:
@@ -1297,7 +1299,7 @@ def render_overlay(
         )
         total_points = sum(len(segment) for segment in trail_segments)
         recent_start = max(total_points - TRAIL_RECENT_POINTS, 0)
-        trail_width = max(3, int(round(2 * scale)))
+        trail_width = max(2, int(round(1.25 * scale)))
         seen_points = 0
         for segment in trail_segments:
             line = [point for grid in segment if (point := final_point(*grid))]
@@ -1306,7 +1308,7 @@ def render_overlay(
                 continue
             draw.line(
                 line,
-                fill=(215, 220, 225, 130),
+                fill=TRAIL_LINE_FILL,
                 width=trail_width,
                 joint="curve",
             )
@@ -1315,7 +1317,7 @@ def render_overlay(
             if len(recent_line) >= 2:
                 draw.line(
                     recent_line,
-                    fill=(255, 255, 255, 220),
+                    fill=TRAIL_RECENT_LINE_FILL,
                     width=trail_width,
                     joint="curve",
                 )

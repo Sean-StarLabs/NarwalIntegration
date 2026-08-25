@@ -16,7 +16,6 @@ from narwal_client.const import (
 from narwal_client.models import (
     CommandResponse,
     MapData,
-    MapDisplayData,
     NarwalState,
     ObstacleInfo,
     RoomInfo,
@@ -348,51 +347,21 @@ class TestNarwalState:
         assert state.is_cleaning
         assert state.battery_level == 85
 
-    def test_unknown_off_dock_with_recent_display_map_is_cleaning(self) -> None:
-        """Live display-map broadcasts identify an unmapped active off-dock state."""
+    def test_unknown_off_dock_with_display_map_is_not_cleaning(self) -> None:
+        """Display-map broadcasts render the map but do not prove active cleaning."""
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
-        state.map_display_data = MapDisplayData(robot_x=1.0, robot_y=2.0)
-        state.map_display_updated = 100.0
+        state.map_display_data = object()
 
-        with patch("narwal_client.models.time.monotonic", return_value=105.0):
-            assert state.has_recent_display_map
-            assert state.has_recent_active_working_status
-            assert state.is_cleaning
+        assert not state.has_recent_active_working_status
+        assert not state.is_cleaning
 
-    def test_terminal_status_with_off_dock_display_map_is_cleaning(self) -> None:
-        """Fresh movement beats a stale terminal status with explicit off-dock fields."""
-        state = NarwalState()
-        state.update_from_base_status({"3": {"1": 10}, "11": 1, "47": 2})
-        state.map_display_data = MapDisplayData(robot_x=1.0, robot_y=2.0)
-        state.map_display_updated = 100.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=105.0):
-            assert state.has_recent_active_working_status
-            assert state.is_cleaning
-
-    def test_unknown_off_dock_with_stale_display_map_is_not_cleaning(self) -> None:
-        """A stale display-map frame must not keep an idle unknown state active."""
-        state = NarwalState()
-        state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
-        state.map_display_data = MapDisplayData(robot_x=1.0, robot_y=2.0)
-        state.map_display_updated = 100.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=120.0):
-            assert not state.has_recent_display_map
-            assert not state.has_recent_active_working_status
-            assert not state.is_cleaning
-
-    def test_active_clean_with_rising_battery_needs_dock_signal_to_resume(self) -> None:
-        """A single rising battery sample is not enough to infer mid-task recharge."""
+    def test_active_clean_with_low_battery_can_be_charging_to_resume(self) -> None:
+        """A very-low active task can be a resume-charge even without dock fields."""
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(20.0)})
-        assert not state.is_charging_to_resume
 
-        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(21.0)})
-
-        assert state.battery_recently_increasing
-        assert not state.is_charging_to_resume
+        assert state.is_charging_to_resume
         assert not state.is_docked
 
     def test_active_clean_with_rising_battery_and_dock_signal_is_charging_to_resume(
@@ -426,6 +395,22 @@ class TestNarwalState:
 
         assert not state.battery_recently_increasing
         assert state.has_dock_presence_signal
+        assert state.is_charging_to_resume
+
+    def test_charge_resume_context_survives_low_battery_station_overlay(self) -> None:
+        """Dock/station overlays must not immediately erase an interrupted clean."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(25.0)})
+        assert state.has_recent_active_task_context
+
+        state.update_from_base_status(
+            {"3": {"1": 14, "18": 2}, "2": _float_to_uint32(26.0), "11": 3, "47": 1}
+        )
+
+        assert state.working_status == WorkingStatus.CHARGED
+        assert state.is_station_active
+        assert state.has_recent_active_task_context
+        assert state.has_charge_resume_context
         assert state.is_charging_to_resume
 
     def test_active_clean_with_station_task_can_be_charging_to_resume(self) -> None:
