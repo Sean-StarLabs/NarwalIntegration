@@ -10,6 +10,7 @@ from unittest.mock import patch
 from narwal_client.const import (
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
+    TOPIC_POINT_NAVI_PLAN_TRAJ,
     CommandResult,
     WorkingStatus,
 )
@@ -384,6 +385,65 @@ class TestNarwalState:
             assert state.has_explicit_off_dock_signal
             assert not state.has_unfinished_charge_resume_context
             assert not state.is_cleaning
+
+    def test_working_status_metrics_clear_stale_terminal_result(self) -> None:
+        """Live task metrics start a new clean session even if field 15 is stale."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2, "15": 2})
+
+        assert state.has_terminal_task_result
+
+        state.update_from_working_status({"3": 120})
+
+        assert state.terminate_reason == 0
+        assert not state.has_terminal_task_result
+        assert state.is_cleaning
+
+    def test_repeated_native_plan_keeps_terminal_result(self) -> None:
+        """Retained route-plan frames should not revive a stopped task."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2, "15": 2})
+        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
+
+        state.update_from_aux_status(
+            TOPIC_POINT_NAVI_PLAN_TRAJ,
+            {
+                "1": [
+                    {"1": _float_to_uint32(1.0), "2": _float_to_uint32(1.0)},
+                    {"1": _float_to_uint32(2.0), "2": _float_to_uint32(2.0)},
+                ]
+            },
+        )
+
+        assert state.terminate_reason == 2
+        assert state.has_terminal_task_result
+        assert not state.is_cleaning
+
+    def test_changed_native_plan_clears_stale_terminal_result(self) -> None:
+        """Fresh route-plan movement can identify a later off-dock clean session."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2, "15": 2})
+        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
+
+        state.update_from_aux_status(
+            TOPIC_POINT_NAVI_PLAN_TRAJ,
+            {
+                "1": [
+                    {"1": _float_to_uint32(1.0), "2": _float_to_uint32(1.0)},
+                    {"1": _float_to_uint32(3.0), "2": _float_to_uint32(3.0)},
+                ]
+            },
+        )
+
+        assert state.terminate_reason == 0
+        assert not state.has_terminal_task_result
+        assert state.is_cleaning
 
     def test_active_clean_with_low_battery_stays_cleaning_without_dock_evidence(self) -> None:
         """Low battery alone should not override active/off-dock cleaning state."""
