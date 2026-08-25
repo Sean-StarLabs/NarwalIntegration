@@ -641,6 +641,46 @@ class TestNarwalState:
         assert not state.is_charging_to_resume
         assert state.is_docked
 
+    def test_user_stopped_low_progress_dock_is_not_charging_to_resume(self) -> None:
+        """A manual/forced stop is terminal even when progress is below 100%."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status(
+            {
+                "3": {"1": 14},
+                "2": _float_to_uint32(30.0),
+                "11": 3,
+                "47": 1,
+                "15": 2,
+            }
+        )
+
+        assert state.has_terminal_task_result
+        assert state.has_completed_task_context
+        assert not state.has_unfinished_charge_resume_context
+        assert not state.is_charging_to_resume
+        assert state.is_docked
+
+    def test_low_battery_force_end_can_charge_to_resume(self) -> None:
+        """Low-battery force-end is the one terminal reason that can resume."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status(
+            {
+                "3": {"1": 14},
+                "2": _float_to_uint32(30.0),
+                "11": 3,
+                "47": 1,
+                "15": 4,
+            }
+        )
+
+        assert not state.has_terminal_task_result
+        assert state.has_unfinished_charge_resume_context
+        assert state.is_charging_to_resume
+
     def test_active_clean_with_high_rising_battery_is_not_charging_to_resume(self) -> None:
         """A high battery should not be treated as a mid-task recharge."""
         state = NarwalState()
