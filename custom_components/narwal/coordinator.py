@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 from dataclasses import dataclass
@@ -12,18 +13,18 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
+from .const import DOMAIN, NO_BROADCAST_PRODUCT_KEYS
 from .narwal_client import (
-    WorkMode,
+    CommandResponse,
     FanLevel,
     MopHumidity,
     MopStrengthLevel,
     NarwalClient,
     NarwalConnectionError,
     NarwalState,
+    WorkMode,
 )
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
-
-from .const import DOMAIN, NO_BROADCAST_PRODUCT_KEYS
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,11 +46,34 @@ TOPIC_SUBSCRIPTION_TTL = 600.0
 TOPIC_RESUBSCRIBE_AFTER = 240.0
 
 
+def _status_payload(response: CommandResponse) -> dict[str, object] | None:
+    """Return the decoded robot_base_status payload from a response."""
+    if not response.accepted or not isinstance(response.data, dict):
+        return None
+    status_data = response.data.get("2")
+    if isinstance(status_data, dict) and status_data:
+        return status_data
+    return None
+
+
+def _has_dock_status_payload(response: CommandResponse) -> bool:
+    """Return True when a response carries the dock status submessage."""
+    status_data = _status_payload(response)
+    if status_data is None:
+        return False
+    field3 = status_data.get("3")
+    if isinstance(field3, list):
+        field3 = field3[0] if field3 else None
+    return isinstance(field3, dict)
+
+
 @dataclass
 class CleanSettings:
     """User-selected clean parameters, applied at the next room clean start.
 
-    Single source of truth the select/number entities mutate and the clean-start path reads; each entity persists its value via RestoreEntity, so they survive restarts. Only fan and water also have live setters — work_mode/mop_strength/passes take effect at the next start.
+    Single source of truth the select/number entities mutate and the
+    clean-start path reads; each entity persists its value via RestoreEntity.
+    Only fan and water also have live setters.
     """
 
     work_mode: WorkMode = WorkMode.VACUUM_AND_MOP
@@ -99,7 +123,22 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._last_topic_subscribe: float = 0.0
         self._consecutive_failures = 0
         self._max_failures = 5  # 5 * 60s = 5 minutes before entities go unavailable
-        self._consumable_poll_countdown = 0  # 0 = fetch on next poll, then every CONSUMABLE_POLL_EVERY
+        self._dock_status_refresh_failed = True
+        self._consumable_poll_countdown = 0
+        self.dock_action_lock = asyncio.Lock()
+
+    @property
+    def has_fresh_state(self) -> bool:
+        """Return true when the coordinator has not returned stale poll data."""
+        return self.last_update_success and not self._dock_status_refresh_failed
+
+    def _mark_dock_status_refresh_failed(self) -> None:
+        """Record that dock-control state may be stale."""
+        self._dock_status_refresh_failed = True
+
+    def _mark_dock_status_refresh_succeeded(self) -> None:
+        """Record that dock-control state came from a current base-status payload."""
+        self._dock_status_refresh_failed = False
 
     async def async_setup(self) -> None:
         """Connect to the vacuum and start the WebSocket listener.
@@ -118,10 +157,20 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             _LOGGER.debug("Could not fetch device info at startup")
 
         try:
-            await self.client.get_status(
+            response = await self.client.get_status(
                 full_update=not self.client.state.has_recent_active_working_status
             )
+            if not getattr(response, "accepted", True):
+                raise NarwalConnectionError(
+                    f"Status refresh failed with code {response.result_code}"
+                )
+            if not _has_dock_status_payload(response):
+                raise NarwalConnectionError(
+                    "Status refresh returned no dock-status payload"
+                )
+            self._mark_dock_status_refresh_succeeded()
         except Exception:
+            self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Could not fetch initial status")
 
         try:
@@ -269,12 +318,39 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     async def _refresh_dock_status(self) -> None:
         """Immediate get_status() after return-to-dock to refresh dock fields."""
         try:
-            await self.client.get_status(
+            response = await self.client.get_status(
                 full_update=not self.client.state.has_recent_active_working_status
             )
+            if not getattr(response, "accepted", True):
+                raise NarwalConnectionError(
+                    f"Status refresh failed with code {response.result_code}"
+                )
             self.async_set_updated_data(self.client.state)
         except Exception:
             _LOGGER.debug("Failed to refresh dock status after transition")
+
+    async def async_refresh_dock_status(self) -> bool:
+        """Refresh full dock/base-station status for action gating."""
+        try:
+            response = await self.client.get_status(full_update=True)
+        except Exception:
+            self._mark_dock_status_refresh_failed()
+            _LOGGER.debug("Failed to refresh dock status")
+            return False
+        self.async_set_updated_data(self.client.state)
+        if not response.accepted:
+            self._mark_dock_status_refresh_failed()
+            _LOGGER.debug(
+                "Dock status refresh was rejected with code %s",
+                response.result_code,
+            )
+            return False
+        if not _has_dock_status_payload(response):
+            self._mark_dock_status_refresh_failed()
+            _LOGGER.debug("Dock status refresh returned no dock-status payload")
+            return False
+        self._mark_dock_status_refresh_succeeded()
+        return True
 
     async def _async_update_data(self) -> NarwalState:
         """Polling fallback — fetch status if no push updates arrived.
@@ -289,11 +365,19 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         try:
             if not self.client.connected:
                 raise NarwalConnectionError("Not connected")
-            await self.client.get_status(
-                full_update=not self.client.state.has_recent_active_working_status
-            )
+            full_update = not self.client.state.has_recent_active_working_status
+            response = await self.client.get_status(full_update=full_update)
+            if not getattr(response, "accepted", True):
+                raise NarwalConnectionError(
+                    f"Status refresh failed with code {response.result_code}"
+                )
+            if full_update and not _has_dock_status_payload(response):
+                raise NarwalConnectionError(
+                    "Status refresh returned no dock-status payload"
+                )
         except Exception as err:
             self._consecutive_failures += 1
+            self._mark_dock_status_refresh_failed()
             if self._consecutive_failures >= self._max_failures:
                 raise UpdateFailed(
                     f"Vacuum unreachable for {self._consecutive_failures} consecutive polls"
@@ -305,13 +389,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return self.client.state  # stale data keeps entities available
         else:
             self._consecutive_failures = 0
+            if full_update:
+                self._mark_dock_status_refresh_succeeded()
 
         # Retry map fetch if it failed during setup
         if self.client.state.map_data is None:
-            try:
+            with contextlib.suppress(Exception):
                 await self.client.get_map()
-            except Exception:
-                pass
 
         # Renew the broadcast subscription before it lapses. This is deliberately
         # NOT conditional on believing we are cleaning: working_status is what tells

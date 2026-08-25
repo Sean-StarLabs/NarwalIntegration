@@ -15,8 +15,6 @@ from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .narwal_client import NarwalState
-
 from . import NarwalConfigEntry
 from .const import (
     CONSUMABLE_MAINTAIN_ITEMS,
@@ -24,7 +22,8 @@ from .const import (
     ERROR_HELP_URL_TEMPLATE,
 )
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity
+from .entity import NarwalDockEntity, NarwalEntity
+from .narwal_client import NarwalState
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -33,6 +32,7 @@ class NarwalBinarySensorEntityDescription(BinarySensorEntityDescription):
 
     value_fn: Callable[[NarwalState], bool | None]
     attrs_fn: Callable[[NarwalState], dict[str, Any] | None] | None = None
+    dock_device: bool = False
 
 
 def _tank_problem(attr: str, bad: frozenset[int]) -> Callable[[NarwalState], bool | None]:
@@ -96,6 +96,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         translation_key="clean_water_tank",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("clean_water_tank_state", frozenset({2, 3, 4})),
     ),
     NarwalBinarySensorEntityDescription(
@@ -103,6 +104,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         translation_key="sewage_tank",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("sewage_tank_state", frozenset({2, 3})),
     ),
     NarwalBinarySensorEntityDescription(
@@ -110,6 +112,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         translation_key="dust_box",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("dust_box_state", frozenset({2, 3, 4})),
     ),
     NarwalBinarySensorEntityDescription(
@@ -117,6 +120,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         translation_key="dust_bag",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("dust_bag_state", frozenset({2, 3, 4})),
     ),
     NarwalBinarySensorEntityDescription(
@@ -124,6 +128,7 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         translation_key="station_bag",
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         value_fn=_tank_problem("station_bag_state", frozenset({2, 3, 4})),
     ),
 )
@@ -138,7 +143,11 @@ async def async_setup_entry(
     coordinator = entry.runtime_data
     entities: list[BinarySensorEntity] = [NarwalDockedSensor(coordinator)]
     entities += [
-        NarwalBinarySensor(coordinator, description)
+        (
+            NarwalDockBinarySensor(coordinator, description)
+            if description.dock_device
+            else NarwalBinarySensor(coordinator, description)
+        )
         for description in BINARY_SENSOR_DESCRIPTIONS
     ]
     async_add_entities(entities)
@@ -191,6 +200,39 @@ class NarwalBinarySensor(NarwalEntity, BinarySensorEntity):
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
         """Optional per-sensor attributes (e.g. fault code detail)."""
+        state = self.coordinator.data
+        if state is None or self.entity_description.attrs_fn is None:
+            return None
+        return self.entity_description.attrs_fn(state)
+
+
+class NarwalDockBinarySensor(NarwalDockEntity, BinarySensorEntity):
+    """A description-driven Narwal binary sensor assigned to the dock device."""
+
+    entity_description: NarwalBinarySensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        description: NarwalBinarySensorEntityDescription,
+    ) -> None:
+        """Initialize the dock binary sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        device_id = coordinator.config_entry.data["device_id"]
+        self._attr_unique_id = f"{device_id}_{description.key}"
+
+    @property
+    def is_on(self) -> bool | None:
+        """Return the sensor value (None = unavailable)."""
+        state = self.coordinator.data
+        if state is None:
+            return None
+        return self.entity_description.value_fn(state)
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any] | None:
+        """Optional per-sensor attributes."""
         state = self.coordinator.data
         if state is None or self.entity_description.attrs_fn is None:
             return None
