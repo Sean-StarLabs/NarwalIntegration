@@ -746,6 +746,7 @@ class NarwalClient:
         elif short_topic == "map/display_map":
             self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
             self._last_display_map_time = time.monotonic()
+            self.state.map_display_updated = self._last_display_map_time
             if self.state.map_display_data.trajectory:
                 self.state.native_trajectory = self.state.map_display_data.trajectory
                 self.state.native_trajectory_updated = self._last_display_map_time

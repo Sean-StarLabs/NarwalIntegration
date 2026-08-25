@@ -28,6 +28,7 @@ from .const import (
 )
 
 _ACTIVE_WORKING_STATUS_TTL = 15.0
+_ACTIVE_DISPLAY_MAP_TTL = 15.0
 _DOCK_DRYING_STATUS_TTL = 45.0
 _DRYING_EMPTY_SUPPRESSION_TTL = 120.0
 _ASSUMED_DOCK_DRYING_TASK_TTL = 6 * 60 * 60
@@ -1111,6 +1112,7 @@ class NarwalState:
     # Map
     map_data: MapData | None = None
     map_display_data: MapDisplayData | None = None
+    map_display_updated: float = 0.0
 
     # Download / upgrade status
     download_status: int = 0  # download_status field 3 (state)
@@ -1170,7 +1172,16 @@ class NarwalState:
 
     @property
     def has_recent_active_working_status(self) -> bool:
-        """True while live working_status task metrics are still fresh."""
+        """True while live telemetry still indicates active robot movement."""
+        if (
+            self.working_status not in ACTIVE_CLEANING_STATUSES
+            and self.working_status
+            not in (WorkingStatus.ERROR, WorkingStatus.REMAPPING)
+            and self.has_recent_display_map
+            and self.has_off_dock_signal
+            and not self.has_dock_presence_signal
+        ):
+            return True
         if self.working_status not in ACTIVE_CLEANING_STATUSES:
             return False
         if self.last_active_working_status_time <= 0:
@@ -1178,6 +1189,15 @@ class NarwalState:
         return (
             time.monotonic() - self.last_active_working_status_time
             <= _ACTIVE_WORKING_STATUS_TTL
+        )
+
+    @property
+    def has_recent_display_map(self) -> bool:
+        """True while live map/display_map broadcasts are still fresh."""
+        return (
+            self.map_display_data is not None
+            and self.map_display_updated > 0
+            and time.monotonic() - self.map_display_updated <= _ACTIVE_DISPLAY_MAP_TTL
         )
 
     @property
@@ -1198,6 +1218,13 @@ class NarwalState:
             return not self.is_paused and not self.is_returning
         if self.is_docked:
             return False
+        if (
+            self.working_status != WorkingStatus.REMAPPING
+            and self.has_recent_display_map
+            and self.has_off_dock_signal
+            and not self.has_dock_presence_signal
+        ):
+            return not self.is_paused and not self.is_returning_to_dock
         return (
             self.working_status in ACTIVE_CLEANING_STATUSES
             and not self.is_paused
@@ -1452,16 +1479,27 @@ class NarwalState:
         )
 
     @property
+    def has_charge_resume_context(self) -> bool:
+        """True when retained task state still describes an unfinished clean."""
+        return (
+            self.working_status in ACTIVE_CLEANING_STATUSES
+            or self.has_recent_active_working_status
+            or self.has_paused_clean_task_context
+            or self.task_progress_percent is not None
+            or self.task_remaining_time > 0
+            or self.current_room_id is not None
+            or bool(self.current_room_aux_name)
+        )
+
+    @property
     def is_charging_to_resume(self) -> bool:
         """True when an active clean appears to be docked charging before resume."""
         return (
-            self.working_status in ACTIVE_CLEANING_STATUSES
-            and self.battery_recently_increasing
-            and self.has_dock_presence_signal
-            and self.battery_level < 80
+            self.has_charge_resume_context
+            and (self.has_dock_presence_signal or self.is_station_active)
+            and 0 < self.battery_level < 80
             and not self.is_paused
             and not self.is_returning
-            and not self.is_station_active
         )
 
     @property

@@ -16,6 +16,7 @@ from narwal_client.const import (
 from narwal_client.models import (
     CommandResponse,
     MapData,
+    MapDisplayData,
     NarwalState,
     ObstacleInfo,
     RoomInfo,
@@ -347,6 +348,41 @@ class TestNarwalState:
         assert state.is_cleaning
         assert state.battery_level == 85
 
+    def test_unknown_off_dock_with_recent_display_map_is_cleaning(self) -> None:
+        """Live display-map broadcasts identify an unmapped active off-dock state."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
+        state.map_display_data = MapDisplayData(robot_x=1.0, robot_y=2.0)
+        state.map_display_updated = 100.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=105.0):
+            assert state.has_recent_display_map
+            assert state.has_recent_active_working_status
+            assert state.is_cleaning
+
+    def test_terminal_status_with_off_dock_display_map_is_cleaning(self) -> None:
+        """Fresh movement beats a stale terminal status with explicit off-dock fields."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10}, "11": 1, "47": 2})
+        state.map_display_data = MapDisplayData(robot_x=1.0, robot_y=2.0)
+        state.map_display_updated = 100.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=105.0):
+            assert state.has_recent_active_working_status
+            assert state.is_cleaning
+
+    def test_unknown_off_dock_with_stale_display_map_is_not_cleaning(self) -> None:
+        """A stale display-map frame must not keep an idle unknown state active."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
+        state.map_display_data = MapDisplayData(robot_x=1.0, robot_y=2.0)
+        state.map_display_updated = 100.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=120.0):
+            assert not state.has_recent_display_map
+            assert not state.has_recent_active_working_status
+            assert not state.is_cleaning
+
     def test_active_clean_with_rising_battery_needs_dock_signal_to_resume(self) -> None:
         """A single rising battery sample is not enough to infer mid-task recharge."""
         state = NarwalState()
@@ -379,14 +415,55 @@ class TestNarwalState:
         assert state.is_charging_to_resume
         assert not state.is_docked
 
-    def test_active_station_task_is_not_charging_to_resume(self) -> None:
-        """Charging during a station maintenance phase should keep dock state."""
+    def test_active_clean_on_low_battery_dock_is_charging_to_resume_after_restart(
+        self,
+    ) -> None:
+        """Low-battery dock telemetry is enough when HA lost battery trend memory."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 4}, "2": _float_to_uint32(21.0), "11": 3, "47": 1}
+        )
+
+        assert not state.battery_recently_increasing
+        assert state.has_dock_presence_signal
+        assert state.is_charging_to_resume
+
+    def test_active_clean_with_station_task_can_be_charging_to_resume(self) -> None:
+        """A station task can run while an interrupted clean charges to resume."""
         state = NarwalState()
         state.update_from_base_status(
             {"3": {"1": 4, "18": 2}, "2": _float_to_uint32(20.0), "11": 3, "47": 1}
         )
         state.update_from_base_status(
             {"3": {"1": 4, "18": 2}, "2": _float_to_uint32(21.0), "11": 3, "47": 1}
+        )
+
+        assert state.battery_recently_increasing
+        assert state.is_station_active
+        assert state.is_charging_to_resume
+
+    def test_retained_clean_details_with_station_task_are_charging_to_resume(
+        self,
+    ) -> None:
+        """Progress retained across a restart still identifies a suspended clean."""
+        state = NarwalState()
+        state.task_progress_percent = 5
+        state.current_room_id = 3
+        state.set_dock_drying_task("dry_dock_bag", 1_800, 18_000, ("12", "13"))
+        state.update_from_base_status({"2": _float_to_uint32(28.0), "11": 3, "47": 1})
+
+        assert state.is_station_active
+        assert state.has_charge_resume_context
+        assert state.is_charging_to_resume
+
+    def test_dock_maintenance_is_not_charging_to_resume(self) -> None:
+        """A dock-only maintenance phase stays station_active while charging."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 14, "18": 2}, "2": _float_to_uint32(20.0), "11": 3, "47": 1}
+        )
+        state.update_from_base_status(
+            {"3": {"1": 14, "18": 2}, "2": _float_to_uint32(21.0), "11": 3, "47": 1}
         )
 
         assert state.battery_recently_increasing
