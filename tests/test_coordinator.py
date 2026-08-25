@@ -255,6 +255,20 @@ def test_dock_maintenance_does_not_block_next_clean_setup() -> None:
     assert not can_start_cleaning(state)
 
 
+def test_dock_bag_drying_does_not_block_robot_start() -> None:
+    """Drying the dock bag is station-side and can continue while the robot leaves."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+    state.set_dock_drying_task("dry_dock_bag", 1_200, 18_000, ("12", "13"))
+
+    assert state.is_docked
+    assert state.is_station_active
+    assert can_edit_pending_clean_settings(state)
+    assert can_start_cleaning(state)
+
+
 def test_return_home_available_when_idle_off_dock() -> None:
     """An idle robot away from the dock should expose return-to-base."""
     state = MagicMock()
