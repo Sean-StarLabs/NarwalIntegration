@@ -18,7 +18,7 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from custom_components.narwal.const import NO_BROADCAST_PRODUCT_KEYS  # noqa: E402
-from custom_components.narwal.coordinator import (
+from custom_components.narwal.coordinator import (  # noqa: E402
     TOPIC_RESUBSCRIBE_AFTER,
     TOPIC_SUBSCRIPTION_TTL,
     CleanSettings,
@@ -26,8 +26,8 @@ from custom_components.narwal.coordinator import (
     can_edit_pending_clean_settings,
     can_locate_robot,
     can_pause_cleaning,
-    can_return_home,
     can_resume_cleaning,
+    can_return_home,
     can_start_cleaning,
     can_start_dock_task,
     can_stop_cleaning,
@@ -35,7 +35,7 @@ from custom_components.narwal.coordinator import (
     is_live_clean_setting_available,
     is_narwal_task_busy,
     is_setup_available,
-)  # noqa: E402
+)
 from custom_components.narwal.narwal_client import (  # noqa: E402
     FanLevel,
     MopHumidity,
@@ -177,41 +177,37 @@ def test_charging_to_resume_exposes_resume_when_station_idle() -> None:
     assert not can_start_cleaning(state)
 
 
-def test_native_plan_cleaning_context_controls_robot_session() -> None:
-    """Native route-plan inferred cleaning must drive command availability."""
+def test_route_plan_frames_do_not_infer_cleaning_context() -> None:
+    """Visual route data must not drive robot command availability."""
     state = NarwalState()
     state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2})
-    state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-    state.native_plan_trajectory_updated = time.monotonic()
 
-    assert state.is_cleaning
-    assert is_narwal_task_busy(state)
-    assert can_pause_cleaning(state)
-    assert can_stop_cleaning(state)
-    assert is_live_clean_setting_available(state)
-    assert not can_edit_pending_clean_settings(state)
-    assert not is_setup_available(state)
+    assert not state.is_cleaning
+    assert not is_narwal_task_busy(state)
+    assert not can_pause_cleaning(state)
+    assert not can_stop_cleaning(state)
+    assert not is_live_clean_setting_available(state)
+    assert can_edit_pending_clean_settings(state)
+    assert is_setup_available(state)
     assert not can_start_cleaning(state)
     assert not can_start_dock_task(state)
 
 
-def test_paused_native_plan_context_controls_robot_session() -> None:
-    """Paused native-plan inferred sessions can be resumed and stopped."""
+def test_paused_overlay_requires_task_context_not_route_plan() -> None:
+    """A paused flag without task details is still editable idle state."""
     state = NarwalState()
     state.update_from_base_status({"3": {"1": 14, "2": 1}, "11": 1, "47": 2})
-    state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-    state.native_plan_trajectory_updated = time.monotonic()
 
     assert state.is_paused
     assert not state.is_cleaning
-    assert state.has_paused_clean_task_context
-    assert is_narwal_task_busy(state)
-    assert can_resume_cleaning(state)
-    assert can_stop_cleaning(state)
-    assert is_live_clean_setting_available(state)
+    assert not state.has_paused_clean_task_context
+    assert not is_narwal_task_busy(state)
+    assert not can_resume_cleaning(state)
+    assert not can_stop_cleaning(state)
+    assert not is_live_clean_setting_available(state)
     assert not can_pause_cleaning(state)
-    assert not can_edit_pending_clean_settings(state)
-    assert not is_setup_available(state)
+    assert can_edit_pending_clean_settings(state)
+    assert is_setup_available(state)
     assert not can_start_cleaning(state)
     assert not can_start_dock_task(state)
 

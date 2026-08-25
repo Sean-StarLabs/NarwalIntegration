@@ -118,15 +118,10 @@ FONT_PATHS = (
     "arial.ttf",
 )
 TRAIL_RECENT_POINTS = 200
-TRAIL_RENDER_MIN_GRID_DELTA = 1.0
-TRAIL_RENDER_MAX_GRID_JUMP_FRACTION = 0.06
-TRAIL_RENDER_MAX_GRID_JUMP_MIN = 24.0
-TRAIL_RENDER_MAX_GRID_JUMP_MAX = 72.0
-TRAIL_RENDER_SPIKE_GRID_DELTA = 8.0
-TRAIL_RENDER_SIMPLIFY_GRID_DELTA = 2.0
-TRAIL_RENDER_MAX_SIMPLIFY_POINTS = 1000
-TRAIL_RENDER_SMOOTHING_PASSES = 2
-TRAIL_RENDER_DENOISE_WINDOW = 5
+TRAIL_MIN_GRID_DELTA = 1.0
+TRAIL_MAX_GRID_JUMP_FRACTION = 0.06
+TRAIL_MAX_GRID_JUMP_MIN = 24.0
+TRAIL_MAX_GRID_JUMP_MAX = 72.0
 CLEANED_AREA_FILL = (255, 255, 255, 78)
 TRAIL_LINE_FILL = (255, 255, 255, 140)
 TRAIL_RECENT_LINE_FILL = (255, 255, 255, 220)
@@ -864,70 +859,11 @@ def render_base_map(
     return img
 
 
-def _trail_render_segments(
-    trail: list[tuple[float, float]],
-    map_width: float,
-    map_height: int,
-    max_grid_segment: float,
-) -> list[list[tuple[float, float]]]:
-    """Return display-ready trail segments from raw grid samples."""
-    segments: list[list[tuple[float, float]]] = []
-    current: list[tuple[float, float]] = []
-
-    for index, point in enumerate(trail):
-        if not _valid_trail_point(point, map_width, map_height):
-            if len(current) >= 2:
-                segments.append(_prepare_trail_segment(current))
-            current = []
-            continue
-
-        if not current:
-            current.append(point)
-            continue
-
-        distance = _grid_distance(current[-1], point)
-        if distance < TRAIL_RENDER_MIN_GRID_DELTA:
-            continue
-
-        next_point = trail[index + 1] if index + 1 < len(trail) else None
-        if _is_grid_spike(current[-1], point, next_point, map_width, map_height):
-            continue
-
-        if distance > max_grid_segment:
-            if (
-                next_point is not None
-                and _valid_trail_point(next_point, map_width, map_height)
-                and _grid_distance(current[-1], next_point) <= max_grid_segment
-            ):
-                continue
-            if len(current) >= 2:
-                segments.append(_prepare_trail_segment(current))
-            current = [point]
-            continue
-
-        current.append(point)
-
-    if len(current) >= 2:
-        segments.append(_prepare_trail_segment(current))
-
-    return segments
-
-
-def _is_grid_spike(
-    previous: tuple[float, float],
-    point: tuple[float, float],
-    next_point: tuple[float, float] | None,
-    map_width: float,
-    map_height: int,
-) -> bool:
-    """Return True for a single sample that darts away then immediately returns."""
-    if next_point is None or not _valid_trail_point(next_point, map_width, map_height):
-        return False
-    distance = _grid_distance(previous, point)
-    if distance < TRAIL_RENDER_SPIKE_GRID_DELTA:
-        return False
-    next_distance = _grid_distance(previous, next_point)
-    return next_distance <= max(TRAIL_RENDER_MIN_GRID_DELTA * 2, distance * 0.35)
+def _grid_distance(
+    first: tuple[float, float],
+    second: tuple[float, float],
+) -> float:
+    return math.hypot(second[0] - first[0], second[1] - first[1])
 
 
 def _valid_trail_point(
@@ -944,164 +880,14 @@ def _valid_trail_point(
     )
 
 
-def _prepare_trail_segment(
-    points: list[tuple[float, float]],
-) -> list[tuple[float, float]]:
-    """Return a denoised, simplified, and visually smoothed trail segment."""
-    denoised = _denoise_trail_segment(points)
-    bounded = _bound_trail_segment_for_simplification(denoised)
-    simplified = _simplify_trail_segment(bounded, TRAIL_RENDER_SIMPLIFY_GRID_DELTA)
-    return _smooth_trail_segment(simplified)
-
-
-def _bound_trail_segment_for_simplification(
-    points: list[tuple[float, float]],
-) -> list[tuple[float, float]]:
-    """Downsample display-only trail input before worst-case RDP simplification."""
-    if len(points) <= TRAIL_RENDER_MAX_SIMPLIFY_POINTS:
-        return points
-
-    last_index = len(points) - 1
-    max_index = TRAIL_RENDER_MAX_SIMPLIFY_POINTS - 1
-    return [
-        points[round(output_index * last_index / max_index)]
-        for output_index in range(TRAIL_RENDER_MAX_SIMPLIFY_POINTS)
-    ]
-
-
-def _denoise_trail_segment(
-    points: list[tuple[float, float]],
-) -> list[tuple[float, float]]:
-    """Dampen short alternating robot-position wobble in the display-only trail."""
-    if len(points) < TRAIL_RENDER_DENOISE_WINDOW:
-        return points
-
-    radius = TRAIL_RENDER_DENOISE_WINDOW // 2
-    denoised = []
-    for index in range(len(points)):
-        start = max(index - radius, 0)
-        end = min(index + radius + 1, len(points))
-        weighted_x = 0.0
-        weighted_y = 0.0
-        total_weight = 0
-        for sample_index, sample in enumerate(points[start:end], start=start):
-            weight = radius + 1 - abs(sample_index - index)
-            weighted_x += sample[0] * weight
-            weighted_y += sample[1] * weight
-            total_weight += weight
-        denoised.append((weighted_x / total_weight, weighted_y / total_weight))
-    return denoised
-
-
-def _simplify_trail_segment(
-    points: list[tuple[float, float]], tolerance_grid_delta: float
-) -> list[tuple[float, float]]:
-    """Remove display-only jitter while preserving meaningful turns."""
-    if len(points) < 3:
-        return points
-
-    keep = [False] * len(points)
-    keep[0] = True
-    keep[-1] = True
-    stack = [(0, len(points) - 1)]
-
-    while stack:
-        start_index, end_index = stack.pop()
-        if end_index <= start_index + 1:
-            continue
-
-        max_distance = 0.0
-        split_index = 0
-        start = points[start_index]
-        end = points[end_index]
-        for index in range(start_index + 1, end_index):
-            distance = _grid_perpendicular_distance(points[index], start, end)
-            if distance > max_distance:
-                max_distance = distance
-                split_index = index
-
-        if max_distance <= tolerance_grid_delta:
-            continue
-
-        keep[split_index] = True
-        stack.append((split_index, end_index))
-        stack.append((start_index, split_index))
-
-    return [point for index, point in enumerate(points) if keep[index]]
-
-
-def _smooth_trail_segment(
-    points: list[tuple[float, float]],
-) -> list[tuple[float, float]]:
-    """Round visual corners in a trail segment without changing raw storage."""
-    smoothed = points
-    for _ in range(TRAIL_RENDER_SMOOTHING_PASSES):
-        if len(smoothed) < 3:
-            break
-        next_points = [smoothed[0]]
-        for first, second in zip(smoothed, smoothed[1:], strict=False):
-            next_points.extend(
-                (
-                    _interpolate_grid_point(first, second, 0.25),
-                    _interpolate_grid_point(first, second, 0.75),
-                )
-            )
-        next_points.append(smoothed[-1])
-        smoothed = next_points
-    return smoothed
-
-
-def _interpolate_grid_point(
-    first: tuple[float, float],
-    second: tuple[float, float],
-    fraction: float,
-) -> tuple[float, float]:
-    return (
-        first[0] + (second[0] - first[0]) * fraction,
-        first[1] + (second[1] - first[1]) * fraction,
-    )
-
-
-def _grid_distance(
-    first: tuple[float, float],
-    second: tuple[float, float],
-) -> float:
-    return math.hypot(second[0] - first[0], second[1] - first[1])
-
-
-def _grid_perpendicular_distance(
-    point: tuple[float, float],
-    start: tuple[float, float],
-    end: tuple[float, float],
-) -> float:
-    """Return point-to-line distance in grid cells."""
-    line_dx = end[0] - start[0]
-    line_dy = end[1] - start[1]
-    line_length_squared = line_dx**2 + line_dy**2
-    if line_length_squared == 0:
-        return _grid_distance(point, start)
-
-    projection = max(
-        0.0,
-        min(
-            1.0,
-            ((point[0] - start[0]) * line_dx + (point[1] - start[1]) * line_dy)
-            / line_length_squared,
-        ),
-    )
-    closest_x = start[0] + projection * line_dx
-    closest_y = start[1] + projection * line_dy
-    return math.hypot(point[0] - closest_x, point[1] - closest_y)
-
-
 def _max_grid_segment(map_width: float, map_height: int) -> float:
     """Return the largest trail join to render as one continuous movement."""
     return min(
         max(
-            TRAIL_RENDER_MAX_GRID_JUMP_MIN,
-            min(map_width, map_height) * TRAIL_RENDER_MAX_GRID_JUMP_FRACTION,
+            TRAIL_MAX_GRID_JUMP_MIN,
+            min(map_width, map_height) * TRAIL_MAX_GRID_JUMP_FRACTION,
         ),
-        TRAIL_RENDER_MAX_GRID_JUMP_MAX,
+        TRAIL_MAX_GRID_JUMP_MAX,
     )
 
 
@@ -1233,7 +1019,7 @@ def render_overlay(
         robot_x: Robot X in grid coordinates.
         robot_y: Robot Y in grid coordinates.
         robot_heading: Heading in degrees.
-        trail: List of (grid_x, grid_y) positions to draw as cleaning path.
+        trail: Narwal-native display_map trajectory points in grid coordinates.
         rotation_degrees: Clockwise map rotation in degrees.
         zoom: Centre zoom factor.
         room_labels: Room label centre points in grid coordinates.
@@ -1289,39 +1075,37 @@ def render_overlay(
             scale,
         )
 
-    # Draw trail, splitting at invalid samples or impossible jumps.
+    # Draw the Narwal-native trajectory, skipping invalid or discontinuous points.
     if trail and len(trail) >= 2:
-        trail_segments = _trail_render_segments(
-            trail,
-            map_width,
-            height,
-            max_grid_segment,
-        )
-        total_points = sum(len(segment) for segment in trail_segments)
-        recent_start = max(total_points - TRAIL_RECENT_POINTS, 0)
+        recent_start = max(len(trail) - TRAIL_RECENT_POINTS, 0)
         trail_width = max(2, int(round(1.25 * scale)))
-        seen_points = 0
-        for segment in trail_segments:
-            line = [point for grid in segment if (point := final_point(*grid))]
-            if len(line) < 2:
-                seen_points += len(segment)
+        previous_grid: tuple[float, float] | None = None
+        previous_point: tuple[int, int] | None = None
+        for index, grid in enumerate(trail):
+            if not _valid_trail_point(grid, map_width, height):
+                previous_grid = None
+                previous_point = None
                 continue
-            draw.line(
-                line,
-                fill=TRAIL_LINE_FILL,
-                width=trail_width,
-                joint="curve",
-            )
-            segment_recent_start = max(recent_start - seen_points, 0)
-            recent_line = line[segment_recent_start:]
-            if len(recent_line) >= 2:
-                draw.line(
-                    recent_line,
-                    fill=TRAIL_RECENT_LINE_FILL,
-                    width=trail_width,
-                    joint="curve",
-                )
-            seen_points += len(segment)
+            point = final_point(*grid)
+            if point is None:
+                previous_grid = None
+                previous_point = None
+                continue
+            if previous_grid is not None and previous_point is not None:
+                distance = _grid_distance(previous_grid, grid)
+                if distance >= TRAIL_MIN_GRID_DELTA and distance <= max_grid_segment:
+                    color = (
+                        TRAIL_RECENT_LINE_FILL
+                        if index >= recent_start
+                        else TRAIL_LINE_FILL
+                    )
+                    draw.line(
+                        [previous_point, point],
+                        fill=color,
+                        width=trail_width,
+                    )
+            previous_grid = grid
+            previous_point = point
 
     if room_labels:
         font = _load_font(ImageFont, ROOM_LABEL_FONT_SCALE * int(round(scale)))

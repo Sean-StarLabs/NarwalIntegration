@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-
 from typing import Any
 
 from homeassistant.components.vacuum import (
@@ -20,9 +19,6 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
-
-from .narwal_client import CommandResult, WorkingStatus
-from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 from . import NarwalConfigEntry
 from .const import FAN_SPEED_LIST, FAN_SPEED_MAP, fan_speed_list_for
@@ -41,13 +37,10 @@ from .coordinator import (
     is_setup_available,
 )
 from .entity import NarwalEntity
+from .narwal_client import CommandResult, WorkingStatus
+from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 _LOGGER = logging.getLogger(__name__)
-
-# working_status values already reported as unmapped. Activity is recomputed on
-# every state broadcast (~1.5s), so an unmapped value otherwise floods the log
-# with thousands of identical lines (#46). Warn once per distinct value.
-_WARNED_UNMAPPED_ACTIVITY: set[int] = set()
 
 WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
     WorkingStatus.DOCKED: VacuumActivity.DOCKED,
@@ -57,13 +50,13 @@ WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
     WorkingStatus.CLEANING_V2: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING_ALT: VacuumActivity.CLEANING,
-    WorkingStatus.REMAPPING: VacuumActivity.CLEANING,  # mapping/exploration — robot is actively busy
+    WorkingStatus.REMAPPING: VacuumActivity.CLEANING,
     WorkingStatus.CUSTOM_CLEANING: VacuumActivity.CLEANING,
     WorkingStatus.TASK_COMPLETED: VacuumActivity.RETURNING,
     WorkingStatus.ERROR: VacuumActivity.ERROR,
 }
 
-# FanLevel value -> fan_speed label (canonical labels only; FAN_SPEED_MAP also holds back-compat aliases).
+# FanLevel value -> fan_speed label. FAN_SPEED_MAP also holds back-compat aliases.
 _FAN_LABELS: dict[int, str] = {int(FAN_SPEED_MAP[label]): label for label in FAN_SPEED_LIST}
 
 
@@ -247,18 +240,6 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             if activity == VacuumActivity.DOCKED and not state.is_docked:
                 return VacuumActivity.IDLE
             return activity
-        # Unknown working_status value — infer from dock signals so we
-        # don't report IDLE while the robot is clearly active off-dock.
-        # New firmware versions may introduce values we haven't mapped yet.
-        if not state.is_docked:
-            if state.working_status.value not in _WARNED_UNMAPPED_ACTIVITY:
-                _WARNED_UNMAPPED_ACTIVITY.add(state.working_status.value)
-                _LOGGER.warning(
-                    "Unmapped working_status %s (%d) while off-dock — reporting "
-                    "CLEANING (further occurrences of this value are suppressed)",
-                    state.working_status.name, state.working_status.value,
-                )
-            return VacuumActivity.CLEANING
         return VacuumActivity.IDLE
 
     @property

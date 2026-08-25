@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -20,13 +21,13 @@ from narwal_client.const import (
     TOPIC_CMD_CLEAN_TASK,
     TOPIC_CMD_DRY_DUST_BAG,
     TOPIC_CMD_DRY_STATION_BAG,
-    TOPIC_CMD_GET_CONSUMABLE_INFO,
-    TOPIC_CMD_GET_MAP,
-    TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
-    TOPIC_CMD_GET_BASE_STATUS,
-    TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
-    TOPIC_CMD_GET_ROBOT_TASK_STATUS,
     TOPIC_CMD_FORCE_END,
+    TOPIC_CMD_GET_BASE_STATUS,
+    TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
+    TOPIC_CMD_GET_CONSUMABLE_INFO,
+    TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
+    TOPIC_CMD_GET_MAP,
+    TOPIC_CMD_GET_ROBOT_TASK_STATUS,
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PLAN_START,
     TOPIC_CMD_TAKE_PICTURE,
@@ -38,6 +39,11 @@ from narwal_client.const import (
 )
 from narwal_client.models import CommandResponse, MapData, RoomInfo
 from narwal_client.protocol import PROTOBUF_FIELD5_TAG, NarwalMessage, build_frame, parse_frame
+
+
+def _float_stream(*values: float) -> bytes:
+    """Encode a packed float32 stream as display_map field 2 uses it."""
+    return b"".join(struct.pack("<f", value) for value in values)
 
 
 class TestNarwalClientInit:
@@ -86,32 +92,48 @@ class TestNarwalClientInit:
         assert client.state.is_docked
 
     @pytest.mark.asyncio
-    async def test_display_map_pose_change_marks_robot_movement(self) -> None:
-        """Only changed display-map robot pose proves active map movement."""
+    async def test_display_map_broadcast_updates_visual_data_only(self) -> None:
+        """display_map drives the camera data, not robot task-state inference."""
         client = NarwalClient("10.0.0.1", device_id="device")
         frame = build_frame(client._full_topic("map/display_map"), b"payload")
-        first_pose = {"1": {"1": {"1": 1.0, "2": 1.0}}}
-        moved_pose = {"1": {"1": {"1": 1.2, "2": 1.0}}}
+        client.state.working_status = WorkingStatus.CHARGED
+        client.state.battery_level = 10
+        client.state.task_progress_percent = 48
+        client.state.current_room_id = 4
+        client.state.station_activity = 2
+        client.state.dock_field11 = 3
+        client.state.dock_field47 = 1
 
-        with (
-            patch.object(
-                client,
-                "_decode_protobuf",
-                side_effect=[first_pose, first_pose, moved_pose],
-            ),
-            patch(
-                "narwal_client.client.time.monotonic",
-                side_effect=[10.0, 10.0, 20.0, 20.0, 30.0, 30.0],
-            ),
+        with patch.object(
+            client,
+            "_decode_protobuf",
+            return_value={
+                "1": {"1": {"1": 1.25, "2": 1.0}},
+                "2": {
+                    "1": _float_stream(1.0, 1.25),
+                    "2": _float_stream(2.0, 2.25),
+                },
+            },
         ):
             await client._handle_message(frame)
-            assert client.state.last_map_robot_movement == 0.0
 
-            await client._handle_message(frame)
-            assert client.state.last_map_robot_movement == 0.0
+        assert client.state.map_display_data is not None
+        assert client.state.map_display_data.robot_x == 1.25
+        assert client.state.map_display_data.robot_y == 1.0
+        assert client.state.map_display_data.trajectory == [(1.0, 2.0), (1.25, 2.25)]
+        assert not client.state.is_cleaning
+        assert client.state.is_station_active
+        assert client.state.is_charging_to_resume
+        assert not hasattr(client.state, "last_map_robot_movement")
 
-            await client._handle_message(frame)
-            assert client.state.last_map_robot_movement == 30.0
+    def test_topic_subscription_excludes_planned_route_trails(self) -> None:
+        """Do not subscribe to planned routes as a cleaning-trail source."""
+        client = NarwalClient("10.0.0.1")
+
+        payload = client._build_topic_subscription()
+
+        assert b"map/display_map" in payload
+        assert b"status/point_navi_plan_traj" not in payload
 
     @pytest.mark.asyncio
     async def test_commands_require_connection(self) -> None:

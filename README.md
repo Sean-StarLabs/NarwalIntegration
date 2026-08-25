@@ -78,7 +78,7 @@ Shipped in v1.0.2 ([#50](https://github.com/sjmotew/NarwalIntegration/pull/50)) 
 ### Live Map
 - Color-coded floor plan with room labels (all rooms — user-named and auto-generated)
 - Furniture/obstacle overlay from the robot's stored map data
-- Dock marker and live robot trail during cleaning (~1.5s refresh)
+- Dock marker and Narwal-native live robot trail from `display_map` (~1.5s refresh)
 - Carpet-map debug image as a second camera ([#67](https://github.com/sjmotew/NarwalIntegration/pull/67), v1.0.2)
 - Display toggles for room labels, furniture and furniture labels ([#62](https://github.com/sjmotew/NarwalIntegration/pull/62), v1.0.2)
 

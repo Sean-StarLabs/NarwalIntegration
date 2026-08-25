@@ -10,13 +10,13 @@ from unittest.mock import patch
 from narwal_client.const import (
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
-    TOPIC_POINT_NAVI_PLAN_TRAJ,
     CommandResult,
     WorkingStatus,
 )
 from narwal_client.models import (
     CommandResponse,
     MapData,
+    MapDisplayData,
     NarwalState,
     ObstacleInfo,
     RoomInfo,
@@ -357,35 +357,6 @@ class TestNarwalState:
         assert not state.has_recent_active_working_status
         assert not state.is_cleaning
 
-    def test_native_plan_with_explicit_off_dock_overrides_stale_dock_status(self) -> None:
-        """Fresh native route plans prove activity when dock fields say off-dock."""
-        state = NarwalState()
-        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2})
-        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-        state.native_plan_trajectory_updated = 100.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=110.0):
-            assert state.has_recent_native_plan_activity
-            assert state.has_explicit_off_dock_signal
-            assert state.is_cleaning
-            assert not state.is_docked
-
-    def test_terminal_result_blocks_native_plan_cleaning_inference(self) -> None:
-        """A stopped task must not be revived by retained route-plan frames."""
-        state = NarwalState()
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2, "15": 2})
-        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-        state.native_plan_trajectory_updated = 100.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=110.0):
-            assert state.has_terminal_task_result
-            assert state.has_recent_native_plan_activity
-            assert state.has_explicit_off_dock_signal
-            assert not state.has_unfinished_charge_resume_context
-            assert not state.is_cleaning
-
     def test_working_status_metrics_clear_stale_terminal_result(self) -> None:
         """Live task metrics start a new clean session even if field 15 is stale."""
         state = NarwalState()
@@ -402,79 +373,6 @@ class TestNarwalState:
         assert state.stale_terminate_reason == 2
         assert not state.has_terminal_task_result
         assert state.is_cleaning
-
-    def test_repeated_native_plan_keeps_terminal_result(self) -> None:
-        """Retained route-plan frames should not revive a stopped task."""
-        state = NarwalState()
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2, "15": 2})
-        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-
-        state.update_from_aux_status(
-            TOPIC_POINT_NAVI_PLAN_TRAJ,
-            {
-                "1": [
-                    {"1": _float_to_uint32(1.0), "2": _float_to_uint32(1.0)},
-                    {"1": _float_to_uint32(2.0), "2": _float_to_uint32(2.0)},
-                ]
-            },
-        )
-
-        assert state.terminate_reason == 2
-        assert state.has_terminal_task_result
-        assert not state.is_cleaning
-
-    def test_changed_native_plan_clears_stale_terminal_result(self) -> None:
-        """Fresh route-plan movement can identify a later off-dock clean session."""
-        state = NarwalState()
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2, "15": 2})
-        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-
-        state.update_from_aux_status(
-            TOPIC_POINT_NAVI_PLAN_TRAJ,
-            {
-                "1": [
-                    {"1": _float_to_uint32(1.0), "2": _float_to_uint32(1.0)},
-                    {"1": _float_to_uint32(3.0), "2": _float_to_uint32(3.0)},
-                ]
-            },
-        )
-
-        assert state.terminate_reason == 2
-        assert state.terminal_task_result == 0
-        assert state.stale_terminate_reason == 2
-        assert not state.has_terminal_task_result
-        assert state.is_cleaning
-
-    def test_changed_native_plan_clears_stale_terminal_result_while_paused(self) -> None:
-        """Fresh paused route-plan movement can identify a later clean session."""
-        state = NarwalState()
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2, "15": 2})
-        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-
-        state.update_from_base_status({"3": {"1": 14, "2": 1}, "11": 1, "47": 2})
-        state.update_from_aux_status(
-            TOPIC_POINT_NAVI_PLAN_TRAJ,
-            {
-                "1": [
-                    {"1": _float_to_uint32(1.0), "2": _float_to_uint32(1.0)},
-                    {"1": _float_to_uint32(3.0), "2": _float_to_uint32(3.0)},
-                ]
-            },
-        )
-
-        assert state.is_paused
-        assert state.terminate_reason == 2
-        assert state.terminal_task_result == 0
-        assert state.stale_terminate_reason == 2
-        assert not state.has_terminal_task_result
-        assert state.has_paused_clean_task_context
-        assert not state.is_cleaning
 
     def test_active_clean_with_low_battery_stays_cleaning_without_dock_evidence(self) -> None:
         """Low battery alone should not override active/off-dock cleaning state."""
@@ -613,8 +511,8 @@ class TestNarwalState:
         assert state.battery_recently_decreasing
         assert not state.is_charging_to_resume
 
-    def test_recent_native_plan_movement_beats_stale_station_overlay(self) -> None:
-        """Fresh native planned-route movement wins over stale dock/station fields."""
+    def test_visual_display_map_data_keeps_station_overlay(self) -> None:
+        """Visual map data alone must not prove off-dock movement."""
         state = NarwalState()
         state.working_status = WorkingStatus.CHARGED
         state.battery_level = 10
@@ -623,111 +521,15 @@ class TestNarwalState:
         state.station_activity = 2
         state.dock_field11 = 3
         state.dock_field47 = 1
-        state.last_native_plan_movement = 100.0
+        state.map_display_data = MapDisplayData(
+            robot_x=12.0,
+            robot_y=34.0,
+            trajectory=[(12.0, 34.0), (12.5, 34.5)],
+        )
 
-        with patch("narwal_client.models.time.monotonic", return_value=110.0):
-            assert state.has_dock_presence_signal
-            assert state.has_recent_cleaning_trail_movement
-            assert state.has_resumed_cleaning_motion
-            assert state.is_cleaning
-            assert not state.is_station_active
-            assert not state.is_docked
-            assert not state.is_charging_to_resume
-
-    def test_recent_display_map_pose_movement_beats_stale_station_overlay(self) -> None:
-        """Fresh robot pose movement wins even before the camera records a trail."""
-        state = NarwalState()
-        state.working_status = WorkingStatus.CHARGED
-        state.battery_level = 10
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.station_activity = 2
-        state.dock_field11 = 3
-        state.dock_field47 = 1
-        state.last_map_robot_movement = 100.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=110.0):
-            assert state.has_dock_presence_signal
-            assert state.has_recent_cleaning_trail_movement
-            assert state.has_resumed_cleaning_motion
-            assert state.is_cleaning
-            assert not state.is_station_active
-            assert not state.is_docked
-            assert not state.is_charging_to_resume
-
-    def test_confirmed_dock_after_map_movement_beats_resumed_motion(self) -> None:
-        """A newer confirmed dock transition wins over prior map movement."""
-        state = NarwalState()
-        state.working_status = WorkingStatus.CHARGED
-        state.battery_level = 10
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.dock_field11 = 3
-        state.dock_field47 = 1
-        state.last_map_robot_movement = 100.0
-        state.last_confirmed_dock_time = 110.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=111.0):
-            assert state.has_recent_cleaning_trail_movement
-            assert not state.has_resumed_cleaning_motion
-            assert state.is_docked
-            assert state.is_charging_to_resume
-
-    def test_native_trail_after_confirmed_dock_beats_stale_dock_state(self) -> None:
-        """A native route recorded after dock telemetry proves resumed cleaning."""
-        state = NarwalState()
-        state.working_status = WorkingStatus.CHARGED
-        state.battery_level = 10
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.dock_field11 = 3
-        state.dock_field47 = 1
-        state.last_confirmed_dock_time = 100.0
-        state.last_native_plan_movement = 110.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=111.0):
-            assert state.latest_cleaning_movement_time == 110.0
-            assert state.has_resumed_cleaning_motion
-            assert state.is_cleaning
-            assert not state.is_docked
-            assert not state.is_charging_to_resume
-
-    def test_stale_native_trail_keeps_station_overlay(self) -> None:
-        """Old route points should not hide a real dock-side phase."""
-        state = NarwalState()
-        state.working_status = WorkingStatus.CHARGED
-        state.battery_level = 10
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.station_activity = 2
-        state.dock_field11 = 3
-        state.dock_field47 = 1
-        state.last_native_plan_movement = 100.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=230.0):
-            assert not state.has_recent_cleaning_trail_movement
-            assert not state.has_resumed_cleaning_motion
-            assert state.is_station_active
-            assert state.is_charging_to_resume
-
-    def test_display_trail_without_pose_or_plan_movement_keeps_station_overlay(self) -> None:
-        """A visual display-map path alone should not prove off-dock movement."""
-        state = NarwalState()
-        state.working_status = WorkingStatus.CHARGED
-        state.battery_level = 10
-        state.task_progress_percent = 48
-        state.current_room_id = 4
-        state.station_activity = 2
-        state.dock_field11 = 3
-        state.dock_field47 = 1
-        state.cleaning_trail = [(float(index), 0.0) for index in range(30)]
-        state.last_cleaning_trail_record = 110.0
-
-        with patch("narwal_client.models.time.monotonic", return_value=111.0):
-            assert not state.has_recent_cleaning_trail_movement
-            assert not state.has_resumed_cleaning_motion
-            assert state.is_station_active
-            assert state.is_charging_to_resume
+        assert state.is_station_active
+        assert state.is_charging_to_resume
+        assert not state.is_cleaning
 
     def test_docked_charge_after_falling_battery_is_charging_to_resume(self) -> None:
         """A falling off-dock sample should not block a later confirmed dock charge."""

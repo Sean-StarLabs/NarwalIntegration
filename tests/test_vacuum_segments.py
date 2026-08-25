@@ -6,6 +6,7 @@ on the NarwalVacuum entity using HA stubs.
 
 from __future__ import annotations
 
+import sys
 import time
 from unittest.mock import AsyncMock, MagicMock
 
@@ -16,14 +17,11 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from narwal_client import RoomCleanSettings  # noqa: E402
-from narwal_client.const import FanLevel, WorkMode, WorkingStatus  # noqa: E402
-from narwal_client.models import MapData, NarwalState, RoomInfo  # noqa: E402
 from custom_components.narwal.coordinator import CleanSettings  # noqa: E402
 from custom_components.narwal.vacuum import NarwalVacuum  # noqa: E402
-
-# Grab Segment class from stubs for assertions
-import sys
+from narwal_client import RoomCleanSettings  # noqa: E402
+from narwal_client.const import FanLevel, WorkingStatus, WorkMode  # noqa: E402
+from narwal_client.models import MapData, NarwalState, RoomInfo  # noqa: E402
 
 Segment = sys.modules["homeassistant.components.vacuum"].Segment
 VacuumActivity = sys.modules["homeassistant.components.vacuum"].VacuumActivity
@@ -210,32 +208,39 @@ class TestVacuumActivity:
         assert vac.activity == VacuumActivity.IDLE
         assert vac.extra_state_attributes["task_status"] == "unknown"
 
-    def test_native_plan_off_dock_stale_dock_status_reports_cleaning(self) -> None:
+    def test_off_dock_stale_dock_status_without_task_fields_reports_idle(self) -> None:
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2})
-        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-        state.native_plan_trajectory_updated = time.monotonic()
         vac = _make_vacuum(state=state)
 
-        assert state.is_cleaning
-        assert vac.activity == VacuumActivity.CLEANING
-        assert vac.extra_state_attributes["task_status"] == "cleaning"
+        assert not state.is_cleaning
+        assert vac.activity == VacuumActivity.IDLE
+        assert vac.extra_state_attributes["task_status"] == "unknown"
 
-    def test_paused_native_plan_off_dock_reports_paused(self) -> None:
+    def test_unknown_off_dock_status_reports_idle_without_task_fields(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
+        vac = _make_vacuum(state=state)
+
+        assert state.working_status == WorkingStatus.UNKNOWN
+        assert state.has_explicit_off_dock_signal
+        assert not state.is_cleaning
+        assert vac.activity == VacuumActivity.IDLE
+        assert vac.extra_state_attributes["task_status"] == "unknown"
+
+    def test_paused_flag_without_task_context_reports_idle(self) -> None:
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 14, "2": 1}, "11": 1, "47": 2})
-        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
-        state.native_plan_trajectory_updated = time.monotonic()
         vac = _make_vacuum(state=state)
 
         attrs = vac.extra_state_attributes
 
         assert state.is_paused
-        assert state.has_paused_clean_task_context
-        assert vac.activity == VacuumActivity.PAUSED
-        assert attrs["task_status"] == "paused"
-        assert attrs["busy"]
-        assert not attrs["setup_available"]
+        assert not state.has_paused_clean_task_context
+        assert vac.activity == VacuumActivity.IDLE
+        assert attrs["task_status"] == "unknown"
+        assert not attrs["busy"]
+        assert attrs["setup_available"]
 
     def test_active_clean_details_remain_visible(self) -> None:
         state = _active_clean_state()

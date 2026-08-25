@@ -11,18 +11,12 @@ from __future__ import annotations
 
 import struct
 
-from narwal_client.const import TOPIC_POINT_NAVI_PLAN_TRAJ
-from narwal_client.models import MapDisplayData, NarwalState
+from narwal_client.models import MapDisplayData
 
 
 def _float_stream(*values: float) -> bytes:
     """Encode a packed float32 stream as display_map field 2 uses it."""
     return b"".join(struct.pack("<f", value) for value in values)
-
-
-def _float_bits(value: float) -> int:
-    """Return a float32 value as the raw int shape blackboxprotobuf emits."""
-    return struct.unpack("<I", struct.pack("<f", value))[0]
 
 
 class TestToGridCoords:
@@ -173,26 +167,6 @@ class TestMapDisplayDataFromBroadcast:
         result = MapDisplayData.from_broadcast(decoded)
 
         assert result.trajectory == [(1.5, -2.25), (2.5, 3.5)]
-
-    def test_point_navi_plan_traj_updates_native_plan_trajectory(self) -> None:
-        """Parse point_navi_plan_traj repeated points from raw float32 ints."""
-        state = NarwalState()
-
-        state.update_from_aux_status(
-            TOPIC_POINT_NAVI_PLAN_TRAJ,
-            {
-                "1": [
-                    {"1": _float_bits(2.3245835), "2": _float_bits(-85.65562)},
-                    {"1": _float_bits(-0.5378436), "2": _float_bits(-85.65567)},
-                ]
-            },
-        )
-
-        assert len(state.native_plan_trajectory) == 2
-        assert state.native_plan_trajectory[0] == (2.3245835304260254, -85.6556167602539)
-        assert state.native_plan_trajectory[1] == (-0.5378435850143433, -85.65567016601562)
-        assert state.native_plan_trajectory_updated > 0
-        assert state.last_native_plan_movement == state.native_plan_trajectory_updated
 
     def test_empty_broadcast(self) -> None:
         """Empty broadcast returns default values."""

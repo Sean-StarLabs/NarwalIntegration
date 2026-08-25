@@ -22,14 +22,11 @@ from .const import (
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
     TOPIC_CMD_GET_ROBOT_TASK_STATUS,
-    TOPIC_POINT_NAVI_PLAN_TRAJ,
     TOPIC_ROBOT_TASK_STATUS,
     WorkingStatus,
 )
 
 _ACTIVE_WORKING_STATUS_TTL = 15.0
-_ACTIVE_TRAIL_MOVEMENT_TTL = 120.0
-_ACTIVE_TRAIL_MOVEMENT_MIN_POINTS = 2
 _DOCK_DRYING_STATUS_TTL = 45.0
 _DRYING_EMPTY_SUPPRESSION_TTL = 120.0
 _ASSUMED_DOCK_DRYING_TASK_TTL = 6 * 60 * 60
@@ -327,31 +324,6 @@ def _decode_accumulated_trajectory(
         for x, y in zip(xs, ys, strict=False)
         if math.isfinite(x) and math.isfinite(y)
     ]
-
-
-def _decode_point_navi_plan_trajectory(
-    decoded: dict[str, Any],
-) -> list[tuple[float, float]]:
-    """Decode status/point_navi_plan_traj repeated float32 point messages."""
-    import math
-
-    raw_points = decoded.get("1")
-    if isinstance(raw_points, dict):
-        raw_points = [raw_points]
-    if not isinstance(raw_points, list):
-        return []
-
-    points: list[tuple[float, float]] = []
-    for item in raw_points:
-        if not isinstance(item, dict):
-            continue
-        x = _to_float32(item.get("1"))
-        y = _to_float32(item.get("2"))
-        if x is None or y is None:
-            continue
-        if math.isfinite(x) and math.isfinite(y):
-            points.append((x, y))
-    return points
 
 
 _STATION_DRYING_TASK_ORDER = (
@@ -889,7 +861,7 @@ class MapDisplayData:
     Validated field layout (live capture 2026-02-28, 13 broadcasts):
       field 1.1: {1: x_cm, 2: y_cm} — robot position as float32 centimeters
       field 1.2: heading as float32 radians
-      field 2: recent trajectory tail {1: x_bytes, 2: y_bytes}
+      field 2: accumulated trajectory {1: x_bytes, 2: y_bytes}
       field 5: dock/reference position (constant, same format)
       field 7: cleaned-area grid {1: width, 2: height, 3: compressed_bytes}
       field 10: timestamp in milliseconds since epoch
@@ -1073,23 +1045,6 @@ class NarwalState:
     last_battery_change_time: float = 0.0
     battery_level_increasing: bool = False
     current_room_aux_name: str = ""
-    cleaning_trail: list[tuple[float, float]] = field(default_factory=list)
-    cleaning_trail_map_key: tuple | None = None
-    last_cleaning_trail_record: float = 0.0
-    last_map_robot_movement: float = 0.0
-    last_native_plan_movement: float = 0.0
-    last_confirmed_dock_time: float = 0.0
-    cleaning_trail_active: bool = False
-    cleaning_trail_last_cleaning_time: int = 0
-    cleaning_trail_inactive_since: float = 0.0
-    cleaning_trail_terminal_since: float = 0.0
-    cleaning_trail_revision: int = 0
-    native_trajectory: list[tuple[float, float]] = field(default_factory=list)
-    native_trajectory_updated: float = 0.0
-    native_trajectory_recorded: float = 0.0
-    native_plan_trajectory: list[tuple[float, float]] = field(default_factory=list)
-    native_plan_trajectory_updated: float = 0.0
-    native_plan_trajectory_recorded: float = 0.0
 
     # Consumables / station / fault (base_status; present on dock and during cleaning)
     dust_bag_health: float = 0.0  # field 35 stationBagHealthScore (%)
@@ -1194,84 +1149,20 @@ class NarwalState:
 
     @property
     def has_paused_clean_task_context(self) -> bool:
-        """True when a paused overlay still has retained robot clean details."""
+        """True when a paused overlay still has robot clean details."""
         return self.is_paused and (
             self.task_progress_percent is not None
             or self.task_elapsed_time > 0
             or self.task_remaining_time > 0
             or self.current_room_id is not None
             or bool(self.current_room_aux_name)
-            or (
-                self.has_recent_native_plan_activity
-                and self.has_explicit_off_dock_signal
-                and not self.has_terminal_task_result
-            )
-        )
-
-    @property
-    def latest_cleaning_movement_time(self) -> float:
-        """Return the newest fresh map-movement timestamp."""
-        now = time.monotonic()
-        latest = 0.0
-        if (
-            self.last_map_robot_movement > 0
-            and now - self.last_map_robot_movement <= _ACTIVE_TRAIL_MOVEMENT_TTL
-        ):
-            latest = max(latest, self.last_map_robot_movement)
-        if (
-            self.last_native_plan_movement > 0
-            and now - self.last_native_plan_movement <= _ACTIVE_TRAIL_MOVEMENT_TTL
-        ):
-            latest = max(latest, self.last_native_plan_movement)
-        return latest
-
-    @property
-    def has_recent_cleaning_trail_movement(self) -> bool:
-        """True when native map trails show recent robot movement."""
-        return self.latest_cleaning_movement_time > 0
-
-    @property
-    def has_recent_native_plan_activity(self) -> bool:
-        """True when a fresh native route plan places the robot in an active task."""
-        return (
-            len(self.native_plan_trajectory) >= _ACTIVE_TRAIL_MOVEMENT_MIN_POINTS
-            and self.native_plan_trajectory_updated > 0
-            and time.monotonic() - self.native_plan_trajectory_updated
-            <= _ACTIVE_TRAIL_MOVEMENT_TTL
-        )
-
-    @property
-    def has_resumed_cleaning_motion(self) -> bool:
-        """True when retained task context is now backed by live route movement."""
-        movement_time = self.latest_cleaning_movement_time
-        return (
-            self.has_unfinished_charge_resume_context
-            and movement_time > 0
-            and (
-                self.last_confirmed_dock_time <= 0
-                or movement_time > self.last_confirmed_dock_time
-            )
-            and not self.is_paused
-            and not self.is_returning_to_dock
-            and self.working_status != WorkingStatus.TASK_COMPLETED
         )
 
     @property
     def is_cleaning(self) -> bool:
         """True when actively cleaning (not paused, not returning to dock)."""
-        if self.has_resumed_cleaning_motion:
-            return True
         if self.has_recent_active_working_status:
             return not self.is_paused and not self.is_returning
-        if (
-            self.has_recent_native_plan_activity
-            and self.has_explicit_off_dock_signal
-            and not self.has_terminal_task_result
-            and not self.is_paused
-            and not self.is_returning_to_dock
-            and self.working_status != WorkingStatus.TASK_COMPLETED
-        ):
-            return True
         if self.is_docked:
             return False
         return (
@@ -1296,8 +1187,6 @@ class NarwalState:
         cleaning is not active, since the robot can report unmapped states
         (e.g. self-test) while physically docked.
         """
-        if self.has_resumed_cleaning_motion:
-            return False
         if self.has_explicit_off_dock_signal:
             return False
         if self.working_status == WorkingStatus.REMAPPING:
@@ -1395,8 +1284,6 @@ class NarwalState:
     @property
     def is_station_active(self) -> bool:
         """True when the base station is running a dock-side task."""
-        if self.has_resumed_cleaning_motion:
-            return False
         if self.has_explicit_off_dock_signal and not self.has_dock_presence_signal:
             return False
         if (
@@ -1595,7 +1482,6 @@ class NarwalState:
         """True when an active clean appears to be docked charging before resume."""
         return (
             self.has_unfinished_charge_resume_context
-            and not self.has_resumed_cleaning_motion
             and not self.battery_recently_decreasing_without_dock_evidence
             and (
                 (self.has_dock_presence_signal or self.is_station_active)
@@ -1702,26 +1588,6 @@ class NarwalState:
             room_id = _optional_int(payload.get("6"))
             if room_id is not None:
                 self.current_room_id = room_id or None
-
-    def reset_cleaning_trail(self) -> None:
-        """Clear the in-memory map trail for a new cleaning session."""
-        self.cleaning_trail.clear()
-        self.cleaning_trail_revision += 1
-        self.cleaning_trail_map_key = None
-        self.last_cleaning_trail_record = 0.0
-        self.last_map_robot_movement = 0.0
-        self.last_native_plan_movement = 0.0
-        self.last_confirmed_dock_time = 0.0
-        self.cleaning_trail_active = False
-        self.cleaning_trail_last_cleaning_time = 0
-        self.cleaning_trail_inactive_since = 0.0
-        self.cleaning_trail_terminal_since = 0.0
-        self.native_trajectory.clear()
-        self.native_trajectory_updated = 0.0
-        self.native_trajectory_recorded = 0.0
-        self.native_plan_trajectory.clear()
-        self.native_plan_trajectory_updated = 0.0
-        self.native_plan_trajectory_recorded = 0.0
 
     def clear_drying_task(self) -> None:
         """Clear mop drying fields after the dock reports no remaining time."""
@@ -2060,17 +1926,6 @@ class NarwalState:
                     self.dock_field11 = 1
                 if "47" not in decoded:
                     self.dock_field47 = 2
-                self.last_confirmed_dock_time = 0.0
-            elif (
-                self.working_status
-                in (
-                    WorkingStatus.DOCKED,
-                    WorkingStatus.CHARGED,
-                    WorkingStatus.DOCKED_V2,
-                )
-                and self.has_dock_presence_signal
-            ):
-                self.last_confirmed_dock_time = time.monotonic()
             if (
                 self.working_status == WorkingStatus.TASK_COMPLETED
                 and self.has_dock_presence_signal
@@ -2270,23 +2125,7 @@ class NarwalState:
     def update_from_aux_status(self, topic: str, decoded: dict[str, Any]) -> None:
         """Store and parse auxiliary status/task payloads."""
         self.raw_aux_status[topic] = decoded
-        if topic == TOPIC_POINT_NAVI_PLAN_TRAJ:
-            points = _decode_point_navi_plan_trajectory(decoded)
-            if points:
-                updated = time.monotonic()
-                if points != self.native_plan_trajectory:
-                    self.last_native_plan_movement = updated
-                    if (
-                        self.has_explicit_off_dock_signal
-                        and not self.is_returning_to_dock
-                        and self.working_status != WorkingStatus.TASK_COMPLETED
-                    ):
-                        if self.terminate_reason > 0:
-                            self.stale_terminate_reason = self.terminate_reason
-                        self.terminal_task_result = 0
-                self.native_plan_trajectory = points
-                self.native_plan_trajectory_updated = updated
-        elif topic in {
+        if topic in {
             TOPIC_ROBOT_TASK_STATUS,
             TOPIC_CMD_GET_ROBOT_TASK_STATUS,
             TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,

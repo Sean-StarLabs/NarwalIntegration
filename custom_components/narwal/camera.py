@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import io
 import logging
 import math
 import time
@@ -15,19 +14,18 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
 from .const import (
+    CONF_MAP_ROTATION,
+    CONF_MAP_ZOOM,
     CONF_SHOW_FURNITURE,
     CONF_SHOW_FURNITURE_LABELS,
     CONF_SHOW_ROOM_LABELS,
-    CONF_MAP_ROTATION,
-    CONF_MAP_ZOOM,
     MAP_OPTION_DEFAULTS,
     MAP_ROTATION_DEFAULT,
     MAP_ZOOM_DEFAULT,
 )
 from .coordinator import NarwalCoordinator
 from .entity import NarwalEntity
-from .narwal_client import NarwalState
-from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
+from .narwal_client.const import WorkingStatus
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -35,49 +33,10 @@ _LOGGER = logging.getLogger(__name__)
 # but PIL rendering is CPU-bound — no need to render every broadcast).
 _MIN_RENDER_INTERVAL = 2
 
-# Trail recording (used in both debug and normal modes)
-_TRAIL_MAX_POINTS = 50000  # full cleaning session worth
-_TRAIL_RECORD_INTERVAL = 3  # seconds between trail point recordings
-_TRAIL_MIN_GRID_DELTA = 0.25
-_TRAIL_NEW_SESSION_MAX_AGE = 60
-_TRAIL_INACTIVE_RESET_INTERVAL = 10 * 60
-_NATIVE_TRAJECTORY_FALLBACK_AFTER = 15
-_TRAIL_TERMINAL_STATUSES = frozenset(
-    {
-        WorkingStatus.DOCKED,
-        WorkingStatus.CHARGED,
-        WorkingStatus.DOCKED_V2,
-        WorkingStatus.TASK_COMPLETED,
-    }
-)
-
-# Debug view: blank canvas with robot dot + trail.
-# Set to False to use the real map renderer instead.
-_DEBUG_VIEW = False
-_DEBUG_CANVAS_SIZE = 600  # pixels
-_DEBUG_TRAIL_MAX = _TRAIL_MAX_POINTS
-_DEBUG_RECORD_INTERVAL = _TRAIL_RECORD_INTERVAL
-
-
-def _is_cleaning_for_trail(state: NarwalState) -> bool:
-    """Return true when robot motion should extend a cleaning trail."""
-    if state.working_status == WorkingStatus.REMAPPING:
-        return False
-    return (
-        state.working_status in ACTIVE_CLEANING_STATUSES
-        or state.has_recent_active_working_status
-        or state.is_charging_to_resume
-    )
-
-
-def _is_terminal_for_trail(state: NarwalState) -> bool:
-    """Return true when an inactive state means the clean session has ended."""
-    if getattr(state, "is_charging_to_resume", False):
-        return False
-    return (
-        state.working_status in _TRAIL_TERMINAL_STATUSES
-        or (state.working_status == WorkingStatus.STANDBY and state.is_docked)
-    )
+# Native trajectory points can repeat across display_map frames because field 2 is
+# the accumulated Narwal trajectory. Deduplicate tiny adjacent moves only.
+_NATIVE_TRAIL_MIN_GRID_DELTA = 0.25
+_NATIVE_TRAIL_MAX_POINTS = 50000
 
 
 async def async_setup_entry(
@@ -148,7 +107,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
         self._render_generation: int = 0
         self._render_task: asyncio.Task | None = None
         self._pending_render: tuple | None = None
-        self._remapping_seen: bool = False
         self._remapping_static_key: tuple | None = None
         # Cached base map (PIL Image) — only re-rendered when static map changes
         self._base_map_image = None  # PIL Image or None
@@ -159,13 +117,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
             MAP_OPTION_DEFAULTS[CONF_SHOW_FURNITURE_LABELS],
         )
         self._room_label_points: list[tuple[str, float, float]] = []
-        # Debug view state — full session trail with growing viewport
-        self._dock_pos: tuple[float, float] | None = None
-        self._vp_min_x: float = 0.0
-        self._vp_max_x: float = 0.0
-        self._vp_min_y: float = 0.0
-        self._vp_max_y: float = 0.0
-        self._vp_initialized: bool = False
 
     @staticmethod
     def _static_map_geometry_key(static_map) -> tuple:
@@ -214,11 +165,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
         return (*base_key, room_key, obstacle_key)
 
     @staticmethod
-    def _static_map_trail_key(static_map) -> tuple:
-        """Return the map identity used to decide if retained trail coordinates fit."""
-        return NarwalMapCamera._static_map_geometry_key(static_map)
-
-    @staticmethod
     def _cleaned_area_key(cleaned_area) -> tuple | None:
         """Return a compact render cache key for a native cleaned-area overlay."""
         if cleaned_area is None:
@@ -231,20 +177,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
             cleaned_area.origin_y,
             digest,
         )
-
-    @property
-    def _trail(self) -> list[tuple[float, float]]:
-        """Return the coordinator-owned trail so camera recreation keeps it."""
-        return self.coordinator.client.state.cleaning_trail
-
-    @property
-    def _last_trail_record(self) -> float:
-        """Return the timestamp of the last coordinator-owned trail point."""
-        return self.coordinator.client.state.last_cleaning_trail_record
-
-    @_last_trail_record.setter
-    def _last_trail_record(self, value: float) -> None:
-        self.coordinator.client.state.last_cleaning_trail_record = value
 
     def _map_option(self, key: str) -> bool:
         """Return a persisted map display option."""
@@ -298,59 +230,13 @@ class NarwalMapCamera(NarwalEntity, Camera):
 
     @property
     def extra_state_attributes(self) -> dict[str, str | int]:
-        """Expose compact render/trail stats for MJPEG refresh and diagnostics."""
+        """Expose compact render stats for MJPEG refresh and diagnostics."""
         state = self.coordinator.client.state
         display = state.map_display_data
         return {
             "render_count": self._render_count,
-            "trail_points": len(state.cleaning_trail),
-            "native_trajectory_points": len(state.native_trajectory),
-            "native_plan_points": len(state.native_plan_trajectory),
-            "display_trajectory_points": len(display.trajectory) if display else 0,
+            "native_trajectory_points": len(display.trajectory) if display else 0,
         }
-
-    def _reset_debug_trail(self) -> None:
-        """Clear trail and viewport for a new cleaning session."""
-        self.coordinator.client.state.reset_cleaning_trail()
-        self._dock_pos = None
-        self._vp_initialized = False
-
-    def _record_debug_position(self, x: float, y: float) -> None:
-        """Record a position and expand viewport bounds."""
-        now = time.monotonic()
-
-        if self._dock_pos is None:
-            self._dock_pos = (x, y)
-            self._trail.append((x, y))
-            self.coordinator.client.state.cleaning_trail_revision += 1
-            self._last_trail_record = now
-        elif (
-            now - self._last_trail_record >= _DEBUG_RECORD_INTERVAL
-            and len(self._trail) < _DEBUG_TRAIL_MAX
-        ):
-            self._trail.append((x, y))
-            self.coordinator.client.state.cleaning_trail_revision += 1
-            self._last_trail_record = now
-
-        if not self._vp_initialized:
-            self._vp_min_x = x
-            self._vp_max_x = x
-            self._vp_min_y = y
-            self._vp_max_y = y
-            self._vp_initialized = True
-        else:
-            if x < self._vp_min_x:
-                self._vp_min_x = x
-            if x > self._vp_max_x:
-                self._vp_max_x = x
-            if y < self._vp_min_y:
-                self._vp_min_y = y
-            if y > self._vp_max_y:
-                self._vp_max_y = y
-
-    def _reset_trail(self) -> None:
-        """Clear trail for a new cleaning session."""
-        self.coordinator.client.state.reset_cleaning_trail()
 
     def _clear_cached_map_image(self) -> None:
         """Drop cached map images after map identity becomes invalid."""
@@ -361,102 +247,9 @@ class NarwalMapCamera(NarwalEntity, Camera):
         self._pending_render = None
         self._render_generation += 1
 
-    def _sync_trail_session(self, state: NarwalState, is_cleaning: bool) -> None:
-        """Keep the shared trail across status flaps and reset on new sessions."""
-        now = time.monotonic()
-        if not is_cleaning:
-            if state.cleaning_trail_active:
-                state.cleaning_trail_inactive_since = now
-            state.cleaning_trail_active = False
-            if _is_terminal_for_trail(state):
-                if state.cleaning_trail_terminal_since <= 0:
-                    state.cleaning_trail_terminal_since = now
-            else:
-                state.cleaning_trail_terminal_since = 0.0
-            return
-
-        cleaning_time = max(state.cleaning_time, 0)
-        previous_time = state.cleaning_trail_last_cleaning_time
-        inactive_for = (
-            now - state.cleaning_trail_inactive_since
-            if state.cleaning_trail_inactive_since
-            else 0.0
-        )
-        should_reset = False
-        if state.cleaning_trail:
-            if previous_time > 0 and 0 < cleaning_time < previous_time:
-                should_reset = True
-            elif (
-                not state.cleaning_trail_active
-                and state.cleaning_trail_terminal_since > 0
-            ):
-                should_reset = True
-            elif (
-                not state.cleaning_trail_active
-                and 0 < cleaning_time <= _TRAIL_NEW_SESSION_MAX_AGE
-                and inactive_for >= _TRAIL_INACTIVE_RESET_INTERVAL
-            ):
-                should_reset = True
-            elif inactive_for >= _TRAIL_INACTIVE_RESET_INTERVAL:
-                should_reset = True
-
-        if should_reset:
-            _LOGGER.info("New cleaning session detected; clearing Narwal map trail")
-            self._reset_trail()
-
-        state.cleaning_trail_active = True
-        state.cleaning_trail_inactive_since = 0.0
-        state.cleaning_trail_terminal_since = 0.0
-        if cleaning_time > 0:
-            state.cleaning_trail_last_cleaning_time = cleaning_time
-
-    def _sync_trail_map(
-        self,
-        state: NarwalState,
-        static_key: tuple,
-        is_cleaning: bool,
-    ) -> None:
-        """Keep retained trails tied to the static map they were recorded on."""
-        if not state.cleaning_trail:
-            return
-
-        if self._clear_trail_if_remapping(state):
-            return
-
-        trail_map_key = state.cleaning_trail_map_key
-        if trail_map_key is None:
-            if is_cleaning:
-                state.cleaning_trail_map_key = static_key
-                return
-            _LOGGER.info("Dropping unkeyed retained Narwal map trail")
-            self._reset_trail()
-            return
-
-        if trail_map_key != static_key:
-            _LOGGER.info("Static map changed; clearing Narwal map trail")
-            self._reset_trail()
-
-    def _clear_trail_if_remapping(self, state: NarwalState) -> bool:
-        """Clear any retained cleaning trail when remapping starts."""
-        if state.working_status != WorkingStatus.REMAPPING:
-            self._remapping_seen = False
-            self._remapping_static_key = None
-            return False
-
-        clear_cache = not self._remapping_seen
-        self._remapping_seen = True
-        if state.cleaning_trail:
-            _LOGGER.info("Remapping started; clearing Narwal map trail")
-            self._reset_trail()
-            clear_cache = True
-
-        if clear_cache:
-            self._clear_cached_map_image()
-        return True
-
     def _defer_static_map_while_remapping(
         self,
-        state: NarwalState,
+        state,
         static_key: tuple,
     ) -> bool:
         """Return True while a remap is still reporting the previous static map."""
@@ -467,44 +260,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
             self._remapping_static_key = static_key
             return True
         return static_key == self._remapping_static_key
-
-    @staticmethod
-    def _trail_points_match(
-        left: tuple[float, float],
-        right: tuple[float, float],
-    ) -> bool:
-        """Return true when two grid trail points are effectively the same."""
-        return math.hypot(left[0] - right[0], left[1] - right[1]) <= _TRAIL_MIN_GRID_DELTA
-
-    def _native_trail_alignment(
-        self,
-        points: list[tuple[float, float]],
-    ) -> tuple[int, int | None]:
-        """Return the first new native point and any stale trail tail to prune."""
-        trail = self._trail
-        if not trail or not points:
-            return 0, None
-
-        max_overlap = min(len(trail), len(points))
-        prefix_overlap = 0
-        while (
-            prefix_overlap < max_overlap
-            and self._trail_points_match(
-                trail[prefix_overlap],
-                points[prefix_overlap],
-            )
-        ):
-            prefix_overlap += 1
-        if prefix_overlap >= 2:
-            return prefix_overlap, prefix_overlap
-
-        for overlap in range(max_overlap, 0, -1):
-            if all(
-                self._trail_points_match(trail[-overlap + index], points[index])
-                for index in range(overlap)
-            ):
-                return overlap, None
-        return 0, None
 
     @staticmethod
     def _native_trajectory_grid_points(
@@ -541,105 +296,22 @@ class NarwalMapCamera(NarwalEntity, Camera):
             if points and math.hypot(
                 point[0] - points[-1][0],
                 point[1] - points[-1][1],
-            ) < _TRAIL_MIN_GRID_DELTA:
+            ) < _NATIVE_TRAIL_MIN_GRID_DELTA:
                 continue
             points.append(point)
+            if len(points) >= _NATIVE_TRAIL_MAX_POINTS:
+                break
         return points
 
-    def _append_native_grid_segment(
-        self,
-        grid_points: list[tuple[float, float]],
-    ) -> bool:
-        """Append a native path segment, skipping points already present at the tail."""
-        if len(grid_points) < 2:
-            return False
-
-        if len(grid_points) > _TRAIL_MAX_POINTS:
-            grid_points = grid_points[-_TRAIL_MAX_POINTS:]
-
-        start = 0
-        trail = self._trail
-        overlap, stale_tail = self._native_trail_alignment(grid_points)
-        if stale_tail is not None:
-            del trail[stale_tail:]
-        start = overlap
-
-        to_append = grid_points[start:]
-        if not to_append:
-            return False
-
-        excess = len(trail) + len(to_append) - _TRAIL_MAX_POINTS
-        if excess > 0:
-            del trail[:excess]
-        trail.extend(to_append)
-        return True
-
-    def _record_native_plan_trajectory(
-        self,
-        state: NarwalState,
-        static_map,
-        trail_key: tuple,
-    ) -> bool:
-        """Record native Narwal trajectory points for this cleaning update."""
-        if not state.native_plan_trajectory:
-            return False
-        if state.native_plan_trajectory_updated <= state.native_plan_trajectory_recorded:
-            return False
-        now = time.monotonic()
-        if now - state.native_plan_trajectory_updated > _NATIVE_TRAJECTORY_FALLBACK_AFTER:
-            return False
-
-        grid_points = self._native_trajectory_grid_points(
-            state.native_plan_trajectory,
-            static_map,
-        )
-        if len(grid_points) < 2:
-            return False
-
-        changed = self._append_native_grid_segment(grid_points)
-        if changed:
-            state.cleaning_trail_revision += 1
-
-        state.native_plan_trajectory_recorded = state.native_plan_trajectory_updated
-        if state.cleaning_trail_map_key is None:
-            state.cleaning_trail_map_key = trail_key
-        if changed:
-            self._last_trail_record = state.native_plan_trajectory_updated
-            state.last_native_plan_movement = state.native_plan_trajectory_updated
-        return True
-
-    def _record_native_display_trajectory(
-        self,
-        state: NarwalState,
-        static_map,
-        trail_key: tuple,
-    ) -> bool:
-        """Record the native display-map trajectory tail for this cleaning update."""
-        if not state.native_trajectory:
-            return False
-        if state.native_trajectory_updated <= state.native_trajectory_recorded:
-            return False
-        now = time.monotonic()
-        if now - state.native_trajectory_updated > _NATIVE_TRAJECTORY_FALLBACK_AFTER:
-            return False
-
-        grid_points = self._native_trajectory_grid_points(
-            state.native_trajectory,
-            static_map,
-        )
-        if len(grid_points) < 2:
-            return False
-
-        changed = self._append_native_grid_segment(grid_points)
-        if changed:
-            state.cleaning_trail_revision += 1
-
-        state.native_trajectory_recorded = state.native_trajectory_updated
-        if state.cleaning_trail_map_key is None:
-            state.cleaning_trail_map_key = trail_key
-        if changed:
-            self._last_trail_record = state.native_trajectory_updated
-        return True
+    @staticmethod
+    def _trajectory_cache_key(
+        points: list[tuple[float, float]] | None,
+    ) -> tuple[int, int] | tuple[()]:
+        """Return a compact cache key for native trajectory changes."""
+        if not points:
+            return ()
+        rounded = tuple((round(x, 2), round(y, 2)) for x, y in points)
+        return (len(rounded), hash(rounded))
 
     @callback
     def _handle_coordinator_update(self) -> None:
@@ -647,76 +319,52 @@ class NarwalMapCamera(NarwalEntity, Camera):
         state = self.coordinator.client.state
         display = state.map_display_data
 
-        is_cleaning_for_trail = _is_cleaning_for_trail(state)
-        self._sync_trail_session(state, is_cleaning_for_trail)
-        self._clear_trail_if_remapping(state)
+        static_map = state.map_data
+        if not static_map or not static_map.compressed_map:
+            self.async_write_ha_state()
+            return
+        if static_map.width <= 0 or static_map.height <= 0:
+            self.async_write_ha_state()
+            return
 
-        if _DEBUG_VIEW:
-            if not display or (display.robot_x == 0.0 and display.robot_y == 0.0):
-                self.async_write_ha_state()
-                return
-            self._record_debug_position(display.robot_x, display.robot_y)
-            new_key = (display.robot_x, display.robot_y, display.robot_heading)
-        else:
-            static_map = state.map_data
-            if not static_map or not static_map.compressed_map:
-                self.async_write_ha_state()
-                return
-            if static_map.width <= 0 or static_map.height <= 0:
-                self.async_write_ha_state()
-                return
+        static_key = self._static_map_key(static_map)
+        if self._defer_static_map_while_remapping(state, static_key):
+            self._clear_cached_map_image()
+            self.async_write_ha_state()
+            return
 
-            static_key = self._static_map_key(static_map)
-            trail_key = self._static_map_trail_key(static_map)
-            self._sync_trail_map(state, trail_key, is_cleaning_for_trail)
-            if self._defer_static_map_while_remapping(state, static_key):
-                self.async_write_ha_state()
-                return
-
-            # Narwal-native path segments are the only trail source. Joining
-            # point-in-time robot positions muddies the route whenever it reports from
-            # discontinuous phases such as charge-to-resume.
-            if is_cleaning_for_trail:
-                recorded_native_trail = self._record_native_plan_trajectory(
-                    state,
-                    static_map,
-                    trail_key,
-                )
-                if not recorded_native_trail:
-                    self._record_native_display_trajectory(
-                        state,
-                        static_map,
-                        trail_key,
-                    )
-
-            trail_len = len(self._trail)
-            map_options_key = (
-                self._map_option(CONF_SHOW_ROOM_LABELS),
-                self._map_option(CONF_SHOW_FURNITURE),
-                self._map_option(CONF_SHOW_FURNITURE_LABELS),
+        native_trail: list[tuple[float, float]] | None = None
+        if display and display.trajectory:
+            native_trail = self._native_trajectory_grid_points(
+                display.trajectory,
+                static_map,
             )
-            view_options_key = (self._map_rotation(), self._map_zoom())
-            if display:
-                cleaned_area_key = self._cleaned_area_key(display.cleaned_area)
-                new_key = (
-                    static_key,
-                    map_options_key,
-                    view_options_key,
-                    display.robot_x,
-                    display.robot_y,
-                    display.robot_heading,
-                    trail_len,
-                    state.cleaning_trail_revision,
-                    cleaned_area_key,
-                )
-            else:
-                new_key = (static_key, map_options_key, view_options_key)
+
+        map_options_key = (
+            self._map_option(CONF_SHOW_ROOM_LABELS),
+            self._map_option(CONF_SHOW_FURNITURE),
+            self._map_option(CONF_SHOW_FURNITURE_LABELS),
+        )
+        view_options_key = (self._map_rotation(), self._map_zoom())
+        if display:
+            cleaned_area_key = self._cleaned_area_key(display.cleaned_area)
+            new_key = (
+                static_key,
+                map_options_key,
+                view_options_key,
+                display.robot_x,
+                display.robot_y,
+                display.robot_heading,
+                self._trajectory_cache_key(native_trail),
+                cleaned_area_key,
+            )
+        else:
+            new_key = (static_key, map_options_key, view_options_key)
 
         now = time.monotonic()
         since_render = now - self._last_render_time if self._last_render_time else 999
         options_changed = (
-            not _DEBUG_VIEW
-            and bool(self._cache_key)
+            bool(self._cache_key)
             and (
                 self._cache_key[1] != map_options_key
                 or self._cache_key[2] != view_options_key
@@ -735,18 +383,18 @@ class NarwalMapCamera(NarwalEntity, Camera):
             self.async_write_ha_state()
             return
 
-        self._schedule_render(display, new_key)
+        self._schedule_render(display, new_key, native_trail)
 
-    def _schedule_render(self, display, new_key) -> None:
+    def _schedule_render(self, display, new_key, native_trail) -> None:
         """Schedule one render and coalesce updates that arrive while it runs."""
         if self._render_task is not None and not self._render_task.done():
-            self._pending_render = (display, new_key)
+            self._pending_render = (display, new_key, native_trail)
             return
 
         self._render_generation += 1
         generation = self._render_generation
         task = self.hass.async_create_task(
-            self._async_render(display, new_key, generation)
+            self._async_render(display, new_key, generation, native_trail)
         )
         if task is not None:
             self._render_task = task
@@ -758,44 +406,12 @@ class NarwalMapCamera(NarwalEntity, Camera):
             self._render_task = None
         if self._pending_render is None:
             return
-        display, new_key = self._pending_render
+        display, new_key, native_trail = self._pending_render
         self._pending_render = None
-        self._schedule_render(display, new_key)
+        self._schedule_render(display, new_key, native_trail)
 
-    async def _async_render(self, display, new_key, generation: int) -> None:
+    async def _async_render(self, display, new_key, generation: int, native_trail) -> None:
         """Render the map image in an executor thread."""
-        if _DEBUG_VIEW and display:
-            trail = list(self._trail)
-            dock = self._dock_pos
-            viewport = None
-            if self._vp_initialized:
-                viewport = (
-                    self._vp_min_x, self._vp_min_y,
-                    self._vp_max_x, self._vp_max_y,
-                )
-            try:
-                png_bytes = await self.hass.async_add_executor_job(
-                    _render_debug_view,
-                    display.robot_x,
-                    display.robot_y,
-                    display.robot_heading,
-                    trail,
-                    dock,
-                    viewport,
-                )
-                if png_bytes:
-                    if generation != self._render_generation:
-                        return
-                    self._cached_image = png_bytes
-                    self._cache_key = new_key
-                    self._last_render_time = time.monotonic()
-                    self._render_count += 1
-            except Exception:
-                _LOGGER.exception("Failed to render debug view")
-            self.async_write_ha_state()
-            return
-
-        # --- Normal map render path (with cached base + overlay) ---
         state = self.coordinator.client.state
         static_map = state.map_data
         if not static_map:
@@ -897,9 +513,10 @@ class NarwalMapCamera(NarwalEntity, Camera):
                             dock_rid, dock_room = lookup_room_at_grid(
                                 static_map.compressed_map, static_map.width, static_map.height,
                                 int(static_map.dock_x), int(static_map.dock_y),
-                            )
+                        )
                         _LOGGER.debug(
-                            "POSITION DIAG: robot_raw=(%.2f, %.2f) robot_grid=(%.1f, %.1f) robot_room=%s(id=%d) "
+                            "POSITION DIAG: robot_raw=(%.2f, %.2f) "
+                            "robot_grid=(%.1f, %.1f) robot_room=%s(id=%d) "
                             "| dock_ref_raw=(%.2f, %.2f) dock_ref_grid=(%.1f, %.1f) "
                             "| static_dock_grid=(%.1f, %.1f) dock_room=%s(id=%d) "
                             "| res=%d origin=(%d, %d) map=%dx%d",
@@ -916,8 +533,6 @@ class NarwalMapCamera(NarwalEntity, Camera):
                     except Exception:
                         _LOGGER.debug("POSITION DIAG failed", exc_info=True)
 
-        # Draw the retained trail from Narwal's native navigation paths only.
-        trail = list(self._trail)
         cleaned_area = display.cleaned_area if display else None
 
         try:
@@ -928,7 +543,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 robot_x,
                 robot_y,
                 robot_heading,
-                trail,
+                native_trail,
                 self._map_rotation(),
                 self._map_zoom(),
                 self._room_label_points,
@@ -949,133 +564,3 @@ class NarwalMapCamera(NarwalEntity, Camera):
             _LOGGER.exception("Failed to render map overlay")
 
         self.async_write_ha_state()
-
-
-def _render_debug_view(
-    robot_x: float,
-    robot_y: float,
-    robot_heading: float,
-    trail: list[tuple[float, float]],
-    dock_pos: tuple[float, float] | None = None,
-    viewport: tuple[float, float, float, float] | None = None,
-) -> bytes:
-    """Render a blank canvas with full cleaning trail, dock marker, and robot dot."""
-    from PIL import Image, ImageDraw, ImageFont
-
-    size = _DEBUG_CANVAS_SIZE
-    img = Image.new("RGB", (size, size), (20, 20, 30))
-    draw = ImageDraw.Draw(img)
-
-    if viewport:
-        min_x, min_y, max_x, max_y = viewport
-    elif trail:
-        all_x = [p[0] for p in trail]
-        all_y = [p[1] for p in trail]
-        min_x, max_x = min(all_x), max(all_x)
-        min_y, max_y = min(all_y), max(all_y)
-    else:
-        min_x = robot_x - 250
-        max_x = robot_x + 250
-        min_y = robot_y - 250
-        max_y = robot_y + 250
-
-    padding = 100
-    range_x = max(max_x - min_x, 200) + padding * 2
-    range_y = max(max_y - min_y, 200) + padding * 2
-    center_x = (min_x + max_x) / 2
-    center_y = (min_y + max_y) / 2
-
-    margin = 50
-    usable = size - margin * 2
-    scale = usable / max(range_x, range_y)
-
-    def to_px(cx: float, cy: float) -> tuple[int, int]:
-        px = int((cx - center_x) * scale + size / 2)
-        py = int(-(cy - center_y) * scale + size / 2)
-        return px, py
-
-    grid_interval = 100
-    grid_start_x = int(center_x - range_x / 2)
-    grid_start_x = grid_start_x - (grid_start_x % grid_interval)
-    grid_start_y = int(center_y - range_y / 2)
-    grid_start_y = grid_start_y - (grid_start_y % grid_interval)
-
-    grid_color = (35, 35, 45)
-    for gx in range(grid_start_x, int(center_x + range_x / 2) + grid_interval, grid_interval):
-        px, _ = to_px(gx, 0)
-        if 0 <= px < size:
-            draw.line([(px, 0), (px, size)], fill=grid_color)
-    for gy in range(grid_start_y, int(center_y + range_y / 2) + grid_interval, grid_interval):
-        _, py = to_px(0, gy)
-        if 0 <= py < size:
-            draw.line([(0, py), (size, py)], fill=grid_color)
-
-    if trail:
-        n = len(trail)
-        if n > 3000:
-            step = max(n // 2000, 2)
-            bulk = trail[: n - 200 : step]
-            recent = trail[n - 200 :]
-            render_trail = bulk + recent
-        else:
-            render_trail = trail
-
-        recent_start = max(len(render_trail) - 200, 0)
-        for i in range(len(render_trail) - 1):
-            if i >= recent_start:
-                color = (30, 120, 255)
-            else:
-                color = (15, 60, 130)
-            x1, y1 = to_px(render_trail[i][0], render_trail[i][1])
-            x2, y2 = to_px(render_trail[i + 1][0], render_trail[i + 1][1])
-            draw.line([(x1, y1), (x2, y2)], fill=color, width=2)
-
-    try:
-        font = ImageFont.load_default()
-    except Exception:
-        font = None
-
-    if dock_pos:
-        dx, dy = to_px(dock_pos[0], dock_pos[1])
-        r = 8
-        draw.ellipse(
-            [dx - r, dy - r, dx + r, dy + r],
-            fill=(255, 140, 0),
-            outline=(255, 200, 100),
-        )
-        draw.text((dx + 12, dy - 6), "DOCK", fill=(255, 140, 0), font=font)
-
-    rx, ry = to_px(robot_x, robot_y)
-    dot_r = 7
-    draw.ellipse(
-        [rx - dot_r, ry - dot_r, rx + dot_r, ry + dot_r],
-        fill=(0, 255, 80),
-        outline=(150, 255, 180),
-    )
-
-    heading_rad = math.radians(robot_heading)
-    hx = rx + int(18 * math.cos(heading_rad))
-    hy = ry - int(18 * math.sin(heading_rad))
-    draw.line([(rx, ry), (hx, hy)], fill=(0, 255, 80), width=2)
-
-    text_color = (180, 180, 190)
-    dim_color = (100, 100, 120)
-    y_text = 5
-    draw.text((5, y_text), f"pos: ({robot_x:.1f}, {robot_y:.1f}) cm", fill=text_color, font=font)
-    y_text += 15
-    draw.text((5, y_text), f"trail: {len(trail)} pts", fill=dim_color, font=font)
-    y_text += 15
-    draw.text((5, y_text), f"heading: {robot_heading:.0f}", fill=dim_color, font=font)
-    y_text += 15
-    view_w = range_x / 100
-    view_h = range_y / 100
-    draw.text((5, y_text), f"view: {view_w:.1f}x{view_h:.1f}m", fill=dim_color, font=font)
-
-    ox, oy = to_px(0, 0)
-    if 0 <= ox < size and 0 <= oy < size:
-        draw.line([(ox - 8, oy), (ox + 8, oy)], fill=(80, 80, 80))
-        draw.line([(ox, oy - 8), (ox, oy + 8)], fill=(80, 80, 80))
-
-    buf = io.BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
