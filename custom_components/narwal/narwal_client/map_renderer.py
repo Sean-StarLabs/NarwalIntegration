@@ -25,6 +25,8 @@ _LOGGER = logging.getLogger(__name__)
 if TYPE_CHECKING:
     from PIL import Image, ImageDraw
 
+    from .models import CleanedAreaOverlay
+
 # Room color palette (RGB) — up to 22 rooms
 ROOM_COLORS: list[tuple[int, int, int]] = [
     (100, 149, 237),  # 1 - cornflower blue
@@ -125,6 +127,9 @@ TRAIL_RENDER_SIMPLIFY_GRID_DELTA = 2.0
 TRAIL_RENDER_MAX_SIMPLIFY_POINTS = 1000
 TRAIL_RENDER_SMOOTHING_PASSES = 2
 TRAIL_RENDER_DENOISE_WINDOW = 5
+CLEANED_AREA_FILL = (255, 255, 255, 78)
+TRAIL_LINE_FILL = (37, 99, 235, 170)
+TRAIL_RECENT_LINE_FILL = (14, 165, 233, 245)
 
 
 def _opaque(color: tuple[int, int, int]) -> tuple[int, int, int, int]:
@@ -1100,6 +1105,112 @@ def _max_grid_segment(map_width: float, map_height: int) -> float:
     )
 
 
+def _decompress_cleaned_area(compressed: bytes) -> bytes:
+    """Return cleaned-area payload bytes, tolerating uncompressed payloads."""
+    if not compressed:
+        return b""
+    for wbits in (47, 0, -15):
+        try:
+            return zlib.decompress(compressed, wbits)
+        except zlib.error:
+            continue
+    return compressed
+
+
+def _cleaned_area_pixels(cleaned_area: "CleanedAreaOverlay") -> list[int]:
+    """Decode a native cleaned-area bitmap into one value per bitmap pixel."""
+    expected = cleaned_area.width * cleaned_area.height
+    if expected <= 0 or not cleaned_area.compressed_map:
+        return []
+
+    data = _decompress_cleaned_area(cleaned_area.compressed_map)
+    pixels = _decode_packed_varints(data)
+    if len(pixels) < expected and len(data) >= expected:
+        pixels = list(data[:expected])
+    if len(pixels) < expected:
+        pixels.extend([0] * (expected - len(pixels)))
+    return pixels[:expected]
+
+
+def _cleaned_area_origin(
+    cleaned_area: "CleanedAreaOverlay",
+    map_width: float,
+    map_height: int,
+    robot_x: float | None,
+    robot_y: float | None,
+) -> tuple[float, float] | None:
+    """Return the map-grid origin for a native cleaned-area bitmap."""
+    if cleaned_area.origin_x is not None and cleaned_area.origin_y is not None:
+        return float(cleaned_area.origin_x), float(cleaned_area.origin_y)
+    if (
+        int(round(map_width)) == cleaned_area.width
+        and int(map_height) == cleaned_area.height
+    ):
+        return 0.0, 0.0
+    if robot_x is None or robot_y is None:
+        return None
+    if not math.isfinite(robot_x) or not math.isfinite(robot_y):
+        return None
+    return (
+        robot_x - (cleaned_area.width / 2.0),
+        robot_y - (cleaned_area.height / 2.0),
+    )
+
+
+def _draw_cleaned_area_overlay(
+    draw: "ImageDraw.ImageDraw",
+    cleaned_area: "CleanedAreaOverlay",
+    map_width: float,
+    map_height: int,
+    robot_x: float | None,
+    robot_y: float | None,
+    final_point,
+    scale: float,
+) -> None:
+    """Draw the robot's native cleaned-area bitmap over the static map."""
+    pixels = _cleaned_area_pixels(cleaned_area)
+    if not pixels:
+        return
+    origin = _cleaned_area_origin(
+        cleaned_area,
+        map_width,
+        map_height,
+        robot_x,
+        robot_y,
+    )
+    if origin is None:
+        return
+
+    origin_x, origin_y = origin
+    line_width = max(1, int(round(scale)))
+    for y in range(cleaned_area.height):
+        grid_y = origin_y + y
+        if grid_y < 0 or grid_y >= map_height:
+            continue
+        row = y * cleaned_area.width
+        run_start: int | None = None
+        for x in range(cleaned_area.width + 1):
+            cleaned = x < cleaned_area.width and pixels[row + x] != 0
+            if cleaned and run_start is None:
+                run_start = x
+                continue
+            if cleaned or run_start is None:
+                continue
+
+            start = max(run_start, int(math.ceil(-origin_x)))
+            end = min(x - 1, int(math.floor(map_width - 1 - origin_x)))
+            if start <= end:
+                start_point = final_point(origin_x + start, grid_y)
+                end_point = final_point(origin_x + end, grid_y)
+                if start_point is not None and end_point is not None:
+                    draw.line(
+                        [start_point, end_point],
+                        fill=CLEANED_AREA_FILL,
+                        width=line_width,
+                    )
+            run_start = None
+
+
 def render_overlay(
     base_img: "Image.Image",
     height: int,
@@ -1112,6 +1223,7 @@ def render_overlay(
     room_labels: list[tuple[str, float, float]] | None = None,
     dock_x: float | None = None,
     dock_y: float | None = None,
+    cleaned_area: "CleanedAreaOverlay | None" = None,
 ) -> bytes:
     """Draw robot position and trail on a copy of the cached base map.
 
@@ -1127,6 +1239,7 @@ def render_overlay(
         room_labels: Room label centre points in grid coordinates.
         dock_x: Dock X position in grid coordinates.
         dock_y: Dock Y position in grid coordinates.
+        cleaned_area: Native map/display_map cleaned-area bitmap.
 
     Returns:
         PNG bytes of the composited image.
@@ -1164,6 +1277,18 @@ def render_overlay(
         tx, ty = transformed
         return int(round(tx)), int(round(ty))
 
+    if cleaned_area is not None:
+        _draw_cleaned_area_overlay(
+            draw,
+            cleaned_area,
+            map_width,
+            height,
+            robot_x,
+            robot_y,
+            final_point,
+            scale,
+        )
+
     # Draw trail, splitting at invalid samples or impossible jumps.
     if trail and len(trail) >= 2:
         trail_segments = _trail_render_segments(
@@ -1183,7 +1308,7 @@ def render_overlay(
                 continue
             draw.line(
                 line,
-                fill=(215, 220, 225, 130),
+                fill=TRAIL_LINE_FILL,
                 width=trail_width,
                 joint="curve",
             )
@@ -1192,7 +1317,7 @@ def render_overlay(
             if len(recent_line) >= 2:
                 draw.line(
                     recent_line,
-                    fill=(255, 255, 255, 220),
+                    fill=TRAIL_RECENT_LINE_FILL,
                     width=trail_width,
                     joint="curve",
                 )

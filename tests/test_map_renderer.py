@@ -28,7 +28,7 @@ from narwal_client.map_renderer import (
     render_map_png,
     render_overlay,
 )
-from narwal_client.models import ObstacleInfo
+from narwal_client.models import CleanedAreaOverlay, ObstacleInfo
 
 
 def _make_compressed_grid(width: int, height: int, fill_value: int = 0) -> bytes:
@@ -178,6 +178,47 @@ class TestRenderOverlay:
 
         assert isinstance(result, bytes)
         assert result[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_with_native_cleaned_area(self) -> None:
+        """render_overlay draws native display_map cleaned-area pixels."""
+        from PIL import Image
+
+        base = self._make_base_image(width=100, height=100)
+        cleaned_area = CleanedAreaOverlay(
+            width=10,
+            height=10,
+            compressed_map=_make_compressed_grid(10, 10, fill_value=1),
+        )
+        without_overlay = Image.open(
+            io.BytesIO(
+                render_overlay(
+                    base,
+                    height=100,
+                    robot_x=50.0,
+                    robot_y=50.0,
+                )
+            )
+        ).convert("RGBA")
+
+        with_overlay = Image.open(
+            io.BytesIO(
+                render_overlay(
+                    base,
+                    height=100,
+                    robot_x=50.0,
+                    robot_y=50.0,
+                    cleaned_area=cleaned_area,
+                )
+            )
+        ).convert("RGBA")
+
+        changed_pixels = sum(
+            1
+            for x in range(with_overlay.width)
+            for y in range(with_overlay.height)
+            if with_overlay.getpixel((x, y)) != without_overlay.getpixel((x, y))
+        )
+        assert changed_pixels > 0
 
     def test_trail_rendering_skips_single_position_spike(self) -> None:
         """A one-sample position jump is omitted from the display trail."""

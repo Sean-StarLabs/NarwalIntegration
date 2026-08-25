@@ -22,6 +22,7 @@ from .const import (
     TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,
     TOPIC_CMD_GET_DRY_MOP_REMAIN_TIME,
     TOPIC_CMD_GET_ROBOT_TASK_STATUS,
+    TOPIC_POINT_NAVI_PLAN_TRAJ,
     TOPIC_ROBOT_TASK_STATUS,
     WorkingStatus,
 )
@@ -281,6 +282,73 @@ def _optional_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _packed_float32_values(value: Any) -> list[float]:
+    """Decode a protobuf packed fixed32/float stream."""
+    if isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+    elif isinstance(value, str):
+        raw = value.encode("latin-1", "ignore")
+    elif isinstance(value, list):
+        values = []
+        for item in value:
+            parsed = _to_float32(item)
+            if parsed is not None:
+                values.append(parsed)
+        return values
+    else:
+        return []
+
+    return [
+        struct.unpack_from("<f", raw, offset)[0]
+        for offset in range(0, len(raw) - len(raw) % 4, 4)
+    ]
+
+
+def _decode_accumulated_trajectory(
+    decoded: dict[str, Any],
+) -> list[tuple[float, float]]:
+    """Decode map/display_map field 2 into recent world-coordinate trail points."""
+    import math
+
+    raw = decoded.get("2")
+    if not isinstance(raw, dict):
+        return []
+    xs = _packed_float32_values(raw.get("1"))
+    ys = _packed_float32_values(raw.get("2"))
+    # The x/y streams are parallel fields. Filter after zipping so a single
+    # invalid float rejects that pair without shifting the two axes.
+    return [
+        (x, y)
+        for x, y in zip(xs, ys, strict=False)
+        if math.isfinite(x) and math.isfinite(y)
+    ]
+
+
+def _decode_point_navi_plan_trajectory(
+    decoded: dict[str, Any],
+) -> list[tuple[float, float]]:
+    """Decode status/point_navi_plan_traj repeated float32 point messages."""
+    import math
+
+    raw_points = decoded.get("1")
+    if isinstance(raw_points, dict):
+        raw_points = [raw_points]
+    if not isinstance(raw_points, list):
+        return []
+
+    points: list[tuple[float, float]] = []
+    for item in raw_points:
+        if not isinstance(item, dict):
+            continue
+        x = _to_float32(item.get("1"))
+        y = _to_float32(item.get("2"))
+        if x is None or y is None:
+            continue
+        if math.isfinite(x) and math.isfinite(y):
+            points.append((x, y))
+    return points
 
 
 _STATION_DRYING_TASK_ORDER = (
@@ -797,6 +865,17 @@ class MapData:
 
 
 @dataclass
+class CleanedAreaOverlay:
+    """Native cleaned-area bitmap from map/display_map field 7."""
+
+    width: int = 0
+    height: int = 0
+    compressed_map: bytes = b""
+    origin_x: int | None = None
+    origin_y: int | None = None
+
+
+@dataclass
 class MapDisplayData:
     """Real-time robot position from map/display_map broadcasts.
 
@@ -807,6 +886,7 @@ class MapDisplayData:
     Validated field layout (live capture 2026-02-28, 13 broadcasts):
       field 1.1: {1: x_cm, 2: y_cm} — robot position as float32 centimeters
       field 1.2: heading as float32 radians
+      field 2: recent trajectory tail {1: x_bytes, 2: y_bytes}
       field 5: dock/reference position (constant, same format)
       field 7: cleaned-area grid {1: width, 2: height, 3: compressed_bytes}
       field 10: timestamp in milliseconds since epoch
@@ -820,6 +900,8 @@ class MapDisplayData:
     # Dock/reference position from field 5 (same coordinate system as robot)
     dock_ref_x: float = 0.0
     dock_ref_y: float = 0.0
+    trajectory: list[tuple[float, float]] = field(default_factory=list)
+    cleaned_area: CleanedAreaOverlay | None = None
 
     def to_grid_coords(
         self, resolution: int, origin_x: int, origin_y: int,
@@ -872,6 +954,9 @@ class MapDisplayData:
                 if h_f is not None and math.isfinite(h_f):
                     result.robot_heading = math.degrees(h_f)
 
+        # Accumulated cleaning trajectory — field 2 packs parallel x/y float streams.
+        result.trajectory = _decode_accumulated_trajectory(decoded)
+
         # Dock/reference position — field 5 (same format as field 1)
         field5 = decoded.get("5", {})
         if isinstance(field5, dict):
@@ -883,6 +968,25 @@ class MapDisplayData:
                 dy = _to_float32(pos5.get("2"))
                 if dy is not None and math.isfinite(dy):
                     result.dock_ref_y = dy
+
+        field7 = decoded.get("7", {})
+        if isinstance(field7, dict):
+            compressed = field7.get("3", b"")
+            if isinstance(compressed, bytearray):
+                compressed = bytes(compressed)
+            elif isinstance(compressed, str):
+                compressed = compressed.encode("latin-1")
+            if isinstance(compressed, bytes):
+                width = _optional_int(field7.get("1")) or 0
+                height = _optional_int(field7.get("2")) or 0
+                if width > 0 and height > 0 and compressed:
+                    result.cleaned_area = CleanedAreaOverlay(
+                        width=width,
+                        height=height,
+                        compressed_map=compressed,
+                        origin_x=_optional_int(field7.get("4")),
+                        origin_y=_optional_int(field7.get("5")),
+                    )
 
         # Timestamp — field 10 (milliseconds since epoch)
         if "10" in decoded:
@@ -973,6 +1077,13 @@ class NarwalState:
     cleaning_trail_last_cleaning_time: int = 0
     cleaning_trail_inactive_since: float = 0.0
     cleaning_trail_terminal_since: float = 0.0
+    cleaning_trail_revision: int = 0
+    native_trajectory: list[tuple[float, float]] = field(default_factory=list)
+    native_trajectory_updated: float = 0.0
+    native_trajectory_recorded: float = 0.0
+    native_plan_trajectory: list[tuple[float, float]] = field(default_factory=list)
+    native_plan_trajectory_updated: float = 0.0
+    native_plan_trajectory_recorded: float = 0.0
 
     # Consumables / station / fault (base_status; present on dock and during cleaning)
     dust_bag_health: float = 0.0  # field 35 stationBagHealthScore (%)
@@ -1448,12 +1559,19 @@ class NarwalState:
     def reset_cleaning_trail(self) -> None:
         """Clear the in-memory map trail for a new cleaning session."""
         self.cleaning_trail.clear()
+        self.cleaning_trail_revision += 1
         self.cleaning_trail_map_key = None
         self.last_cleaning_trail_record = 0.0
         self.cleaning_trail_active = False
         self.cleaning_trail_last_cleaning_time = 0
         self.cleaning_trail_inactive_since = 0.0
         self.cleaning_trail_terminal_since = 0.0
+        self.native_trajectory.clear()
+        self.native_trajectory_updated = 0.0
+        self.native_trajectory_recorded = 0.0
+        self.native_plan_trajectory.clear()
+        self.native_plan_trajectory_updated = 0.0
+        self.native_plan_trajectory_recorded = 0.0
 
     def clear_drying_task(self) -> None:
         """Clear mop drying fields after the dock reports no remaining time."""
@@ -1945,7 +2063,12 @@ class NarwalState:
     def update_from_aux_status(self, topic: str, decoded: dict[str, Any]) -> None:
         """Store and parse auxiliary status/task payloads."""
         self.raw_aux_status[topic] = decoded
-        if topic in {
+        if topic == TOPIC_POINT_NAVI_PLAN_TRAJ:
+            points = _decode_point_navi_plan_trajectory(decoded)
+            if points:
+                self.native_plan_trajectory = points
+                self.native_plan_trajectory_updated = time.monotonic()
+        elif topic in {
             TOPIC_ROBOT_TASK_STATUS,
             TOPIC_CMD_GET_ROBOT_TASK_STATUS,
             TOPIC_CMD_GET_CLEAN_PROGRESS_INFO,

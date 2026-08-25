@@ -256,6 +256,234 @@ def test_record_trail_position_uses_capped_jump_threshold() -> None:
     assert state.cleaning_trail == [(10.0, 10.0), (90.0, 10.0)]
 
 
+def test_record_native_plan_trajectory_consumes_each_batch_once() -> None:
+    """Native Narwal plan batches drive the rendered trail when present."""
+    state = NarwalState()
+    state.native_plan_trajectory = [(1.5, 2.0), (2.0, 2.5)]
+    state.native_plan_trajectory_updated = 12.0
+    static_map = MapData(
+        width=100,
+        height=100,
+        resolution=50,
+        origin_x=2,
+        origin_y=4,
+    )
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0)]
+    assert state.cleaning_trail_map_key == ("map",)
+    assert state.last_cleaning_trail_record == 20.0
+    assert state.native_plan_trajectory_recorded == 12.0
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=21.0):
+        assert not camera._record_native_plan_trajectory(state, static_map, ("map",))
+    assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0)]
+
+
+def test_record_native_plan_trajectory_rejects_unusable_batch_without_blocking_fallback() -> None:
+    """Out-of-map native batches do not mark native trajectory as consumed."""
+    state = NarwalState()
+    state.native_plan_trajectory = [(100.0, 100.0)]
+    state.native_plan_trajectory_updated = 12.0
+    static_map = MapData(width=10, height=10, resolution=50, origin_x=0, origin_y=0)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert not camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == []
+    assert state.native_plan_trajectory_recorded == 0.0
+
+
+def test_record_native_plan_trajectory_rejects_single_point_batch() -> None:
+    """One native point cannot draw a trail and must not block fallback sampling."""
+    state = NarwalState()
+    state.native_plan_trajectory = [(1.5, 2.0)]
+    state.native_plan_trajectory_updated = 12.0
+    static_map = MapData(width=100, height=100, resolution=50, origin_x=2, origin_y=4)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert not camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == []
+    assert state.native_plan_trajectory_recorded == 0.0
+
+
+def test_record_native_plan_trajectory_rejects_stale_batch() -> None:
+    """Old native batches from a previous session do not suppress fallback."""
+    state = NarwalState()
+    state.native_plan_trajectory = [(1.5, 2.0), (2.0, 2.5)]
+    state.native_plan_trajectory_updated = 12.0
+    static_map = MapData(width=100, height=100, resolution=50, origin_x=2, origin_y=4)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=28.0):
+        assert not camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == []
+    assert state.native_plan_trajectory_recorded == 0.0
+
+
+def test_record_native_plan_trajectory_deduplicates_repeated_full_route_frames() -> None:
+    """Repeated native full-route frames should not draw the same path again."""
+    state = NarwalState()
+    static_map = MapData(width=100, height=100, resolution=50, origin_x=2, origin_y=4)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    state.native_plan_trajectory = [(1.5, 2.0), (2.0, 2.5)]
+    state.native_plan_trajectory_updated = 12.0
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    state.native_plan_trajectory = [(1.5, 2.0), (2.0, 2.5)]
+    state.native_plan_trajectory_updated = 22.0
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=23.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    state.native_plan_trajectory = [(1.5, 2.0), (2.0, 2.5), (2.5, 3.0)]
+    state.native_plan_trajectory_updated = 30.0
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=40.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0), (3.0, 2.0)]
+    assert state.native_plan_trajectory_recorded == 30.0
+
+
+def test_record_native_plan_trajectory_aligns_after_filtering_native_points() -> None:
+    """Native full routes are aligned against the points that will be retained."""
+    state = NarwalState()
+    static_map = MapData(width=100, height=100, resolution=50, origin_x=2, origin_y=4)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    state.native_plan_trajectory = [(1.5, 2.0), (1.55, 2.05), (2.0, 2.5)]
+    state.native_plan_trajectory_updated = 12.0
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0)]
+
+    state.native_plan_trajectory = [
+        (1.5, 2.0),
+        (1.55, 2.05),
+        (2.0, 2.5),
+        (2.5, 3.0),
+    ]
+    state.native_plan_trajectory_updated = 30.0
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=40.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0), (3.0, 2.0)]
+    assert state.native_plan_trajectory_recorded == 30.0
+
+
+def test_record_native_plan_trajectory_replaces_stale_sampled_tail() -> None:
+    """Native full-route frames replace sampled fallback points after the route prefix."""
+    state = NarwalState()
+    static_map = MapData(width=100, height=100, resolution=50, origin_x=2, origin_y=4)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    state.native_plan_trajectory = [(1.5, 2.0), (2.0, 2.5)]
+    state.native_plan_trajectory_updated = 12.0
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    state.cleaning_trail.append((30.0, 30.0))
+    state.native_plan_trajectory = [(1.5, 2.0), (2.0, 2.5), (2.5, 3.0)]
+    state.native_plan_trajectory_updated = 30.0
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=40.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0), (3.0, 2.0)]
+    assert state.native_plan_trajectory_recorded == 30.0
+
+
+def test_record_native_plan_trajectory_appends_to_unrelated_sampled_trail() -> None:
+    """Native plan segments are retained separately from unrelated sampled breadcrumbs."""
+    state = NarwalState()
+    state.cleaning_trail = [(30.0, 30.0), (31.0, 30.0)]
+    state.native_plan_trajectory = [(1.5, 2.0), (2.0, 2.5)]
+    state.native_plan_trajectory_updated = 12.0
+    static_map = MapData(width=100, height=100, resolution=50, origin_x=2, origin_y=4)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert camera._record_native_plan_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == [(30.0, 30.0), (31.0, 30.0), (1.0, 0.0), (2.0, 1.0)]
+    assert state.cleaning_trail_map_key == ("map",)
+    assert state.last_cleaning_trail_record == 20.0
+
+
+def test_record_native_display_trajectory_records_display_tail() -> None:
+    """Display-map trajectory tails are retained when point_navi is unavailable."""
+    state = NarwalState()
+    state.native_trajectory = [(1.5, 2.0), (2.0, 2.5)]
+    state.native_trajectory_updated = 12.0
+    static_map = MapData(width=100, height=100, resolution=50, origin_x=2, origin_y=4)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert camera._record_native_display_trajectory(state, static_map, ("map",))
+
+    assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0)]
+    assert state.cleaning_trail_map_key == ("map",)
+    assert state.last_cleaning_trail_record == 20.0
+    assert state.native_trajectory_recorded == 12.0
+
+
+def test_record_native_display_trajectory_rejects_single_point_batch() -> None:
+    """A display-map tail must be drawable before it suppresses sampling."""
+    state = NarwalState()
+    state.native_trajectory = [(1.5, 2.0)]
+    state.native_trajectory_updated = 12.0
+    static_map = MapData(width=100, height=100, resolution=50, origin_x=2, origin_y=4)
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=20.0):
+        assert not camera._record_native_display_trajectory(
+            state,
+            static_map,
+            ("map",),
+        )
+
+    assert state.cleaning_trail == []
+    assert state.native_trajectory_recorded == 0.0
+
+
+def test_has_recent_native_plan_trajectory_expires_for_sampled_fallback() -> None:
+    """Sampled display position fallback resumes when native frames stop arriving."""
+    state = NarwalState()
+    state.native_plan_trajectory_recorded = 100.0
+
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=110.0):
+        assert NarwalMapCamera._has_recent_native_plan_trajectory(state)
+    with patch("custom_components.narwal.camera.time.monotonic", return_value=116.0):
+        assert not NarwalMapCamera._has_recent_native_plan_trajectory(state)
+
+
 def test_static_map_key_distinguishes_content_with_same_timestamp() -> None:
     """Different floor data with the same created_at must rebuild the base image."""
     first = MapData(map_id=1, created_at=0, width=2, height=2, compressed_map=b"\x01")

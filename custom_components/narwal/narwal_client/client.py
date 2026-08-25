@@ -6,7 +6,7 @@ import asyncio
 import logging
 import random
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,6 +46,7 @@ from .const import (
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_RECALL,
+    TOPIC_CMD_RESET_CONSUMABLE_INFO,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_MOP_HUMIDITY,
@@ -112,6 +113,7 @@ _TOPICLESS_ACK_TOPICS = {
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_PLAN_START,
     TOPIC_CMD_RECALL,
+    TOPIC_CMD_RESET_CONSUMABLE_INFO,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_LED,
@@ -259,6 +261,13 @@ class NarwalClient:
         """Build the full topic path."""
         return f"{self.topic_prefix}/{self.device_id}/{short_topic}"
 
+    def _update_topic_prefix_from_topic(self, topic: str, source: str) -> None:
+        """Preserve the product-key prefix from a robot response topic."""
+        parts = topic.split("/")
+        if len(parts) >= 2 and parts[0] == "" and parts[1]:
+            self.topic_prefix = f"/{parts[1]}"
+            _LOGGER.info("Topic prefix from %s: %s", source, self.topic_prefix)
+
     def _response_queue_for(self, short_topic: str) -> asyncio.Queue[_QueuedResponse]:
         """Return the field5 response queue for one command topic."""
         if short_topic not in self._response_queues:
@@ -290,6 +299,33 @@ class NarwalClient:
             return False
         response_topic = msg.short_topic.strip("/")
         return not response_topic or response_topic == "response"
+
+    @staticmethod
+    def _looks_like_map_response(decoded: Mapping[str, Any]) -> bool:
+        """Return True for a topicless field5 payload shaped like get_map data."""
+        payload = decoded.get("2")
+        if not isinstance(payload, Mapping):
+            return False
+        return "1" in payload and any(key in payload for key in ("4", "5", "12", "17"))
+
+    def _topicless_data_response_matches(
+        self,
+        msg: NarwalMessage,
+        short_topic: str,
+    ) -> bool:
+        """Return True when a topicless data frame safely matches a pending query."""
+        if (
+            not self._is_topicless_field5_response(msg)
+            or self._topicless_ack_is_quarantined(msg)
+        ):
+            return False
+        if short_topic != TOPIC_CMD_GET_MAP:
+            return False
+        try:
+            decoded = self._decode_protobuf(msg.payload)
+        except Exception:
+            return False
+        return self._looks_like_map_response(decoded)
 
     def _topicless_ack_is_quarantined(self, msg: NarwalMessage) -> bool:
         """Return True when a late optional ACK should be discarded."""
@@ -359,8 +395,11 @@ class NarwalClient:
             )
             return None
         pending = self._pending_response_topic
-        if pending is not None and self._field5_response_matches(msg, pending):
-            return pending
+        if pending is not None:
+            if self._field5_response_matches(
+                msg, pending
+            ) or self._topicless_data_response_matches(msg, pending):
+                return pending
         response_topic = msg.short_topic.strip("/")
         if not response_topic or response_topic == "response":
             return None
@@ -525,6 +564,7 @@ class NarwalClient:
                     else:
                         raw_id = str(raw_id).strip()
                     if raw_id:
+                        self._update_topic_prefix_from_topic(msg.topic, "response")
                         self.device_id = raw_id
                         _LOGGER.info("Discovered device_id from response: %s", self.device_id)
                         return self.device_id
@@ -537,9 +577,7 @@ class NarwalClient:
                 # Topic format: /{product_key}/{device_id}/{category}/{type}
                 if len(parts) >= 4 and parts[2]:
                     # Extract product_key from topic to set correct prefix
-                    if parts[1]:
-                        self.topic_prefix = f"/{parts[1]}"
-                        _LOGGER.info("Topic prefix from broadcast: %s", self.topic_prefix)
+                    self._update_topic_prefix_from_topic(msg.topic, "broadcast")
                     self.device_id = parts[2]
                     _LOGGER.info("Discovered device_id from broadcast: %s", self.device_id)
                     return self.device_id
@@ -708,6 +746,9 @@ class NarwalClient:
         elif short_topic == "map/display_map":
             self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
             self._last_display_map_time = time.monotonic()
+            if self.state.map_display_data.trajectory:
+                self.state.native_trajectory = self.state.map_display_data.trajectory
+                self.state.native_trajectory_updated = self._last_display_map_time
             _LOGGER.debug(
                 "display_map received: robot=(%.2f, %.2f) ts=%d",
                 self.state.map_display_data.robot_x,
@@ -767,6 +808,36 @@ class NarwalClient:
     def _encode_string_field(cls, field_num: int, text: str) -> bytes:
         """Encode a protobuf string field."""
         return cls._encode_bytes_field(field_num, text.encode("utf-8"))
+
+    @classmethod
+    def _encode_packed_varint_field(cls, field_num: int, values: Iterable[int]) -> bytes:
+        """Encode a packed repeated varint field."""
+        data = b"".join(cls._encode_varint(value) for value in values)
+        return cls._encode_bytes_field(field_num, data)
+
+    @classmethod
+    def _build_reset_consumable_info_payload(
+        cls,
+        *,
+        maintain_items: Iterable[int] = (),
+        replace_items: Iterable[int] = (),
+    ) -> bytes:
+        """Build a ConsumableInfoPayload for reset_consumable_info.
+
+        get_consumable_info returns field 1 as a ConsumableInfoPayload whose
+        fields 1/2 are packed maintain/replace enum lists. The app's reset
+        topic appears to use the same payload shape when clearing individual
+        alerts; an empty payload is kept as a fallback for firmwares that only
+        support resetting the whole consumable-info alert list.
+        """
+        maintain = tuple(int(item) for item in maintain_items)
+        replace = tuple(int(item) for item in replace_items)
+        inner = b""
+        if maintain:
+            inner += cls._encode_packed_varint_field(1, maintain)
+        if replace:
+            inner += cls._encode_packed_varint_field(2, replace)
+        return cls._encode_bytes_field(1, inner) if inner else b""
 
     # All broadcast topics the robot can send — used for active_robot_publish
     _ALL_BROADCAST_TOPICS = [
@@ -1252,7 +1323,9 @@ class NarwalClient:
                         short_topic,
                     )
                     continue
-                if self._field5_response_matches(msg, short_topic):
+                if self._field5_response_matches(
+                    msg, short_topic
+                ) or self._topicless_data_response_matches(msg, short_topic):
                     return msg
                 _LOGGER.debug(
                     "Ignoring field5 response for %s while waiting for %s",
@@ -1638,7 +1711,12 @@ class NarwalClient:
 
         map_data = self.state.map_data
         if not map_data or not map_data.map_id:
-            map_data = await self.get_map()
+            try:
+                map_data = await self.get_map()
+            except (NarwalCommandError, NarwalConnectionError) as err:
+                _LOGGER.debug("start_rooms: map query failed before wake: %s", err)
+                await self.wake(timeout=10.0, force=True)
+                map_data = await self.get_map()
         map_id = map_data.map_id if map_data else 0
         if not map_id:
             _LOGGER.warning(
@@ -1918,6 +1996,50 @@ class NarwalClient:
                 resp.result_code,
             )
         return resp
+
+    async def reset_consumable_info(
+        self,
+        *,
+        maintain_items: Iterable[int] = (),
+        replace_items: Iterable[int] = (),
+    ) -> CommandResponse:
+        """Clear robot-reported consumable maintenance/replacement alerts."""
+        maintain = tuple(int(item) for item in maintain_items)
+        replace = tuple(int(item) for item in replace_items)
+        payload = self._build_reset_consumable_info_payload(
+            maintain_items=maintain,
+            replace_items=replace,
+        )
+        response = await self.send_command(
+            TOPIC_CMD_RESET_CONSUMABLE_INFO,
+            payload,
+            timeout=15.0,
+        )
+        refresh_response: CommandResponse | None = None
+        if response.success:
+            refresh_response = await self.get_consumable_info()
+
+        refresh_verified = refresh_response is None or refresh_response.success
+        target_still_reported = (
+            refresh_verified
+            and bool(
+                set(maintain).intersection(self.state.maintain_items)
+                or set(replace).intersection(self.state.replace_items)
+            )
+        )
+        if payload and target_still_reported:
+            _LOGGER.debug(
+                "Consumable reset target still reported after targeted clear: "
+                "maintain=%s replace=%s",
+                maintain,
+                replace,
+            )
+            return CommandResponse(
+                result_code=CommandResult.NOT_APPLICABLE,
+                data=response.data,
+                raw_payload=response.raw_payload,
+            )
+        return response
 
     async def get_clean_progress_info(self) -> CommandResponse:
         """Query active clean progress information."""
