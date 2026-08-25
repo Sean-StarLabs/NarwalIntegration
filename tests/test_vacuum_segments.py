@@ -201,6 +201,26 @@ class TestVacuumActivity:
         assert vac.extra_state_attributes["task_status"] == "cleaning"
         assert vac.extra_state_attributes["status_summary"] == "Cleaning"
 
+    def test_stale_dock_status_with_off_dock_signal_is_not_docked(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2})
+        vac = _make_vacuum(state=state)
+
+        assert not state.is_docked
+        assert vac.activity == VacuumActivity.IDLE
+        assert vac.extra_state_attributes["task_status"] == "unknown"
+
+    def test_native_plan_off_dock_stale_dock_status_reports_cleaning(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2})
+        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
+        state.native_plan_trajectory_updated = time.monotonic()
+        vac = _make_vacuum(state=state)
+
+        assert state.is_cleaning
+        assert vac.activity == VacuumActivity.CLEANING
+        assert vac.extra_state_attributes["task_status"] == "cleaning"
+
     def test_active_clean_details_remain_visible(self) -> None:
         state = _active_clean_state()
         state.task_progress_percent = 72

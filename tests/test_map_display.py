@@ -192,6 +192,7 @@ class TestMapDisplayDataFromBroadcast:
         assert state.native_plan_trajectory[0] == (2.3245835304260254, -85.6556167602539)
         assert state.native_plan_trajectory[1] == (-0.5378435850143433, -85.65567016601562)
         assert state.native_plan_trajectory_updated > 0
+        assert state.last_native_plan_movement == state.native_plan_trajectory_updated
 
     def test_empty_broadcast(self) -> None:
         """Empty broadcast returns default values."""

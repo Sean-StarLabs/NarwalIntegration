@@ -1224,6 +1224,16 @@ class NarwalState:
         return self.latest_cleaning_movement_time > 0
 
     @property
+    def has_recent_native_plan_activity(self) -> bool:
+        """True when a fresh native route plan places the robot in an active task."""
+        return (
+            len(self.native_plan_trajectory) >= _ACTIVE_TRAIL_MOVEMENT_MIN_POINTS
+            and self.native_plan_trajectory_updated > 0
+            and time.monotonic() - self.native_plan_trajectory_updated
+            <= _ACTIVE_TRAIL_MOVEMENT_TTL
+        )
+
+    @property
     def has_resumed_cleaning_motion(self) -> bool:
         """True when retained task context is now backed by live route movement."""
         movement_time = self.latest_cleaning_movement_time
@@ -1246,6 +1256,14 @@ class NarwalState:
             return True
         if self.has_recent_active_working_status:
             return not self.is_paused and not self.is_returning
+        if (
+            self.has_recent_native_plan_activity
+            and self.has_explicit_off_dock_signal
+            and not self.is_paused
+            and not self.is_returning_to_dock
+            and self.working_status != WorkingStatus.TASK_COMPLETED
+        ):
+            return True
         if self.is_docked:
             return False
         return (
@@ -2224,8 +2242,11 @@ class NarwalState:
         if topic == TOPIC_POINT_NAVI_PLAN_TRAJ:
             points = _decode_point_navi_plan_trajectory(decoded)
             if points:
+                updated = time.monotonic()
+                if points != self.native_plan_trajectory:
+                    self.last_native_plan_movement = updated
                 self.native_plan_trajectory = points
-                self.native_plan_trajectory_updated = time.monotonic()
+                self.native_plan_trajectory_updated = updated
         elif topic in {
             TOPIC_ROBOT_TASK_STATUS,
             TOPIC_CMD_GET_ROBOT_TASK_STATUS,
