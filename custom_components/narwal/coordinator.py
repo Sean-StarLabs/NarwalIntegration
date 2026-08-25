@@ -67,6 +67,8 @@ DOCK_TASK_KEY_BY_RAW_TASK = {
     "dry_dock_bag": "dry_dock_bag",
 }
 SCOPED_STOP_DOCK_TASK_KEYS = frozenset({"dry_dock_bag"})
+ROBOT_START_COMPATIBLE_DOCK_TASK_KEYS = frozenset({"dry_dock_bag"})
+KNOWN_STATION_ACTIVITY_VALUES = frozenset({0, 1, 2, 3, 4})
 
 
 @dataclass
@@ -171,6 +173,22 @@ def can_edit_pending_clean_settings(state: NarwalState | None) -> bool:
     return not is_clean_session_context(state)
 
 
+def has_robot_start_blocking_dock_task(state: NarwalState | None) -> bool:
+    """Return True when a dock task should block starting a robot clean."""
+    if state is None or not state.is_station_active:
+        return False
+    try:
+        station_activity = int(getattr(state, "station_activity", 0) or 0)
+    except (TypeError, ValueError):
+        return True
+    if station_activity not in KNOWN_STATION_ACTIVITY_VALUES:
+        return True
+    keys = set(dock_task_keys(state))
+    if not keys:
+        return True
+    return not keys <= ROBOT_START_COMPATIBLE_DOCK_TASK_KEYS
+
+
 def can_start_cleaning(state: NarwalState | None) -> bool:
     """Return True when a new robot clean command can be sent now."""
     if has_blocking_error(state):
@@ -178,7 +196,7 @@ def can_start_cleaning(state: NarwalState | None) -> bool:
     return (
         state.is_docked
         and can_edit_pending_clean_settings(state)
-        and not _state_attr_is_true(state, "is_station_active")
+        and not has_robot_start_blocking_dock_task(state)
     )
 
 
