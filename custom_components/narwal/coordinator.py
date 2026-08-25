@@ -196,9 +196,11 @@ def can_pause_cleaning(state: NarwalState | None) -> bool:
 
 
 def can_resume_cleaning(state: NarwalState | None) -> bool:
-    """Return True when a paused robot clean can be resumed."""
+    """Return True when an interrupted robot clean can be resumed."""
     if has_blocking_error(state):
         return False
+    if _state_attr_is_true(state, "is_charging_to_resume"):
+        return not _state_attr_is_true(state, "is_station_active")
     return (
         (
             state.working_status in (*ACTIVE_CLEANING_STATUSES, WorkingStatus.REMAPPING)

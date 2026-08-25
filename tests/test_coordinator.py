@@ -164,6 +164,29 @@ def test_paused_standby_task_context_blocks_new_actions() -> None:
     assert not can_start_dock_task(state)
 
 
+def test_charging_to_resume_exposes_resume_when_station_idle() -> None:
+    """A recharge pause can be resumed with the normal vacuum start action."""
+    state = NarwalState()
+    state.task_progress_percent = 40
+    state.battery_level = 23
+
+    assert state.is_charging_to_resume
+    assert can_resume_cleaning(state)
+    assert not can_start_cleaning(state)
+
+
+def test_charging_to_resume_does_not_resume_during_dock_task() -> None:
+    """Do not expose robot resume while the dock is running a separate task."""
+    state = NarwalState()
+    state.task_progress_percent = 40
+    state.battery_level = 23
+    state.station_activity = 2
+
+    assert state.is_charging_to_resume
+    assert state.is_station_active
+    assert not can_resume_cleaning(state)
+
+
 def test_station_phase_cleaning_can_still_be_stopped() -> None:
     """A dock-side phase can belong to the active clean, so stop must stay exposed."""
     state = NarwalState(working_status=WorkingStatus.CLEANING)
