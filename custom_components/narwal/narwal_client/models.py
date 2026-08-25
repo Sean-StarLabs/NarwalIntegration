@@ -33,6 +33,7 @@ _ACTIVE_TRAIL_MOVEMENT_MIN_POINTS = 2
 _DOCK_DRYING_STATUS_TTL = 45.0
 _DRYING_EMPTY_SUPPRESSION_TTL = 120.0
 _ASSUMED_DOCK_DRYING_TASK_TTL = 6 * 60 * 60
+_LOW_BATTERY_FORCE_END_REASON = 4
 
 
 @dataclass
@@ -1541,15 +1542,27 @@ class NarwalState:
     def has_completed_task_context(self) -> bool:
         """True when retained task details describe a finished clean."""
         return (
-            self.task_progress_percent is not None
-            and self.task_progress_percent >= 100
-            and self.task_remaining_time <= 0
+            (
+                self.task_progress_percent is not None
+                and self.task_progress_percent >= 100
+                and self.task_remaining_time <= 0
+            )
+            or self.has_terminal_task_result
         )
 
     @property
     def has_unfinished_charge_resume_context(self) -> bool:
         """True when retained task state can still describe a suspended clean."""
         return self.has_charge_resume_context and not self.has_completed_task_context
+
+    @property
+    def has_terminal_task_result(self) -> bool:
+        """True when the robot reports the retained clean was explicitly ended."""
+        return (
+            self.terminate_reason > 0
+            and self.terminate_reason != _LOW_BATTERY_FORCE_END_REASON
+            and self.working_status not in ACTIVE_CLEANING_STATUSES
+        )
 
     @property
     def is_charging_to_resume(self) -> bool:
