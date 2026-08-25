@@ -2273,7 +2273,6 @@ class NarwalState:
                     self.last_native_plan_movement = updated
                     if (
                         self.has_explicit_off_dock_signal
-                        and not self.is_paused
                         and not self.is_returning_to_dock
                         and self.working_status != WorkingStatus.TASK_COMPLETED
                     ):
