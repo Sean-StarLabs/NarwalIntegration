@@ -1898,6 +1898,7 @@ class NarwalState:
             if self.working_status != WorkingStatus.CUSTOM_CLEANING:
                 self.working_status = WorkingStatus.CLEANING
             self.last_active_working_status_time = time.monotonic()
+            self.terminate_reason = 0
             self.is_paused = False
             self.is_returning_to_dock = False
             self.dock_sub_state = 0
@@ -2247,6 +2248,13 @@ class NarwalState:
                 updated = time.monotonic()
                 if points != self.native_plan_trajectory:
                     self.last_native_plan_movement = updated
+                    if (
+                        self.has_explicit_off_dock_signal
+                        and not self.is_paused
+                        and not self.is_returning_to_dock
+                        and self.working_status != WorkingStatus.TASK_COMPLETED
+                    ):
+                        self.terminate_reason = 0
                 self.native_plan_trajectory = points
                 self.native_plan_trajectory_updated = updated
         elif topic in {
