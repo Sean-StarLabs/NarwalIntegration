@@ -86,6 +86,34 @@ class TestNarwalClientInit:
         assert client.state.is_docked
 
     @pytest.mark.asyncio
+    async def test_display_map_pose_change_marks_robot_movement(self) -> None:
+        """Only changed display-map robot pose proves active map movement."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        frame = build_frame(client._full_topic("map/display_map"), b"payload")
+        first_pose = {"1": {"1": {"1": 1.0, "2": 1.0}}}
+        moved_pose = {"1": {"1": {"1": 1.2, "2": 1.0}}}
+
+        with (
+            patch.object(
+                client,
+                "_decode_protobuf",
+                side_effect=[first_pose, first_pose, moved_pose],
+            ),
+            patch(
+                "narwal_client.client.time.monotonic",
+                side_effect=[10.0, 10.0, 20.0, 20.0, 30.0, 30.0],
+            ),
+        ):
+            await client._handle_message(frame)
+            assert client.state.last_map_robot_movement == 0.0
+
+            await client._handle_message(frame)
+            assert client.state.last_map_robot_movement == 0.0
+
+            await client._handle_message(frame)
+            assert client.state.last_map_robot_movement == 30.0
+
+    @pytest.mark.asyncio
     async def test_commands_require_connection(self) -> None:
         client = NarwalClient("10.0.0.1")
         with pytest.raises(NarwalConnectionError):

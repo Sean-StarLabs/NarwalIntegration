@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import time
 from collections.abc import Callable, Iterable, Mapping
@@ -139,6 +140,39 @@ _DOCK_TASK_FORCE_END_PAYLOADS = {
     # with ParallelTaskType.DRY_STATION_BAG to stop dock-bag drying.
     "dry_dock_bag": b"\x08\x01",
 }
+_DISPLAY_MAP_MOVE_DELTA = 0.05
+
+
+def _display_map_robot_moved(
+    previous: MapDisplayData | None,
+    current: MapDisplayData,
+) -> bool:
+    """Return true when display-map robot pose changed enough to prove movement."""
+    if previous is None:
+        return False
+    if (
+        (previous.robot_x == 0.0 and previous.robot_y == 0.0)
+        or (current.robot_x == 0.0 and current.robot_y == 0.0)
+    ):
+        return False
+    if not all(
+        math.isfinite(value)
+        for value in (
+            previous.robot_x,
+            previous.robot_y,
+            current.robot_x,
+            current.robot_y,
+        )
+    ):
+        return False
+    return (
+        math.hypot(
+            current.robot_x - previous.robot_x,
+            current.robot_y - previous.robot_y,
+        )
+        >= _DISPLAY_MAP_MOVE_DELTA
+    )
+
 
 @dataclass
 class RoomCleanSettings:
@@ -744,8 +778,11 @@ class NarwalClient:
         elif short_topic == "status/download_status":
             self.state.update_from_download_status(decoded)
         elif short_topic == "map/display_map":
-            self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
             self._last_display_map_time = time.monotonic()
+            display = MapDisplayData.from_broadcast(decoded)
+            if _display_map_robot_moved(self.state.map_display_data, display):
+                self.state.last_map_robot_movement = self._last_display_map_time
+            self.state.map_display_data = display
             if self.state.map_display_data.trajectory:
                 self.state.native_trajectory = self.state.map_display_data.trajectory
                 self.state.native_trajectory_updated = self._last_display_map_time

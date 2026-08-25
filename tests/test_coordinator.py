@@ -201,7 +201,7 @@ def test_station_phase_cleaning_can_still_be_stopped() -> None:
 
 
 def test_dock_maintenance_does_not_block_next_clean_setup() -> None:
-    """A dock-side task should not hide start-time clean controls."""
+    """A dock-side task should not hide setup, but should block starting."""
     state = NarwalState()
     state.working_status = WorkingStatus.DOCKED
     state.dry_mop_remaining_time = 1_800
@@ -211,7 +211,7 @@ def test_dock_maintenance_does_not_block_next_clean_setup() -> None:
     assert state.is_docked
     assert state.is_station_active
     assert can_edit_pending_clean_settings(state)
-    assert can_start_cleaning(state)
+    assert not can_start_cleaning(state)
 
 
 def test_return_home_available_when_idle_off_dock() -> None:

@@ -3,6 +3,8 @@
 from __future__ import annotations
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
@@ -276,7 +278,8 @@ def test_record_native_plan_trajectory_consumes_each_batch_once() -> None:
 
     assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0)]
     assert state.cleaning_trail_map_key == ("map",)
-    assert state.last_cleaning_trail_record == 20.0
+    assert state.last_cleaning_trail_record == 12.0
+    assert state.last_native_plan_movement == 12.0
     assert state.native_plan_trajectory_recorded == 12.0
     with patch("custom_components.narwal.camera.time.monotonic", return_value=21.0):
         assert not camera._record_native_plan_trajectory(state, static_map, ("map",))
@@ -429,7 +432,8 @@ def test_record_native_plan_trajectory_appends_to_unrelated_trail() -> None:
 
     assert state.cleaning_trail == [(30.0, 30.0), (31.0, 30.0), (1.0, 0.0), (2.0, 1.0)]
     assert state.cleaning_trail_map_key == ("map",)
-    assert state.last_cleaning_trail_record == 20.0
+    assert state.last_cleaning_trail_record == 12.0
+    assert state.last_native_plan_movement == 12.0
 
 
 def test_record_native_display_trajectory_records_display_tail() -> None:
@@ -447,7 +451,7 @@ def test_record_native_display_trajectory_records_display_tail() -> None:
 
     assert state.cleaning_trail == [(1.0, 0.0), (2.0, 1.0)]
     assert state.cleaning_trail_map_key == ("map",)
-    assert state.last_cleaning_trail_record == 20.0
+    assert state.last_cleaning_trail_record == 12.0
     assert state.native_trajectory_recorded == 12.0
 
 
@@ -573,3 +577,54 @@ def test_schedule_render_coalesces_when_render_already_running() -> None:
 
     assert camera._pending_render == ("display", ("new",))
     running.done.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+async def test_render_overlay_receives_trail_snapshot() -> None:
+    """Executor rendering should not receive the live mutable trail list."""
+    state = NarwalState()
+    state.cleaning_trail = [(1.0, 1.0), (2.0, 2.0)]
+    static_map = MapData(
+        width=10,
+        height=10,
+        resolution=50,
+        origin_x=0,
+        origin_y=0,
+        compressed_map=b"\x01",
+    )
+    state.map_data = static_map
+    camera = object.__new__(NarwalMapCamera)
+    camera.coordinator = MagicMock()
+    camera.coordinator.client.state = state
+    camera.hass = MagicMock()
+    camera._base_map_image = object()
+    camera._base_map_key = NarwalMapCamera._static_map_key(static_map)
+    camera._base_map_options_key = (False, False, False)
+    camera._room_label_points = []
+    camera._render_generation = 1
+    camera._cached_image = None
+    camera._cache_key = ()
+    camera._last_render_time = 0.0
+    camera._render_count = 0
+    camera._map_option = lambda _key: False
+    camera._map_rotation = lambda: 0
+    camera._map_zoom = lambda: 1.0
+    camera.async_write_ha_state = MagicMock()
+    display = MagicMock()
+    display.to_grid_coords.return_value = (3.0, 4.0)
+    display.robot_heading = 90.0
+    display.cleaned_area = None
+    captured = {}
+
+    async def async_add_executor_job(_func, *args):
+        captured["trail"] = args[5]
+        state.cleaning_trail.append((99.0, 99.0))
+        return b"png"
+
+    camera.hass.async_add_executor_job = async_add_executor_job
+
+    await camera._async_render(display, ("render-key",), 1)
+
+    assert captured["trail"] == [(1.0, 1.0), (2.0, 2.0)]
+    assert captured["trail"] is not state.cleaning_trail
+    assert state.cleaning_trail[-1] == (99.0, 99.0)

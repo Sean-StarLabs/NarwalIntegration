@@ -28,6 +28,8 @@ from .const import (
 )
 
 _ACTIVE_WORKING_STATUS_TTL = 15.0
+_ACTIVE_TRAIL_MOVEMENT_TTL = 120.0
+_ACTIVE_TRAIL_MOVEMENT_MIN_POINTS = 2
 _DOCK_DRYING_STATUS_TTL = 45.0
 _DRYING_EMPTY_SUPPRESSION_TTL = 120.0
 _ASSUMED_DOCK_DRYING_TASK_TTL = 6 * 60 * 60
@@ -1073,6 +1075,9 @@ class NarwalState:
     cleaning_trail: list[tuple[float, float]] = field(default_factory=list)
     cleaning_trail_map_key: tuple | None = None
     last_cleaning_trail_record: float = 0.0
+    last_map_robot_movement: float = 0.0
+    last_native_plan_movement: float = 0.0
+    last_confirmed_dock_time: float = 0.0
     cleaning_trail_active: bool = False
     cleaning_trail_last_cleaning_time: int = 0
     cleaning_trail_inactive_since: float = 0.0
@@ -1196,8 +1201,48 @@ class NarwalState:
         )
 
     @property
+    def latest_cleaning_movement_time(self) -> float:
+        """Return the newest fresh map-movement timestamp."""
+        now = time.monotonic()
+        latest = 0.0
+        if (
+            self.last_map_robot_movement > 0
+            and now - self.last_map_robot_movement <= _ACTIVE_TRAIL_MOVEMENT_TTL
+        ):
+            latest = max(latest, self.last_map_robot_movement)
+        if (
+            self.last_native_plan_movement > 0
+            and now - self.last_native_plan_movement <= _ACTIVE_TRAIL_MOVEMENT_TTL
+        ):
+            latest = max(latest, self.last_native_plan_movement)
+        return latest
+
+    @property
+    def has_recent_cleaning_trail_movement(self) -> bool:
+        """True when native map trails show recent robot movement."""
+        return self.latest_cleaning_movement_time > 0
+
+    @property
+    def has_resumed_cleaning_motion(self) -> bool:
+        """True when retained task context is now backed by live route movement."""
+        movement_time = self.latest_cleaning_movement_time
+        return (
+            self.has_unfinished_charge_resume_context
+            and movement_time > 0
+            and (
+                self.last_confirmed_dock_time <= 0
+                or movement_time > self.last_confirmed_dock_time
+            )
+            and not self.is_paused
+            and not self.is_returning_to_dock
+            and self.working_status != WorkingStatus.TASK_COMPLETED
+        )
+
+    @property
     def is_cleaning(self) -> bool:
         """True when actively cleaning (not paused, not returning to dock)."""
+        if self.has_resumed_cleaning_motion:
+            return True
         if self.has_recent_active_working_status:
             return not self.is_paused and not self.is_returning
         if self.is_docked:
@@ -1224,6 +1269,8 @@ class NarwalState:
         cleaning is not active, since the robot can report unmapped states
         (e.g. self-test) while physically docked.
         """
+        if self.has_resumed_cleaning_motion:
+            return False
         if self.has_explicit_off_dock_signal:
             return False
         if self.working_status == WorkingStatus.REMAPPING:
@@ -1321,6 +1368,8 @@ class NarwalState:
     @property
     def is_station_active(self) -> bool:
         """True when the base station is running a dock-side task."""
+        if self.has_resumed_cleaning_motion:
+            return False
         if self.has_explicit_off_dock_signal and not self.has_dock_presence_signal:
             return False
         if (
@@ -1456,6 +1505,25 @@ class NarwalState:
         )
 
     @property
+    def battery_recently_decreasing(self) -> bool:
+        """True when the reported battery has recently fallen."""
+        return (
+            not self.battery_level_increasing
+            and self.last_battery_change_time > 0
+            and time.monotonic() - self.last_battery_change_time <= 600
+        )
+
+    @property
+    def battery_recently_decreasing_without_dock_evidence(self) -> bool:
+        """True when a falling battery sample is not followed by dock evidence."""
+        return (
+            self.battery_recently_decreasing
+            and not self.has_dock_presence_signal
+            and self.dock_activity <= 0
+            and self.station_activity <= 0
+        )
+
+    @property
     def has_charge_resume_context(self) -> bool:
         """True when retained task state still describes an unfinished clean."""
         return (
@@ -1470,14 +1538,34 @@ class NarwalState:
         )
 
     @property
+    def has_completed_task_context(self) -> bool:
+        """True when retained task details describe a finished clean."""
+        return (
+            self.task_progress_percent is not None
+            and self.task_progress_percent >= 100
+            and self.task_remaining_time <= 0
+        )
+
+    @property
+    def has_unfinished_charge_resume_context(self) -> bool:
+        """True when retained task state can still describe a suspended clean."""
+        return self.has_charge_resume_context and not self.has_completed_task_context
+
+    @property
     def is_charging_to_resume(self) -> bool:
         """True when an active clean appears to be docked charging before resume."""
         return (
-            self.has_charge_resume_context
+            self.has_unfinished_charge_resume_context
+            and not self.has_resumed_cleaning_motion
+            and not self.battery_recently_decreasing_without_dock_evidence
             and (
                 (self.has_dock_presence_signal or self.is_station_active)
                 or self.battery_recently_increasing
-                or self.battery_level <= 30
+                or (
+                    self.battery_level <= 30
+                    and not self.has_off_dock_signal
+                    and not self.has_explicit_off_dock_signal
+                )
             )
             and 0 < self.battery_level < 80
             and not self.is_paused
@@ -1582,6 +1670,9 @@ class NarwalState:
         self.cleaning_trail_revision += 1
         self.cleaning_trail_map_key = None
         self.last_cleaning_trail_record = 0.0
+        self.last_map_robot_movement = 0.0
+        self.last_native_plan_movement = 0.0
+        self.last_confirmed_dock_time = 0.0
         self.cleaning_trail_active = False
         self.cleaning_trail_last_cleaning_time = 0
         self.cleaning_trail_inactive_since = 0.0
@@ -1852,6 +1943,7 @@ class NarwalState:
             raw_station_activity = _optional_int(field3.get("18")) or 0
             retain_charge_resume_context = (
                 had_charge_resume_context
+                and not self.has_completed_task_context
                 and 0 < incoming_battery_level < 80
                 and (
                     incoming_battery_level <= 30
@@ -1922,6 +2014,17 @@ class NarwalState:
                     self.dock_field11 = 1
                 if "47" not in decoded:
                     self.dock_field47 = 2
+                self.last_confirmed_dock_time = 0.0
+            elif (
+                self.working_status
+                in (
+                    WorkingStatus.DOCKED,
+                    WorkingStatus.CHARGED,
+                    WorkingStatus.DOCKED_V2,
+                )
+                and self.has_dock_presence_signal
+            ):
+                self.last_confirmed_dock_time = time.monotonic()
             if (
                 self.working_status == WorkingStatus.TASK_COMPLETED
                 and self.has_dock_presence_signal

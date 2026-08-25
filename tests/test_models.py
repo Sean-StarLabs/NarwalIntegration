@@ -356,13 +356,29 @@ class TestNarwalState:
         assert not state.has_recent_active_working_status
         assert not state.is_cleaning
 
-    def test_active_clean_with_low_battery_can_be_charging_to_resume(self) -> None:
-        """A very-low active task can be a resume-charge even without dock fields."""
+    def test_active_clean_with_low_battery_stays_cleaning_without_dock_evidence(self) -> None:
+        """Low battery alone should not override active/off-dock cleaning state."""
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(20.0)})
 
-        assert state.is_charging_to_resume
+        assert state.has_off_dock_signal
+        assert not state.is_charging_to_resume
+        assert state.is_cleaning
         assert not state.is_docked
+
+    def test_explicit_off_dock_low_battery_is_not_charging_to_resume(self) -> None:
+        """Low battery alone is not enough when fresh fields place robot off-dock."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status(
+            {"3": {"1": 4, "3": 2}, "2": _float_to_uint32(20.0), "11": 1, "47": 2}
+        )
+
+        assert state.has_explicit_off_dock_signal
+        assert state.has_charge_resume_context
+        assert not state.is_charging_to_resume
+        assert state.is_cleaning
 
     def test_active_clean_with_rising_battery_and_dock_signal_is_charging_to_resume(
         self,
@@ -462,7 +478,168 @@ class TestNarwalState:
         state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(84.0)})
 
         assert not state.battery_recently_increasing
+        assert state.battery_recently_decreasing
         assert not state.is_charging_to_resume
+
+    def test_low_battery_resumed_clean_is_not_charging_to_resume(self) -> None:
+        """A resumed low-battery clean should not stay labelled as charging."""
+        state = NarwalState()
+        state.task_progress_percent = 47
+        state.current_room_id = 4
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(13.0)})
+        state.update_from_base_status({"3": {"1": 4}, "2": _float_to_uint32(12.0)})
+
+        assert state.has_charge_resume_context
+        assert state.battery_recently_decreasing
+        assert not state.is_charging_to_resume
+
+    def test_recent_native_plan_movement_beats_stale_station_overlay(self) -> None:
+        """Fresh native planned-route movement wins over stale dock/station fields."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.battery_level = 10
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.station_activity = 2
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        state.last_native_plan_movement = 100.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=110.0):
+            assert state.has_dock_presence_signal
+            assert state.has_recent_cleaning_trail_movement
+            assert state.has_resumed_cleaning_motion
+            assert state.is_cleaning
+            assert not state.is_station_active
+            assert not state.is_docked
+            assert not state.is_charging_to_resume
+
+    def test_recent_display_map_pose_movement_beats_stale_station_overlay(self) -> None:
+        """Fresh robot pose movement wins even before the camera records a trail."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.battery_level = 10
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.station_activity = 2
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        state.last_map_robot_movement = 100.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=110.0):
+            assert state.has_dock_presence_signal
+            assert state.has_recent_cleaning_trail_movement
+            assert state.has_resumed_cleaning_motion
+            assert state.is_cleaning
+            assert not state.is_station_active
+            assert not state.is_docked
+            assert not state.is_charging_to_resume
+
+    def test_confirmed_dock_after_map_movement_beats_resumed_motion(self) -> None:
+        """A newer confirmed dock transition wins over prior map movement."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.battery_level = 10
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        state.last_map_robot_movement = 100.0
+        state.last_confirmed_dock_time = 110.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=111.0):
+            assert state.has_recent_cleaning_trail_movement
+            assert not state.has_resumed_cleaning_motion
+            assert state.is_docked
+            assert state.is_charging_to_resume
+
+    def test_native_trail_after_confirmed_dock_beats_stale_dock_state(self) -> None:
+        """A native route recorded after dock telemetry proves resumed cleaning."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.battery_level = 10
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        state.last_confirmed_dock_time = 100.0
+        state.last_native_plan_movement = 110.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=111.0):
+            assert state.latest_cleaning_movement_time == 110.0
+            assert state.has_resumed_cleaning_motion
+            assert state.is_cleaning
+            assert not state.is_docked
+            assert not state.is_charging_to_resume
+
+    def test_stale_native_trail_keeps_station_overlay(self) -> None:
+        """Old route points should not hide a real dock-side phase."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.battery_level = 10
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.station_activity = 2
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        state.last_native_plan_movement = 100.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=230.0):
+            assert not state.has_recent_cleaning_trail_movement
+            assert not state.has_resumed_cleaning_motion
+            assert state.is_station_active
+            assert state.is_charging_to_resume
+
+    def test_display_trail_without_pose_or_plan_movement_keeps_station_overlay(self) -> None:
+        """A visual display-map path alone should not prove off-dock movement."""
+        state = NarwalState()
+        state.working_status = WorkingStatus.CHARGED
+        state.battery_level = 10
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.station_activity = 2
+        state.dock_field11 = 3
+        state.dock_field47 = 1
+        state.cleaning_trail = [(float(index), 0.0) for index in range(30)]
+        state.last_cleaning_trail_record = 110.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=111.0):
+            assert not state.has_recent_cleaning_trail_movement
+            assert not state.has_resumed_cleaning_motion
+            assert state.is_station_active
+            assert state.is_charging_to_resume
+
+    def test_docked_charge_after_falling_battery_is_charging_to_resume(self) -> None:
+        """A falling off-dock sample should not block a later confirmed dock charge."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status(
+            {"3": {"1": 4, "3": 2}, "2": _float_to_uint32(31.0), "11": 1, "47": 2}
+        )
+        state.update_from_base_status(
+            {"3": {"1": 14}, "2": _float_to_uint32(30.0), "11": 3, "47": 1}
+        )
+
+        assert state.battery_recently_decreasing
+        assert not state.battery_recently_decreasing_without_dock_evidence
+        assert state.has_dock_presence_signal
+        assert state.is_charging_to_resume
+
+    def test_completed_low_battery_dock_is_not_charging_to_resume(self) -> None:
+        """Completed retained task details must not block new clean setup."""
+        state = NarwalState()
+        state.task_progress_percent = 100
+        state.current_room_id = 4
+        state.update_from_base_status(
+            {"3": {"1": 14}, "2": _float_to_uint32(26.0), "11": 3, "47": 1}
+        )
+
+        assert not state.has_completed_task_context
+        assert not state.has_charge_resume_context
+        assert not state.has_unfinished_charge_resume_context
+        assert not state.is_charging_to_resume
+        assert state.is_docked
 
     def test_active_clean_with_high_rising_battery_is_not_charging_to_resume(self) -> None:
         """A high battery should not be treated as a mid-task recharge."""

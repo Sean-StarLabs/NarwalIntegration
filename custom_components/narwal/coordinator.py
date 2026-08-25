@@ -172,7 +172,11 @@ def can_start_cleaning(state: NarwalState | None) -> bool:
     """Return True when a new robot clean command can be sent now."""
     if has_blocking_error(state):
         return False
-    return state.is_docked and can_edit_pending_clean_settings(state)
+    return (
+        state.is_docked
+        and can_edit_pending_clean_settings(state)
+        and not _state_attr_is_true(state, "is_station_active")
+    )
 
 
 def is_setup_available(state: NarwalState | None) -> bool:

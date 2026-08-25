@@ -604,7 +604,8 @@ class NarwalMapCamera(NarwalEntity, Camera):
         if state.cleaning_trail_map_key is None:
             state.cleaning_trail_map_key = trail_key
         if changed:
-            self._last_trail_record = now
+            self._last_trail_record = state.native_plan_trajectory_updated
+            state.last_native_plan_movement = state.native_plan_trajectory_updated
         return True
 
     def _record_native_display_trajectory(
@@ -637,7 +638,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
         if state.cleaning_trail_map_key is None:
             state.cleaning_trail_map_key = trail_key
         if changed:
-            self._last_trail_record = now
+            self._last_trail_record = state.native_trajectory_updated
         return True
 
     @callback
@@ -916,7 +917,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
                         _LOGGER.debug("POSITION DIAG failed", exc_info=True)
 
         # Draw the retained trail from Narwal's native navigation paths only.
-        trail = self._trail
+        trail = list(self._trail)
         cleaned_area = display.cleaned_area if display else None
 
         try:
