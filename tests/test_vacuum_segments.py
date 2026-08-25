@@ -84,11 +84,18 @@ class TestVacuumActivity:
         state.last_battery_change_time = time.monotonic()
         state.dock_field11 = 3
         state.dock_field47 = 1
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+        state.task_progress_percent = 32
         vac = _make_vacuum(state=state)
 
         assert state.is_charging_to_resume
         assert vac.activity == VacuumActivity.CLEANING
         assert vac.extra_state_attributes["task_status"] == "charging_to_resume"
+        assert (
+            vac.extra_state_attributes["status_summary"]
+            == "Charging to resume - Kitchen - 32%"
+        )
         assert vac.extra_state_attributes["docked"] is True
 
     def test_paused_returning_task_reports_paused_activity(self) -> None:
@@ -192,6 +199,7 @@ class TestVacuumActivity:
         assert not state.is_station_active
         assert vac.activity == VacuumActivity.CLEANING
         assert vac.extra_state_attributes["task_status"] == "cleaning"
+        assert vac.extra_state_attributes["status_summary"] == "Cleaning"
 
     def test_active_clean_details_remain_visible(self) -> None:
         state = _active_clean_state()
@@ -209,6 +217,7 @@ class TestVacuumActivity:
         assert attrs["remaining_time"] == 300
         assert attrs["current_room_id"] == 4
         assert attrs["current_room"] == "Kitchen"
+        assert attrs["status_summary"] == "Cleaning - Kitchen - 72%"
         assert attrs["active_room_ids"] == [4]
         assert attrs["cleaning_area"] == 12.5
         assert attrs["cleaning_time"] == 900

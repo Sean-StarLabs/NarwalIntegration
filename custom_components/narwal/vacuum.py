@@ -111,6 +111,11 @@ def _task_status(state: Any) -> str:
     return "unknown"
 
 
+def _task_status_label(task_status: str) -> str:
+    """Return a human-readable task-status label for dashboard state content."""
+    return task_status.replace("_", " ").capitalize()
+
+
 def _is_dock_side(state: Any) -> bool:
     """Return true when the robot or dock is doing dock-side work."""
     return state.is_docked or state.is_charging_to_resume or state.is_station_active
@@ -118,7 +123,11 @@ def _is_dock_side(state: Any) -> bool:
 
 def _has_active_cleaning_metrics(state: Any) -> bool:
     """Return true while live clean-progress details are current."""
-    return state.is_cleaning or state.has_recent_active_working_status
+    return (
+        state.is_cleaning
+        or state.has_recent_active_working_status
+        or state.is_charging_to_resume
+    )
 
 
 def _has_active_room_plan(state: Any) -> bool:
@@ -140,6 +149,20 @@ def _charging_state(state: Any) -> str:
     if state.battery_level >= 100:
         return "fully_charged"
     return "charging"
+
+
+def _status_summary(
+    state: Any,
+    task_status: str,
+    active_cleaning_metrics: bool,
+) -> str:
+    """Return compact dashboard text for the current vacuum task."""
+    parts = [_task_status_label(task_status)]
+    if active_cleaning_metrics and state.current_room_name:
+        parts.append(state.current_room_name)
+    if active_cleaning_metrics and state.task_progress_percent is not None:
+        parts.append(f"{state.task_progress_percent}%")
+    return " - ".join(parts)
 
 
 def _room_names_by_id(state: Any) -> dict[int, str]:
@@ -248,8 +271,15 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if state is None:
             return None
 
+        task_status = _task_status(state)
+        active_cleaning_metrics = _has_active_cleaning_metrics(state)
         attributes: dict[str, Any] = {
-            "task_status": _task_status(state),
+            "task_status": task_status,
+            "status_summary": _status_summary(
+                state,
+                task_status,
+                active_cleaning_metrics,
+            ),
             "busy": is_narwal_task_busy(state),
             "setup_available": is_setup_available(state),
             "working_status": state.working_status.name.lower(),
@@ -264,7 +294,6 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 {"id": room_id, "name": name}
                 for room_id, name in sorted(room_names.items(), key=lambda item: item[1].lower())
             ]
-        active_cleaning_metrics = _has_active_cleaning_metrics(state)
         active_room_plan = _has_active_room_plan(state)
         if active_cleaning_metrics and state.current_room_id is not None:
             attributes["current_room_id"] = state.current_room_id
