@@ -33,6 +33,8 @@ from custom_components.narwal.coordinator import (
     can_stop_cleaning,
     can_stop_dock_task,
     is_live_clean_setting_available,
+    is_narwal_task_busy,
+    is_setup_available,
 )  # noqa: E402
 from custom_components.narwal.narwal_client import (  # noqa: E402
     FanLevel,
@@ -173,6 +175,24 @@ def test_charging_to_resume_exposes_resume_when_station_idle() -> None:
     assert state.is_charging_to_resume
     assert can_resume_cleaning(state)
     assert not can_start_cleaning(state)
+
+
+def test_native_plan_cleaning_context_controls_robot_session() -> None:
+    """Native route-plan inferred cleaning must drive command availability."""
+    state = NarwalState()
+    state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2})
+    state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
+    state.native_plan_trajectory_updated = time.monotonic()
+
+    assert state.is_cleaning
+    assert is_narwal_task_busy(state)
+    assert can_pause_cleaning(state)
+    assert can_stop_cleaning(state)
+    assert is_live_clean_setting_available(state)
+    assert not can_edit_pending_clean_settings(state)
+    assert not is_setup_available(state)
+    assert not can_start_cleaning(state)
+    assert not can_start_dock_task(state)
 
 
 def test_charging_to_resume_does_not_resume_during_dock_task() -> None:

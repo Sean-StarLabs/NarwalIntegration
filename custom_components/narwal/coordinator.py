@@ -106,7 +106,8 @@ def is_active_clean_session(state: NarwalState | None) -> bool:
     if state is None:
         return False
     return (
-        state.working_status in ACTIVE_CLEANING_STATUSES
+        _state_attr_is_true(state, "is_cleaning")
+        or state.working_status in ACTIVE_CLEANING_STATUSES
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
     ) and not _state_attr_is_true(state, "is_returning")
@@ -117,7 +118,8 @@ def is_clean_session_context(state: NarwalState | None) -> bool:
     if state is None:
         return False
     return (
-        state.working_status in ACTIVE_CLEANING_STATUSES
+        _state_attr_is_true(state, "is_cleaning")
+        or state.working_status in ACTIVE_CLEANING_STATUSES
         or state.working_status == WorkingStatus.REMAPPING
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
@@ -151,7 +153,8 @@ def is_narwal_task_busy(state: NarwalState | None) -> bool:
     if state is None:
         return False
     return (
-        state.working_status in ACTIVE_CLEANING_STATUSES
+        _state_attr_is_true(state, "is_cleaning")
+        or state.working_status in ACTIVE_CLEANING_STATUSES
         or state.working_status == WorkingStatus.REMAPPING
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
