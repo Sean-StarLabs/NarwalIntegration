@@ -2155,6 +2155,11 @@ class NarwalState:
                     self.terminal_task_result = 0
                     self.stale_terminate_reason = 0
                 elif not (
+                    # Field 15 is not session-scoped. During a retained
+                    # charge-resume checkpoint, an unchanged value matching the
+                    # value observed before this active session is treated as
+                    # stale so it does not make the clean look explicitly
+                    # stopped.
                     retain_charge_resume_context
                     and terminate_reason == self.stale_terminate_reason
                 ):
