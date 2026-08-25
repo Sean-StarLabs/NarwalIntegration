@@ -1438,7 +1438,11 @@ class NarwalClient:
 
             map_data = self.state.map_data
             if not map_data or not map_data.map_id:
-                map_data = await self.get_map()
+                try:
+                    map_data = await self.get_map()
+                except NarwalCommandError as err:
+                    _LOGGER.warning("start_rooms: map fetch failed: %s", err)
+                    map_data = self.state.map_data
             map_id = map_data.map_id if map_data else 0
             if not map_id:
                 _LOGGER.warning(
@@ -1806,7 +1810,17 @@ class NarwalClient:
     async def get_map(self) -> MapData:
         """Download the full map data."""
         resp = await self.send_command(TOPIC_CMD_GET_MAP, timeout=15.0)
+        if not resp.accepted:
+            if self.state.map_data and self.state.map_data.map_id:
+                return self.state.map_data
+            raise NarwalCommandError(
+                f"get_map failed with code {resp.result_code}"
+            )
         map_data = MapData.from_response(resp.data)
+        if not map_data.map_id:
+            if self.state.map_data and self.state.map_data.map_id:
+                return self.state.map_data
+            raise NarwalCommandError("get_map response did not contain an active map")
         self.state.map_data = map_data
         return map_data
 

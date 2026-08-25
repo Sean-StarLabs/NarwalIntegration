@@ -60,8 +60,15 @@ def install() -> None:
     ha_const.ATTR_ENTITY_ID = "entity_id"  # type: ignore[attr-defined]
     ha_const.PERCENTAGE = "%"  # type: ignore[attr-defined]
     ha_const.STATE_ON = "on"  # type: ignore[attr-defined]
-    ha_const.UnitOfArea = MagicMock()  # type: ignore[attr-defined]
-    ha_const.UnitOfTime = MagicMock()  # type: ignore[attr-defined]
+
+    class _UnitOfArea:
+        SQUARE_METERS = "m²"
+
+    class _UnitOfTime:
+        SECONDS = "s"
+
+    ha_const.UnitOfArea = _UnitOfArea  # type: ignore[attr-defined]
+    ha_const.UnitOfTime = _UnitOfTime  # type: ignore[attr-defined]
 
     class _EntityCategory:
         CONFIG = "config"

@@ -15,6 +15,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .const import DOMAIN, NO_BROADCAST_PRODUCT_KEYS
+from .dock_tasks import can_start_robot_clean, dock_task_blocks_robot_return
 from .narwal_client import (
     CleaningRoute,
     CommandResponse,
@@ -134,17 +135,15 @@ def is_clean_session_context(state: NarwalState | None) -> bool:
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
         or _state_attr_is_true(state, "is_returning")
-        or _state_attr_is_true(state, "is_charging_to_resume")
     )
 
 
 def is_live_clean_setting_available(state: NarwalState | None) -> bool:
     """Return True when live clean settings can be changed during a task."""
-    if state is None:
+    if has_blocking_error(state):
         return False
     return (
         (_state_attr_is_true(state, "is_cleaning") or is_active_clean_session(state))
-        and not _state_attr_is_true(state, "is_charging_to_resume")
         and not _state_attr_is_true(state, "is_station_active")
     )
 
@@ -195,8 +194,62 @@ def can_start_cleaning(state: NarwalState | None) -> bool:
     return (
         state.is_docked
         and not is_clean_session_context(state)
-        and not state.blocks_robot_start_for_dock_task
+        and can_start_robot_clean(state)
     )
+
+
+def can_pause_cleaning(state: NarwalState | None) -> bool:
+    """Return True when the active robot clean can be paused."""
+    if has_blocking_error(state):
+        return False
+    return (
+        (
+            _state_attr_is_true(state, "is_cleaning")
+            or state.working_status == WorkingStatus.REMAPPING
+        )
+        and not _state_attr_is_true(state, "is_paused")
+        and not _state_attr_is_true(state, "is_station_active")
+    )
+
+
+def can_resume_cleaning(state: NarwalState | None) -> bool:
+    """Return True when a paused robot clean can be resumed."""
+    if has_blocking_error(state):
+        return False
+    return (
+        (
+            state.working_status in (*ACTIVE_CLEANING_STATUSES, WorkingStatus.REMAPPING)
+            or _state_attr_is_true(state, "has_paused_clean_task_context")
+        )
+        and _state_attr_is_true(state, "is_paused")
+        and not _state_attr_is_true(state, "is_station_active")
+    )
+
+
+def can_stop_cleaning(state: NarwalState | None) -> bool:
+    """Return True when a robot-side clean task can be stopped."""
+    if has_blocking_error(state):
+        return False
+    return is_clean_session_context(state)
+
+
+def can_return_home(state: NarwalState | None) -> bool:
+    """Return True when the robot can be recalled to the dock."""
+    if has_blocking_error(state):
+        return False
+    return (
+        not state.is_docked
+        and state.working_status != WorkingStatus.TASK_COMPLETED
+        and not _state_attr_is_true(state, "is_returning")
+        and not dock_task_blocks_robot_return(state)
+    )
+
+
+def can_locate_robot(state: NarwalState | None) -> bool:
+    """Return True when the locate command can be sent."""
+    if has_blocking_error(state):
+        return False
+    return not _state_attr_is_true(state, "is_station_active")
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
@@ -645,6 +698,40 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if full_update and not _has_dock_status_payload(response):
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Dock status refresh returned no dock-status payload")
+            self._sync_active_clean_context(self.client.state)
+            self.async_set_updated_data(self.client.state)
+            return False
+        if full_update:
+            self._mark_dock_status_refresh_succeeded()
+        self._sync_active_clean_context(self.client.state)
+        self.async_set_updated_data(self.client.state)
+        return True
+
+    async def async_refresh_action_status(self) -> bool:
+        """Refresh state for a robot action without clobbering live task telemetry."""
+        full_update = not self.client.state.has_recent_active_working_status
+        try:
+            response = await self.client.get_status(full_update=full_update)
+        except Exception:
+            _LOGGER.debug("Failed to refresh Narwal action status")
+            if full_update:
+                self._mark_dock_status_refresh_failed()
+            self._sync_active_clean_context(self.client.state)
+            self.async_set_updated_data(self.client.state)
+            return False
+        if not response.accepted:
+            _LOGGER.debug(
+                "Narwal action status refresh was rejected with code %s",
+                response.result_code,
+            )
+            if full_update:
+                self._mark_dock_status_refresh_failed()
+            self._sync_active_clean_context(self.client.state)
+            self.async_set_updated_data(self.client.state)
+            return False
+        if full_update and not _has_dock_status_payload(response):
+            _LOGGER.debug("Narwal action status refresh returned no dock-status payload")
+            self._mark_dock_status_refresh_failed()
             self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
             return False

@@ -178,7 +178,6 @@ def _state(
     state.has_recent_active_working_status = recent
     state.is_returning = returning
     state.is_cleaning = working_status == WorkingStatus.CLEANING and not returning
-    state.is_charging_to_resume = False
     state.is_station_active = False
     state.map_data = None
     return state

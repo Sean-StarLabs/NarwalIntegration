@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from narwal_client.client import NarwalClient, NarwalConnectionError
+from narwal_client.client import NarwalClient, NarwalCommandError, NarwalConnectionError
 from narwal_client.const import (
     TOPIC_CMD_CLEAN_TASK,
     TOPIC_CMD_DRY_DUST_BAG,
@@ -16,6 +16,7 @@ from narwal_client.const import (
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_BASE_STATUS,
+    TOPIC_CMD_GET_MAP,
     TOPIC_CMD_WASH_MOP,
     AmbientLightCtrlType,
     CleaningRoute,
@@ -96,7 +97,7 @@ class TestNarwalClientInit:
             {"3": {"1": 1}, "11": 1, "47": 2, "2": 87.0}
         )
 
-        assert client.state.working_status == WorkingStatus.CLEANING
+        assert client.state.working_status == WorkingStatus.UNKNOWN
         assert client.state.battery_level == 87
         assert client.state.is_cleaning
 
@@ -490,6 +491,51 @@ class TestWholeHouseStart:
 
         assert result is success
         mock_send.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_get_map_rejection_preserves_cached_map(self) -> None:
+        """A rejected map refresh must not replace a usable cached room map."""
+        client = self._connected_client()
+        cached = MapData(map_id=7, rooms=[RoomInfo(room_id=2)])
+        client.state.map_data = cached
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(
+                result_code=CommandResult.NOT_APPLICABLE,
+                data={},
+            )
+            result = await client.get_map()
+
+        assert result is cached
+        assert client.state.map_data is cached
+        mock_send.assert_awaited_once_with(TOPIC_CMD_GET_MAP, timeout=15.0)
+
+    @pytest.mark.asyncio
+    async def test_get_map_rejection_without_cache_raises(self) -> None:
+        """A rejected map refresh with no cache is a command failure."""
+        client = self._connected_client()
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(
+                result_code=CommandResult.NOT_APPLICABLE,
+                data={},
+            )
+            with pytest.raises(NarwalCommandError, match="get_map failed"):
+                await client.get_map()
+
+        mock_send.assert_awaited_once_with(TOPIC_CMD_GET_MAP, timeout=15.0)
+
+    @pytest.mark.asyncio
+    async def test_get_map_empty_payload_without_cache_raises(self) -> None:
+        """A payloadless accepted map response is not a valid empty map."""
+        client = self._connected_client()
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = CommandResponse(data={})
+            with pytest.raises(NarwalCommandError, match="active map"):
+                await client.get_map()
+
+        mock_send.assert_awaited_once_with(TOPIC_CMD_GET_MAP, timeout=15.0)
 
 
 class TestDockTaskCommands:

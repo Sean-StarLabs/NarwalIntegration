@@ -18,12 +18,12 @@ from homeassistant.util import slugify
 
 from . import NarwalConfigEntry
 from .const import (
-    FAN_SPEED_LIST,
-    FAN_SPEED_MAP,
     MOP_STRENGTH_MAP,
     WATER_MAP,
     WORK_MODE_MAP,
+    fan_speed_label_map_for,
     fan_speed_list_for,
+    fan_speed_map_for,
 )
 from .coordinator import (
     NarwalCoordinator,
@@ -91,7 +91,7 @@ SELECT_DESCRIPTIONS: tuple[NarwalSelectEntityDescription, ...] = (
 )
 
 LEGACY_MODE_OPTIONS = ("Vacuum", "Mop", "Vacuum then mop", "Vacuum and mop")
-LEGACY_SUCTION_OPTIONS = ("AI", *FAN_SPEED_LIST)
+LEGACY_SUCTION_OPTIONS = ("AI", *fan_speed_list_for({}))
 LEGACY_WATER_OPTIONS = ("Dry", "Normal", "Wet")
 LEGACY_SCRUB_OPTIONS = ("Normal", "High")
 LEGACY_ROUTE_OPTIONS = ("Standard", "Meticulous")
@@ -107,16 +107,14 @@ LEGACY_MODE_MAP: dict[str, WorkMode] = {
 LEGACY_MODE_LABELS: dict[WorkMode, str] = {
     value: label for label, value in LEGACY_MODE_MAP.items()
 }
-LEGACY_SUCTION_MAP: dict[str, FanLevel] = {
-    "AI": FanLevel.UNSPECIFIED,
-    "Super powerful": FanLevel.DEEP,
-    "Ultra powerful": FanLevel.SUPER,
-    **{option: FAN_SPEED_MAP[option] for option in FAN_SPEED_LIST},
-}
-LEGACY_SUCTION_LABELS: dict[FanLevel, str] = {
-    FanLevel.UNSPECIFIED: "AI",
-    **{FAN_SPEED_MAP[option]: option for option in FAN_SPEED_LIST},
-}
+def _legacy_suction_map_for(data: dict) -> dict[str, FanLevel]:
+    """Return legacy suction options for this model, including hidden aliases."""
+    return {"AI": FanLevel.UNSPECIFIED, **fan_speed_map_for(data)}
+
+
+def _legacy_suction_labels_for(data: dict) -> dict[FanLevel, str]:
+    """Return FanLevel labels for this model's visible legacy suction options."""
+    return {FanLevel.UNSPECIFIED: "AI", **fan_speed_label_map_for(data)}
 LEGACY_WATER_MAP: dict[str, MopHumidity] = {
     "Dry": MopHumidity.DRY,
     "Normal": MopHumidity.NORMAL,
@@ -577,7 +575,7 @@ class RoomNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         if key == "mode":
             return LEGACY_MODE_LABELS.get(value)
         if key == "suction":
-            return LEGACY_SUCTION_LABELS.get(value)
+            return self._suction_labels.get(value)
         if key == "water":
             labels = {value: label for label, value in LEGACY_WATER_MAP.items()}
             return labels.get(value)
@@ -599,7 +597,7 @@ class RoomNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             return option
         if self.entity_description.setting_key != "suction":
             return None
-        label = LEGACY_SUCTION_LABELS.get(LEGACY_SUCTION_MAP.get(option))
+        label = self._suction_labels.get(self._suction_map.get(option))
         return label if label in self.options else None
 
     def _restored_option(self, state: State | None) -> str | None:
@@ -629,7 +627,7 @@ class RoomNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         if key == "mode":
             value = LEGACY_MODE_MAP[option]
         elif key == "suction":
-            value = LEGACY_SUCTION_MAP[option]
+            value = self._suction_map[option]
         elif key == "water":
             value = LEGACY_WATER_MAP[option]
         elif key == "scrub":
@@ -646,6 +644,16 @@ class RoomNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             value,
             map_id=self._map_id,
         )
+
+    @property
+    def _suction_map(self) -> dict[str, FanLevel]:
+        """Return the model-specific room suction map."""
+        return _legacy_suction_map_for(self.coordinator.config_entry.data)
+
+    @property
+    def _suction_labels(self) -> dict[FanLevel, str]:
+        """Return the model-specific room suction labels."""
+        return _legacy_suction_labels_for(self.coordinator.config_entry.data)
 
     async def async_select_option(self, option: str) -> None:
         """Apply a room profile option."""
@@ -785,7 +793,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             settings.work_mode = LEGACY_MODE_MAP[option]
             self.coordinator._legacy_mode_option = option
         elif key == "suction":
-            settings.fan = LEGACY_SUCTION_MAP[option]
+            settings.fan = self._suction_map[option]
         elif key == "water":
             settings.water = LEGACY_WATER_MAP[option]
         elif key == "scrub":
@@ -802,7 +810,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         if key == "mode":
             option = LEGACY_MODE_LABELS.get(settings.work_mode)
         elif key == "suction":
-            option = LEGACY_SUCTION_LABELS.get(settings.fan)
+            option = self._suction_labels.get(settings.fan)
         elif key == "water":
             option = {value: label for label, value in LEGACY_WATER_MAP.items()}.get(
                 settings.water
@@ -827,7 +835,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             return option
         if self.entity_description.setting_key != "suction":
             return None
-        label = LEGACY_SUCTION_LABELS.get(LEGACY_SUCTION_MAP.get(option))
+        label = self._suction_labels.get(self._suction_map.get(option))
         return label if label in self.options else None
 
     def _restored_option(self, state: State | None) -> str | None:
@@ -875,7 +883,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         if live_available and live_applies and not setup_available:
             if key == "suction":
                 response = await self.coordinator.client.set_fan_speed(
-                    LEGACY_SUCTION_MAP[option]
+                    self._suction_map[option]
                 )
             elif key == "water":
                 response = await self.coordinator.client.set_mop_humidity(
@@ -894,3 +902,13 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         self._apply_option(option)
         self.async_write_ha_state()
         self.coordinator.async_update_listeners()
+
+    @property
+    def _suction_map(self) -> dict[str, FanLevel]:
+        """Return the model-specific legacy suction map."""
+        return _legacy_suction_map_for(self.coordinator.config_entry.data)
+
+    @property
+    def _suction_labels(self) -> dict[FanLevel, str]:
+        """Return the model-specific legacy suction labels."""
+        return _legacy_suction_labels_for(self.coordinator.config_entry.data)

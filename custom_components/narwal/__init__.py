@@ -29,7 +29,7 @@ from .const import (
     PLATFORMS,
     SERVICE_CLEAN_ROOMS,
     configured_model_name,
-    fan_speed_list_for,
+    fan_speed_map_for,
 )
 from .coordinator import NarwalCoordinator, can_start_cleaning
 from .narwal_client import (
@@ -61,16 +61,18 @@ WORK_MODE_OPTIONS: dict[str, WorkMode] = {
     "vacuum_then_mop": WorkMode.VACUUM_THEN_MOP,
     "vacuum_and_mop": WorkMode.VACUUM_AND_MOP,
 }
-SUCTION_OPTIONS: dict[str, FanLevel] = {
-    "ai": FanLevel.UNSPECIFIED,
-    "quiet": FanLevel.MUTE,
-    "standard": FanLevel.NORMAL,
-    "strong": FanLevel.STRONG,
-    "super": FanLevel.DEEP,
-    "ultra": FanLevel.SUPER,
-    "super_powerful": FanLevel.DEEP,
-    "ultra_powerful": FanLevel.SUPER,
-}
+SUCTION_OPTIONS = (
+    "ai",
+    "quiet",
+    "standard",
+    "normal",
+    "strong",
+    "ultra",
+    "super",
+    "ultra_powerful",
+    "super_powerful",
+    "max",
+)
 WATER_OPTIONS: dict[str, MopHumidity] = {
     "dry": MopHumidity.DRY,
     "normal": MopHumidity.NORMAL,
@@ -103,6 +105,34 @@ CLEAN_ROOMS_SCHEMA = vol.Schema(
         vol.Optional(FIELD_ROUTE): vol.In(ROUTE_OPTIONS),
     }
 )
+
+SUCTION_OPTION_LABELS: dict[str, str] = {
+    "quiet": "Quiet",
+    "standard": "Standard",
+    "normal": "Standard",
+    "strong": "Strong",
+    "ultra": "Ultra",
+    "ultra_powerful": "Ultra",
+    "super": "Super",
+    "super_powerful": "Super",
+    "max": "Super",
+}
+
+
+def _suction_for_coordinator(
+    coordinator: NarwalCoordinator,
+    option: str,
+) -> FanLevel:
+    """Return the model-valid suction level for a service option."""
+    if option == "ai":
+        return FanLevel.UNSPECIFIED
+    label = SUCTION_OPTION_LABELS[option]
+    fan_map = fan_speed_map_for(coordinator.config_entry.data, include_aliases=False)
+    if label not in fan_map:
+        raise HomeAssistantError(
+            f"{label} suction is not supported by this Narwal model"
+        )
+    return fan_map[label]
 
 
 def _domain_data(hass: HomeAssistant) -> dict[str, NarwalCoordinator]:
@@ -308,7 +338,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
         coordinators = await _async_get_service_coordinators(hass, entity_ids)
 
         work_mode = WORK_MODE_OPTIONS[call.data[FIELD_MODE]]
-        fan = SUCTION_OPTIONS[call.data[FIELD_SUCTION]]
         water = WATER_OPTIONS[call.data[FIELD_WATER]]
         mop_strength = MOP_STRENGTH_OPTIONS[call.data[FIELD_MOP_STRENGTH]]
         passes = call.data[FIELD_PASSES]
@@ -334,12 +363,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             if not room_ids:
                 raise HomeAssistantError("At least one room must be selected")
 
-            if fan is FanLevel.SUPER and "Ultra" not in fan_speed_list_for(
-                coordinator.config_entry.data
-            ):
-                raise HomeAssistantError(
-                    "Ultra suction is not supported by this Narwal model"
-                )
+            fan = _suction_for_coordinator(coordinator, call.data[FIELD_SUCTION])
             route = ROUTE_OPTIONS.get(route_label, coordinator.clean_settings.route)
             requested_settings = RoomCleanSettings(
                 work_mode=work_mode,

@@ -17,6 +17,7 @@ from custom_components.narwal.dock_tasks import (  # noqa: E402
     can_start_dock_task,
     can_start_robot_clean,
     can_stop_dock_task,
+    dock_task_blocks_robot_return,
 )
 from custom_components.narwal.switch import (  # noqa: E402
     DOCK_TASK_SWITCHES,
@@ -350,6 +351,32 @@ def test_robot_clean_start_allows_only_typed_dock_bag() -> None:
         fields=("12", "13"),
     )
     assert can_start_robot_clean(state)
+
+
+def test_robot_return_allows_only_typed_dock_bag() -> None:
+    """Robot return is blocked by dock work except typed dock-bag drying."""
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.station_activity = 4
+    assert dock_task_blocks_robot_return(state)
+
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DOCK_BAG,
+        elapsed=45,
+        target=180,
+        fields=("12", "13"),
+    )
+    assert not dock_task_blocks_robot_return(state)
+
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.dock_presence = 6
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_MOP,
+        elapsed=45,
+        target=180,
+        fields=("8", "9"),
+    )
+    assert dock_task_blocks_robot_return(state)
 
 
 async def test_wash_mop_switch_uses_status_gated_command() -> None:
