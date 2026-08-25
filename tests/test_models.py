@@ -710,6 +710,49 @@ class TestNarwalState:
         assert state.has_unfinished_charge_resume_context
         assert state.is_charging_to_resume
 
+    def test_new_active_clean_clears_previous_terminal_result(self) -> None:
+        """A stale TaskResult must not poison a later clean's recharge phase."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status(
+            {
+                "3": {"1": 14},
+                "2": _float_to_uint32(30.0),
+                "11": 3,
+                "47": 1,
+                "15": 2,
+            }
+        )
+
+        assert state.has_terminal_task_result
+        assert state.has_completed_task_context
+
+        state.task_progress_percent = 40
+        state.current_room_id = 4
+        state.update_from_base_status(
+            {
+                "3": {"1": 4},
+                "2": _float_to_uint32(31.0),
+                "11": 1,
+                "47": 2,
+                "15": 2,
+            }
+        )
+
+        assert state.terminate_reason == 0
+        assert not state.has_terminal_task_result
+        assert state.has_unfinished_charge_resume_context
+        assert state.is_cleaning
+
+        state.update_from_base_status(
+            {"3": {"1": 14}, "2": _float_to_uint32(30.0), "11": 3, "47": 1}
+        )
+
+        assert not state.has_terminal_task_result
+        assert state.has_unfinished_charge_resume_context
+        assert state.is_charging_to_resume
+
     def test_active_clean_with_high_rising_battery_is_not_charging_to_resume(self) -> None:
         """A high battery should not be treated as a mid-task recharge."""
         state = NarwalState()
