@@ -2002,6 +2002,7 @@ class NarwalState:
                     self.working_status = WorkingStatus.UNKNOWN
                 if self.working_status in ACTIVE_CLEANING_STATUSES and not is_paused:
                     self.last_active_working_status_time = time.monotonic()
+                    self.terminate_reason = 0
                 elif not is_paused and not retain_charge_resume_context:
                     self.last_active_working_status_time = 0.0
                     self.clear_task_details()
@@ -2130,7 +2131,7 @@ class NarwalState:
                 self.binded_uuid = str(raw)
                 if self.binded_uuid.startswith("b'"):
                     self.binded_uuid = self.binded_uuid[2:-1]
-        if "15" in decoded:
+        if "15" in decoded and self.working_status not in ACTIVE_CLEANING_STATUSES:
             try:
                 self.terminate_reason = int(decoded["15"])
             except (ValueError, TypeError):
