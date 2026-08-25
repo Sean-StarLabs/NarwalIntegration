@@ -81,6 +81,7 @@ DOCK_TASK_KEY_BY_RAW_TASK = {
 }
 SCOPED_STOP_DOCK_TASK_KEYS = frozenset({"dry_dock_bag"})
 ROBOT_START_COMPATIBLE_DOCK_TASK_KEYS = frozenset({"dry_dock_bag"})
+KNOWN_STATION_ACTIVITY_VALUES = frozenset({0, 1, 2, 3, 4})
 
 
 @dataclass
@@ -189,6 +190,12 @@ def has_robot_start_blocking_dock_task(state: NarwalState | None) -> bool:
     """Return True when a dock task should block starting a robot clean."""
     if state is None or not state.is_station_active:
         return False
+    try:
+        station_activity = int(getattr(state, "station_activity", 0) or 0)
+    except (TypeError, ValueError):
+        return True
+    if station_activity not in KNOWN_STATION_ACTIVITY_VALUES:
+        return True
     keys = set(dock_task_keys(state))
     if not keys:
         return True

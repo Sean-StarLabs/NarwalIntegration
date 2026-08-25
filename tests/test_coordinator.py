@@ -269,6 +269,65 @@ def test_dock_bag_drying_does_not_block_robot_start() -> None:
     assert can_start_cleaning(state)
 
 
+@pytest.mark.parametrize(
+    ("name", "configure"),
+    [
+        ("unknown_station_activity", lambda state: setattr(state, "station_activity", 99)),
+        ("emptying_dustbin", lambda state: setattr(state, "station_activity", 1)),
+        ("washing_mop", lambda state: setattr(state, "station_activity", 2)),
+        (
+            "dry_mop",
+            lambda state: state.set_dock_drying_task("drying_mop", 1_200, 18_000, ("8", "9")),
+        ),
+        (
+            "dry_dust_bin",
+            lambda state: state.set_dock_drying_task("dry_dust_bin", 1_200, 18_000, ("10", "11")),
+        ),
+    ],
+)
+def test_robot_start_blocking_dock_tasks_block_cleaning(name, configure) -> None:
+    """Only explicitly compatible dock tasks may run while starting a clean."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+
+    configure(state)
+
+    assert state.is_station_active, name
+    assert not can_start_cleaning(state), name
+
+
+@pytest.mark.parametrize(
+    ("name", "configure"),
+    [
+        ("unknown_station_activity", lambda state: setattr(state, "station_activity", 99)),
+        ("emptying_dustbin", lambda state: setattr(state, "station_activity", 1)),
+        ("washing_mop", lambda state: setattr(state, "station_activity", 2)),
+        (
+            "dry_mop",
+            lambda state: state.set_dock_drying_task("drying_mop", 1_200, 18_000, ("8", "9")),
+        ),
+        (
+            "dry_dust_bin",
+            lambda state: state.set_dock_drying_task("dry_dust_bin", 1_200, 18_000, ("10", "11")),
+        ),
+    ],
+)
+def test_dock_bag_drying_does_not_mask_blocking_dock_tasks(name, configure) -> None:
+    """A compatible dock-bag task must not hide another blocking station task."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+    state.set_dock_drying_task("dry_dock_bag", 1_200, 18_000, ("12", "13"))
+
+    configure(state)
+
+    assert state.is_station_active, name
+    assert not can_start_cleaning(state), name
+
+
 def test_return_home_available_when_idle_off_dock() -> None:
     """An idle robot away from the dock should expose return-to-base."""
     state = MagicMock()
