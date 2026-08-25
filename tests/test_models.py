@@ -449,6 +449,33 @@ class TestNarwalState:
         assert not state.has_terminal_task_result
         assert state.is_cleaning
 
+    def test_changed_native_plan_clears_stale_terminal_result_while_paused(self) -> None:
+        """Fresh paused route-plan movement can identify a later clean session."""
+        state = NarwalState()
+        state.task_progress_percent = 48
+        state.current_room_id = 4
+        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2, "15": 2})
+        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
+
+        state.update_from_base_status({"3": {"1": 14, "2": 1}, "11": 1, "47": 2})
+        state.update_from_aux_status(
+            TOPIC_POINT_NAVI_PLAN_TRAJ,
+            {
+                "1": [
+                    {"1": _float_to_uint32(1.0), "2": _float_to_uint32(1.0)},
+                    {"1": _float_to_uint32(3.0), "2": _float_to_uint32(3.0)},
+                ]
+            },
+        )
+
+        assert state.is_paused
+        assert state.terminate_reason == 2
+        assert state.terminal_task_result == 0
+        assert state.stale_terminate_reason == 2
+        assert not state.has_terminal_task_result
+        assert state.has_paused_clean_task_context
+        assert not state.is_cleaning
+
     def test_active_clean_with_low_battery_stays_cleaning_without_dock_evidence(self) -> None:
         """Low battery alone should not override active/off-dock cleaning state."""
         state = NarwalState()
