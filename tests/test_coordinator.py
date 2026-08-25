@@ -269,6 +269,34 @@ def test_dock_bag_drying_does_not_block_robot_start() -> None:
     assert can_start_cleaning(state)
 
 
+def test_live_dock_bag_timer_allows_start_with_unmapped_station_activity() -> None:
+    """A typed dock-bag timer beats an unmapped coarse station activity value."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+    state.station_activity = 99
+    state.set_dock_drying_task("dry_dock_bag", 1_200, 18_000, ("12", "13"))
+
+    assert state.is_docked
+    assert state.is_station_active
+    assert can_start_cleaning(state)
+
+
+def test_assumed_dock_bag_drying_does_not_mask_unmapped_station_activity() -> None:
+    """A local fallback assumption is not enough to override an unknown station task."""
+    state = NarwalState()
+    state.working_status = WorkingStatus.DOCKED
+    state.dock_field11 = 3
+    state.dock_field47 = 1
+    state.station_activity = 99
+    state.assume_dock_drying_task("dry_dock_bag")
+
+    assert state.is_docked
+    assert state.is_station_active
+    assert not can_start_cleaning(state)
+
+
 @pytest.mark.parametrize(
     ("name", "configure"),
     [
@@ -301,7 +329,6 @@ def test_robot_start_blocking_dock_tasks_block_cleaning(name, configure) -> None
 @pytest.mark.parametrize(
     ("name", "configure"),
     [
-        ("unknown_station_activity", lambda state: setattr(state, "station_activity", 99)),
         ("emptying_dustbin", lambda state: setattr(state, "station_activity", 1)),
         ("washing_mop", lambda state: setattr(state, "station_activity", 2)),
         (

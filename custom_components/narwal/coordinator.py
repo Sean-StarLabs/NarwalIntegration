@@ -190,16 +190,21 @@ def has_robot_start_blocking_dock_task(state: NarwalState | None) -> bool:
     """Return True when a dock task should block starting a robot clean."""
     if state is None or not state.is_station_active:
         return False
+    keys = set(dock_task_keys(state))
+    if not keys:
+        return True
+    if not keys <= ROBOT_START_COMPATIBLE_DOCK_TASK_KEYS:
+        return True
     try:
         station_activity = int(getattr(state, "station_activity", 0) or 0)
     except (TypeError, ValueError):
         return True
-    if station_activity not in KNOWN_STATION_ACTIVITY_VALUES:
-        return True
-    keys = set(dock_task_keys(state))
-    if not keys:
-        return True
-    return not keys <= ROBOT_START_COMPATIBLE_DOCK_TASK_KEYS
+    if station_activity in KNOWN_STATION_ACTIVITY_VALUES:
+        return False
+
+    # A typed live timer is more specific than the coarse station_activity field.
+    # Dock-bag drying can continue while the robot leaves to clean.
+    return state.dock_task_timer("dry_dock_bag") is None
 
 
 def can_start_cleaning(state: NarwalState | None) -> bool:

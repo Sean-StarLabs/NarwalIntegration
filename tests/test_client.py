@@ -1162,6 +1162,72 @@ class TestMapQueries:
 
         assert client.state.map_data is None
 
+    @pytest.mark.asyncio
+    async def test_get_map_preserves_existing_map_on_same_map_room_shrink(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        previous = MapData(
+            map_id=1,
+            rooms=[
+                RoomInfo(room_id=1, name="Kitchen"),
+                RoomInfo(room_id=2, name="Toilet"),
+                RoomInfo(room_id=3, name="Hallway"),
+                RoomInfo(room_id=4, name="Lounge"),
+            ],
+        )
+        candidate = MapData(
+            map_id=1,
+            rooms=[
+                RoomInfo(room_id=1, room_sub_type=3),
+                RoomInfo(room_id=2),
+            ],
+        )
+        client.state.map_data = previous
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch(
+                "narwal_client.client.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as to_thread,
+        ):
+            mock_send.return_value = CommandResponse(data={"2": {"1": 1}})
+            to_thread.return_value = candidate
+
+            result = await client.get_map()
+
+        assert result is previous
+        assert client.state.map_data is previous
+
+    @pytest.mark.asyncio
+    async def test_get_map_accepts_different_map_id_room_change(self) -> None:
+        client = NarwalClient("127.0.0.1")
+        previous = MapData(
+            map_id=1,
+            rooms=[
+                RoomInfo(room_id=1, name="Kitchen"),
+                RoomInfo(room_id=2, name="Toilet"),
+                RoomInfo(room_id=3, name="Hallway"),
+                RoomInfo(room_id=4, name="Lounge"),
+            ],
+        )
+        candidate = MapData(map_id=2, rooms=[RoomInfo(room_id=1)])
+        client.state.map_data = previous
+
+        with (
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+            patch(
+                "narwal_client.client.asyncio.to_thread",
+                new_callable=AsyncMock,
+            ) as to_thread,
+        ):
+            mock_send.return_value = CommandResponse(data={"2": {"1": 2}})
+            to_thread.return_value = candidate
+
+            result = await client.get_map()
+
+        assert result is candidate
+        assert client.state.map_data is candidate
+
 
 class TestBuildCleanPayloadV2:
     """Tests for the v2 clean payload schema introduced for firmware

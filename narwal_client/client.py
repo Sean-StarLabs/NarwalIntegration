@@ -174,6 +174,31 @@ def _display_map_robot_moved(
     )
 
 
+def _map_room_ids(map_data: MapData | None) -> set[int]:
+    """Return positive room ids from map data."""
+    if map_data is None:
+        return set()
+    return {room.room_id for room in map_data.rooms if room.room_id > 0}
+
+
+def _should_preserve_existing_map(previous: MapData | None, candidate: MapData) -> bool:
+    """Return True when a fresh map response is likely a transient partial map."""
+    previous_ids = _map_room_ids(previous)
+    candidate_ids = _map_room_ids(candidate)
+    if len(previous_ids) < 3 or not candidate_ids:
+        return False
+    if candidate_ids >= previous_ids:
+        return False
+    if len(candidate_ids) >= len(previous_ids):
+        return False
+    return bool(
+        previous
+        and previous.map_id
+        and candidate.map_id
+        and previous.map_id == candidate.map_id
+    )
+
+
 @dataclass
 class RoomCleanSettings:
     """Clean parameters for a single room in a custom clean task."""
@@ -2143,7 +2168,17 @@ class NarwalClient:
             if self.state.map_data is not None:
                 return self.state.map_data
             raise NarwalCommandError(f"Map query failed with code {resp.result_code}")
+        previous_map = self.state.map_data
         map_data = await asyncio.to_thread(MapData.from_response, resp.data)
+        if _should_preserve_existing_map(previous_map, map_data):
+            _LOGGER.warning(
+                "Map query returned a partial room set for map %s (%d -> %d rooms); "
+                "preserving existing map data",
+                map_data.map_id,
+                len(_map_room_ids(previous_map)),
+                len(_map_room_ids(map_data)),
+            )
+            return previous_map
         self.state.map_data = map_data
         return map_data
 
