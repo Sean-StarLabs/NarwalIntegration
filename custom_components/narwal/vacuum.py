@@ -157,7 +157,10 @@ def _status_summary(
     active_cleaning_metrics: bool,
 ) -> str:
     """Return compact dashboard text for the current vacuum task."""
-    parts = [_task_status_label(task_status)]
+    if task_status == "charging_to_resume":
+        parts = ["Cleaning", "charging to resume"]
+    else:
+        parts = [_task_status_label(task_status)]
     if active_cleaning_metrics and state.current_room_name:
         parts.append(state.current_room_name)
     if active_cleaning_metrics and state.task_progress_percent is not None:

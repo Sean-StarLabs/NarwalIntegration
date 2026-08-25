@@ -94,7 +94,7 @@ class TestVacuumActivity:
         assert vac.extra_state_attributes["task_status"] == "charging_to_resume"
         assert (
             vac.extra_state_attributes["status_summary"]
-            == "Charging to resume - Kitchen - 32%"
+            == "Cleaning - charging to resume - Kitchen - 32%"
         )
         assert vac.extra_state_attributes["docked"] is True
 
