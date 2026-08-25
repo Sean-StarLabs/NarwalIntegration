@@ -89,6 +89,7 @@ def _task_status(state: Any) -> str:
     is_cleaning_state = (
         state.working_status in ACTIVE_CLEANING_STATUSES
         or state.has_recent_active_working_status
+        or state.has_paused_clean_task_context
     )
     if state.working_status == WorkingStatus.ERROR or getattr(state, "has_error", False):
         return "error"
@@ -229,6 +230,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         is_cleaning_state = (
             state.working_status in ACTIVE_CLEANING_STATUSES
             or state.has_recent_active_working_status
+            or state.has_paused_clean_task_context
         )
         if state.is_paused and is_cleaning_state:
             return VacuumActivity.PAUSED

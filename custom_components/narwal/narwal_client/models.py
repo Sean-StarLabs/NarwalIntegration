@@ -1099,7 +1099,9 @@ class NarwalState:
     error_codes: list[int] = field(default_factory=list)  # field 1 ErrorCode.identityCode(s)
     error_level: int = 0  # ErrorCode.level (field 1 sub-2)
     error_detail: str = ""  # ErrorCode.debugDetail (field 1 sub-3)
-    terminate_reason: int = 0  # field 15 — TaskResult of the last task (why it ended)
+    terminate_reason: int = 0  # field 15 — raw TaskResult of the last task
+    terminal_task_result: int = 0  # session-scoped TaskResult for state inference
+    stale_terminate_reason: int = 0  # raw result value seen before the active session
 
     # Station tank/bag enum states (base_status; None = not reported by this model).
     # 0=unspecified, 1=ok/installed, ≥2=attention (empty/abnormal/replace) — see BaseStatusField.
@@ -1199,6 +1201,11 @@ class NarwalState:
             or self.task_remaining_time > 0
             or self.current_room_id is not None
             or bool(self.current_room_aux_name)
+            or (
+                self.has_recent_native_plan_activity
+                and self.has_explicit_off_dock_signal
+                and not self.has_terminal_task_result
+            )
         )
 
     @property
@@ -1578,8 +1585,8 @@ class NarwalState:
     def has_terminal_task_result(self) -> bool:
         """True when the robot reports the retained clean was explicitly ended."""
         return (
-            self.terminate_reason > 0
-            and self.terminate_reason != _LOW_BATTERY_FORCE_END_REASON
+            self.terminal_task_result > 0
+            and self.terminal_task_result != _LOW_BATTERY_FORCE_END_REASON
             and self.working_status not in ACTIVE_CLEANING_STATUSES
         )
 
@@ -1898,7 +1905,9 @@ class NarwalState:
             if self.working_status != WorkingStatus.CUSTOM_CLEANING:
                 self.working_status = WorkingStatus.CLEANING
             self.last_active_working_status_time = time.monotonic()
-            self.terminate_reason = 0
+            if self.terminate_reason > 0:
+                self.stale_terminate_reason = self.terminate_reason
+            self.terminal_task_result = 0
             self.is_paused = False
             self.is_returning_to_dock = False
             self.dock_sub_state = 0
@@ -1967,6 +1976,7 @@ class NarwalState:
         #   Old FW: {1: ws, 2: paused, 3: dock_presence, 7: returning, 10: dock_sub, 12: dock_activity}
         #   v01.07.23+: {1: ws, 4: ?, 11: ?} — sub-fields 2/3/7/10/12 absent
         # bbp may also return a list for repeated messages.
+        retain_charge_resume_context = False
         field3 = decoded.get("3")
         if isinstance(field3, list):
             field3 = field3[0] if field3 else None
@@ -2003,7 +2013,9 @@ class NarwalState:
                     self.working_status = WorkingStatus.UNKNOWN
                 if self.working_status in ACTIVE_CLEANING_STATUSES and not is_paused:
                     self.last_active_working_status_time = time.monotonic()
-                    self.terminate_reason = 0
+                    if self.terminate_reason > 0:
+                        self.stale_terminate_reason = self.terminate_reason
+                    self.terminal_task_result = 0
                 elif not is_paused and not retain_charge_resume_context:
                     self.last_active_working_status_time = 0.0
                     self.clear_task_details()
@@ -2134,9 +2146,20 @@ class NarwalState:
                     self.binded_uuid = self.binded_uuid[2:-1]
         if "15" in decoded and self.working_status not in ACTIVE_CLEANING_STATUSES:
             try:
-                self.terminate_reason = int(decoded["15"])
+                terminate_reason = int(decoded["15"])
             except (ValueError, TypeError):
                 pass
+            else:
+                self.terminate_reason = terminate_reason
+                if terminate_reason == 0:
+                    self.terminal_task_result = 0
+                    self.stale_terminate_reason = 0
+                elif not (
+                    retain_charge_resume_context
+                    and terminate_reason == self.stale_terminate_reason
+                ):
+                    self.terminal_task_result = terminate_reason
+                    self.stale_terminate_reason = 0
 
     def _update_consumables(self, decoded: dict[str, Any]) -> None:
         """Parse base_status consumable/station/fault fields — hardware-sampled, so trustworthy even in deep-sleep battery-only updates."""
@@ -2254,7 +2277,9 @@ class NarwalState:
                         and not self.is_returning_to_dock
                         and self.working_status != WorkingStatus.TASK_COMPLETED
                     ):
-                        self.terminate_reason = 0
+                        if self.terminate_reason > 0:
+                            self.stale_terminate_reason = self.terminate_reason
+                        self.terminal_task_result = 0
                 self.native_plan_trajectory = points
                 self.native_plan_trajectory_updated = updated
         elif topic in {

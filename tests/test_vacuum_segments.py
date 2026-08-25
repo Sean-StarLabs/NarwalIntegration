@@ -221,6 +221,22 @@ class TestVacuumActivity:
         assert vac.activity == VacuumActivity.CLEANING
         assert vac.extra_state_attributes["task_status"] == "cleaning"
 
+    def test_paused_native_plan_off_dock_reports_paused(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14, "2": 1}, "11": 1, "47": 2})
+        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
+        state.native_plan_trajectory_updated = time.monotonic()
+        vac = _make_vacuum(state=state)
+
+        attrs = vac.extra_state_attributes
+
+        assert state.is_paused
+        assert state.has_paused_clean_task_context
+        assert vac.activity == VacuumActivity.PAUSED
+        assert attrs["task_status"] == "paused"
+        assert attrs["busy"]
+        assert not attrs["setup_available"]
+
     def test_active_clean_details_remain_visible(self) -> None:
         state = _active_clean_state()
         state.task_progress_percent = 72
