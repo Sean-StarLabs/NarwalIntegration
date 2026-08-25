@@ -356,6 +356,19 @@ class TestNarwalState:
         assert not state.has_recent_active_working_status
         assert not state.is_cleaning
 
+    def test_native_plan_with_explicit_off_dock_overrides_stale_dock_status(self) -> None:
+        """Fresh native route plans prove activity when dock fields say off-dock."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 14}, "11": 1, "47": 2})
+        state.native_plan_trajectory = [(1.0, 1.0), (2.0, 2.0)]
+        state.native_plan_trajectory_updated = 100.0
+
+        with patch("narwal_client.models.time.monotonic", return_value=110.0):
+            assert state.has_recent_native_plan_activity
+            assert state.has_explicit_off_dock_signal
+            assert state.is_cleaning
+            assert not state.is_docked
+
     def test_active_clean_with_low_battery_stays_cleaning_without_dock_evidence(self) -> None:
         """Low battery alone should not override active/off-dock cleaning state."""
         state = NarwalState()

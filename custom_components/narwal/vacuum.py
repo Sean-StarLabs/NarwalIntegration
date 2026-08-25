@@ -242,6 +242,8 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             return VacuumActivity.CLEANING
         activity = WORKING_STATUS_TO_ACTIVITY.get(state.working_status)
         if activity is not None:
+            if activity == VacuumActivity.DOCKED and not state.is_docked:
+                return VacuumActivity.IDLE
             return activity
         # Unknown working_status value — infer from dock signals so we
         # don't report IDLE while the robot is clearly active off-dock.
