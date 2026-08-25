@@ -15,6 +15,7 @@ from narwal_client.models import (
     DOCK_TASK_EMPTY_DUSTBIN,
     DOCK_TASK_WASH_MOP,
     MapData,
+    MapDisplayData,
     NarwalState,
     ObstacleInfo,
     RoomInfo,
@@ -432,6 +433,15 @@ class TestNarwalState:
 
         assert not state.has_assumed_robot_clean
         assert state.is_cleaning
+
+    def test_assumed_robot_clean_clears_previous_display_map(self) -> None:
+        """A newly accepted clean should not render the previous task's route."""
+        state = NarwalState()
+        state.map_display_data = MapDisplayData(robot_x=1.0, robot_y=2.0)
+
+        state.assume_robot_clean()
+
+        assert state.map_display_data is None
 
     def test_paused_context_handles_missing_task_metrics(self) -> None:
         """Paused context is safe before richer task metric fields exist."""
@@ -961,7 +971,6 @@ class TestMapData:
             "17": b"",
         }}
         m = MapData.from_response(decoded)
-        # factor 1.0: -8.0188 - (-280) = 271.98, 0.221 - (-341) = 341.22
         assert m.dock_x is not None
         assert m.dock_y is not None
         assert abs(m.dock_x - 272.0) < 1.0
@@ -978,7 +987,6 @@ class TestMapData:
             "17": b"",
         }}
         m = MapData.from_response(decoded)
-        # factor 1.0: -8.0188 - (-280) = 271.98, 0.221 - (-341) = 341.22
         assert m.dock_x is not None
         assert m.dock_y is not None
         assert abs(m.dock_x - 272.0) < 1.0

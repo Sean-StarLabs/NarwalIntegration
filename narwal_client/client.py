@@ -697,7 +697,7 @@ class NarwalClient:
         """Encode a protobuf string field."""
         return cls._encode_bytes_field(field_num, text.encode("utf-8"))
 
-    # All broadcast topics the robot can send — used for active_robot_publish
+    # Broadcast topics needed for state, maps and diagnostics.
     _ALL_BROADCAST_TOPICS = [
         "status/robot_base_status",
         "status/working_status",
@@ -705,8 +705,6 @@ class NarwalClient:
         "status/download_status",
         "map/display_map",
         "status/time_line_status",
-        "status/point_navi_plan_traj",
-        "developer/planning_debug_info",
     ]
 
     def _build_topic_subscription(self, duration: int = 600) -> bytes:

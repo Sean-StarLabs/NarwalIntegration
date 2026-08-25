@@ -62,7 +62,6 @@ TOPIC_UPGRADE_STATUS = "upgrade/upgrade_status"
 TOPIC_DOWNLOAD_STATUS = "status/download_status"
 TOPIC_DISPLAY_MAP = "map/display_map"
 TOPIC_TIMELINE_STATUS = "status/time_line_status"
-TOPIC_PLANNING_DEBUG = "developer/planning_debug_info"
 
 # --- Command topics (client → robot, confirmed working) ---
 # Common

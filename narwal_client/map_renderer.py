@@ -18,6 +18,10 @@ import io
 import logging
 import math
 import zlib
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from PIL import Image, ImageDraw
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -123,7 +127,7 @@ def _load_font(image_font: object, size: int):
     for path in FONT_PATHS:
         try:
             return image_font.truetype(path, size)
-        except (IOError, OSError):
+        except OSError:
             continue
     return image_font.load_default()
 
@@ -135,7 +139,7 @@ def _scaled_coord(value: float, scale: float, size: int) -> int:
 
 
 def _draw_label(
-    draw: "ImageDraw.ImageDraw",
+    draw: ImageDraw.ImageDraw,
     xy: tuple[int, int],
     text: str,
     font: object,
@@ -388,7 +392,7 @@ def _darken(color: tuple[int, int, int], amount: int = 80) -> tuple[int, int, in
 
 
 def _draw_dock(
-    draw: "ImageDraw.ImageDraw",
+    draw: ImageDraw.ImageDraw,
     dock_x: int,
     dock_y: int,
     size: int = 6,
@@ -428,7 +432,7 @@ def _draw_dock(
 
 
 def _draw_robot(
-    draw: "ImageDraw.ImageDraw",
+    draw: ImageDraw.ImageDraw,
     rx: int,
     ry: int,
     heading: float | None,
@@ -482,7 +486,6 @@ def _draw_robot(
     )
 
     # Flow-style front sensor bar, rotated with heading.
-    front_centre = point(radius * 0.58, 0)
     bar_half_width = radius * 0.38
     bar_half_height = max(2, radius * 0.13)
     bar = [
@@ -594,10 +597,11 @@ def render_map_png(
             room_id = val >> 8
             ptype = val & 0xFF
 
-            if 1 <= room_id <= len(ROOM_COLORS):
-                base = ROOM_COLORS[room_id - 1]
-            else:
-                base = COLOR_FALLBACK
+            base = (
+                ROOM_COLORS[room_id - 1]
+                if 1 <= room_id <= len(ROOM_COLORS)
+                else COLOR_FALLBACK
+            )
 
             if ptype & 0x10:  # wall/border edge
                 px[x, y] = _opaque(_darken(base))
@@ -691,13 +695,13 @@ def render_base_map(
     dock_x: float | None = None,
     dock_y: float | None = None,
     room_names: dict[int, str] | None = None,
-    obstacles: "list | None" = None,
+    obstacles: list | None = None,
     origin_x: int = 0,
     origin_y: int = 0,
     show_obstacle_labels: bool = True,
     show_room_labels: bool = True,
     show_dock: bool = True,
-) -> "Image.Image | None":
+) -> Image.Image | None:
     """Render the static floor plan as a PIL Image (no robot overlay).
 
     Returns a PIL Image that can be cached and reused across frames.
@@ -750,10 +754,11 @@ def render_base_map(
             room_id = val >> 8
             ptype = val & 0xFF
 
-            if 1 <= room_id <= len(ROOM_COLORS):
-                base = ROOM_COLORS[room_id - 1]
-            else:
-                base = COLOR_FALLBACK
+            base = (
+                ROOM_COLORS[room_id - 1]
+                if 1 <= room_id <= len(ROOM_COLORS)
+                else COLOR_FALLBACK
+            )
 
             if ptype & 0x10:
                 px[x, y] = _opaque(_darken(base))
@@ -847,7 +852,7 @@ def render_base_map(
 
 
 def render_overlay(
-    base_img: "Image.Image",
+    base_img: Image.Image,
     height: int,
     robot_x: float | None = None,
     robot_y: float | None = None,
@@ -867,7 +872,7 @@ def render_overlay(
         robot_x: Robot X in grid coordinates.
         robot_y: Robot Y in grid coordinates.
         robot_heading: Heading in degrees.
-        trail: List of (grid_x, grid_y) positions to draw as cleaning path.
+        trail: Narwal-native display_map trajectory points in grid coordinates.
         rotation_degrees: Clockwise map rotation in degrees.
         zoom: Centre zoom factor.
         room_labels: Room label centre points in grid coordinates.
@@ -910,10 +915,9 @@ def render_overlay(
         tx, ty = transformed
         return int(round(tx)), int(round(ty))
 
-    # Draw trail, splitting at invalid samples or impossible jumps.
+    # Draw the Narwal-native trajectory, skipping invalid or discontinuous points.
     if trail and len(trail) >= 2:
-        recent_start = max(len(trail) - 200, 0)
-        trail_width = max(3, int(round(2 * scale)))
+        trail_width = max(1, int(round(scale)))
         previous_grid: tuple[float, float] | None = None
         previous_point: tuple[int, int] | None = None
         for i in range(len(trail) - 1):
@@ -935,12 +939,11 @@ def render_overlay(
                     grid_y - previous_grid[1],
                 )
                 if distance <= max_grid_segment:
-                    color = (
-                        (255, 255, 255, 220)
-                        if i >= recent_start
-                        else (215, 220, 225, 130)
+                    draw.line(
+                        [previous_point, point],
+                        fill=(255, 255, 255, 220),
+                        width=trail_width,
                     )
-                    draw.line([previous_point, point], fill=color, width=trail_width)
 
             previous_grid = (grid_x, grid_y)
             previous_point = point
@@ -1000,10 +1003,10 @@ def render_overlay(
 
 
 def _apply_view_transform(
-    img: "Image.Image",
+    img: Image.Image,
     rotation_degrees: int = 0,
     zoom: float = 1.0,
-) -> "Image.Image":
+) -> Image.Image:
     """Apply final map rotation and centre zoom."""
     rotation = _normalize_rotation(rotation_degrees)
     if rotation:
