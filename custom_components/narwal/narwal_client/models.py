@@ -1259,6 +1259,7 @@ class NarwalState:
         if (
             self.has_recent_native_plan_activity
             and self.has_explicit_off_dock_signal
+            and not self.has_terminal_task_result
             and not self.is_paused
             and not self.is_returning_to_dock
             and self.working_status != WorkingStatus.TASK_COMPLETED

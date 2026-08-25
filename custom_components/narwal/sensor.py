@@ -20,7 +20,7 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from . import NarwalConfigEntry
 from .const import TASK_RESULT_OPTIONS
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity, is_dock_consumable_name
+from .entity import NarwalEntity
 from .narwal_client import NarwalState, WorkingStatus
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
