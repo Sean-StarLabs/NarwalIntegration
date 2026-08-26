@@ -165,6 +165,40 @@ def test_schedule_render_coalesces_while_render_is_running() -> None:
     camera.hass.async_create_task.assert_not_called()
 
 
+def test_handle_update_replaces_pending_render_when_state_returns_to_cache() -> None:
+    """A rollback to the cached key cancels any queued intermediate render."""
+    state = NarwalState()
+    state.map_data = MapData(
+        width=100,
+        height=100,
+        resolution=50,
+        created_at=123,
+        compressed_map=b"\x01",
+    )
+    state.map_display_data = MapDisplayData(robot_x=4.0, robot_y=6.0)
+    camera = _camera(state)
+    cached_key = (
+        123,
+        (True, False, False),
+        (0, 1.0),
+        4.0,
+        6.0,
+        0.0,
+        (),
+    )
+    camera._cached_image = b"old"
+    camera._cache_key = cached_key
+    running_task = MagicMock()
+    running_task.done.return_value = False
+    camera._render_task = running_task
+    camera._pending_render = (MapDisplayData(robot_x=9.0), ("intermediate",))
+
+    camera._handle_coordinator_update()
+
+    assert camera._pending_render == (state.map_display_data, cached_key)
+    camera.hass.async_create_task.assert_not_called()
+
+
 async def test_render_pending_delays_throttled_native_update() -> None:
     """Throttled rendering coalesces again after waiting."""
     camera = _camera(NarwalState())

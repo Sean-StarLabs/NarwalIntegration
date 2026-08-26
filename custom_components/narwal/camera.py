@@ -369,6 +369,8 @@ class NarwalMapCamera(NarwalEntity, Camera):
             new_key = (static_ts, map_options_key, view_options_key)
 
         if new_key == self._cache_key and self._cached_image:
+            if self._render_task is not None and not self._render_task.done():
+                self._pending_render = (display, new_key)
             self.async_write_ha_state()
             return
 

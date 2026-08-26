@@ -62,6 +62,20 @@ VACUUM_WORK_MODES = frozenset(
 )
 
 
+@dataclass(frozen=True)
+class _MapDisplayCacheSnapshot:
+    """Lightweight display-map trajectory snapshot queued for persistence."""
+
+    map_id: int
+    map_created_at: int
+    display: MapDisplayData
+
+    @property
+    def trajectory_signature(self) -> tuple[int, int, int] | tuple[()]:
+        """Return the native trajectory signature for this snapshot."""
+        return self.display.trajectory_signature
+
+
 def _status_payload(response: CommandResponse) -> dict[str, object] | None:
     """Return the decoded robot_base_status payload from a response."""
     if not response.accepted or not isinstance(response.data, dict):
@@ -309,7 +323,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         )
         self._map_display_cache_signature: tuple[int, int, int] | tuple[()] = ()
         self._map_display_cache_last_save = 0.0
-        self._pending_map_display_cache: dict[str, object] | None = None
+        self._pending_map_display_cache_snapshot: _MapDisplayCacheSnapshot | None = None
+        self._pending_map_display_cache_restore: dict[str, object] | None = None
         self._map_display_cache_save_task: asyncio.Task[None] | None = None
         self._map_display_cache_restored = False
         self.dock_action_lock = asyncio.Lock()
@@ -496,15 +511,37 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         state: NarwalState,
     ) -> dict[str, object] | None:
         """Return a serializable display-map trajectory cache payload."""
+        snapshot = self._map_display_cache_snapshot(state)
+        return (
+            self._map_display_cache_payload_from_snapshot(snapshot)
+            if snapshot is not None
+            else None
+        )
+
+    @staticmethod
+    def _map_display_cache_snapshot(
+        state: NarwalState,
+    ) -> _MapDisplayCacheSnapshot | None:
+        """Return a lightweight display-map trajectory cache snapshot."""
         display = state.map_display_data
         if display is None or not display.has_trajectory:
             return None
         static_map = state.map_data
+        return _MapDisplayCacheSnapshot(
+            map_id=getattr(static_map, "map_id", 0) if static_map else 0,
+            map_created_at=getattr(static_map, "created_at", 0) if static_map else 0,
+            display=display,
+        )
+
+    @staticmethod
+    def _map_display_cache_payload_from_snapshot(
+        snapshot: _MapDisplayCacheSnapshot,
+    ) -> dict[str, object]:
+        """Return a serializable display-map trajectory cache payload."""
+        display = snapshot.display
         return {
-            "map_id": getattr(static_map, "map_id", 0) if static_map else 0,
-            "map_created_at": (
-                getattr(static_map, "created_at", 0) if static_map else 0
-            ),
+            "map_id": snapshot.map_id,
+            "map_created_at": snapshot.map_created_at,
             "robot_x": display.robot_x,
             "robot_y": display.robot_y,
             "robot_heading": display.robot_heading,
@@ -551,9 +588,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             if len(signature) != 3:
                 return None
             display = MapDisplayData(
-                robot_x=float(payload.get("robot_x", 0.0)),
-                robot_y=float(payload.get("robot_y", 0.0)),
-                robot_heading=float(payload.get("robot_heading", 0.0)),
+                # Cached trajectories are persisted so completed routes survive
+                # restart, but robot pose must come from a live display_map packet.
+                robot_x=0.0,
+                robot_y=0.0,
+                robot_heading=0.0,
                 timestamp=int(payload.get("timestamp", 0)),
                 dock_ref_x=float(payload.get("dock_ref_x", 0.0)),
                 dock_ref_y=float(payload.get("dock_ref_y", 0.0)),
@@ -570,23 +609,41 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         payload = await self._map_display_cache_store.async_load()
         if not isinstance(payload, Mapping):
             return
+        if self.client.state.map_data is None:
+            self._pending_map_display_cache_restore = dict(payload)
+            return
+        self._restore_map_display_cache_payload(payload)
+
+    def _restore_pending_map_display_cache(self) -> None:
+        """Restore a delayed display-map cache once a static map is available."""
+        payload = self._pending_map_display_cache_restore
+        if payload is None:
+            return
+        self._pending_map_display_cache_restore = None
+        self._restore_map_display_cache_payload(payload)
+
+    def _restore_map_display_cache_payload(
+        self,
+        payload: Mapping[str, object],
+    ) -> bool:
+        """Restore a display-map cache payload if it matches the active map."""
         display = self._map_display_from_cache(payload)
         if display is None:
-            return
+            return False
 
         static_map = self.client.state.map_data
-        if static_map is not None:
-            cached_map_id = self._optional_cache_int(payload.get("map_id"))
-            cached_created_at = self._optional_cache_int(
-                payload.get("map_created_at")
-            )
-            if cached_map_id is not None and cached_map_id != static_map.map_id:
-                return
-            if (
-                cached_created_at is not None
-                and cached_created_at != static_map.created_at
-            ):
-                return
+        if static_map is None:
+            self._pending_map_display_cache_restore = dict(payload)
+            return False
+        cached_map_id = self._optional_cache_int(payload.get("map_id"))
+        cached_created_at = self._optional_cache_int(payload.get("map_created_at"))
+        if cached_map_id is not None and cached_map_id != static_map.map_id:
+            return False
+        if (
+            cached_created_at is not None
+            and cached_created_at != static_map.created_at
+        ):
+            return False
 
         self.client.state.map_display_data = display
         self._map_display_cache_signature = display.trajectory_signature
@@ -595,10 +652,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             "Restored Narwal display-map trajectory cache with %d bytes",
             len(display.trajectory_x_values) + len(display.trajectory_y_values),
         )
+        return True
 
     def _reset_map_display_cache_state(self, *, clear_memory: bool) -> None:
         """Reset in-memory display-map trail cache state."""
-        self._pending_map_display_cache = None
+        self._pending_map_display_cache_snapshot = None
+        self._pending_map_display_cache_restore = None
         self._map_display_cache_signature = ()
         self._map_display_cache_restored = False
         if clear_memory:
@@ -620,18 +679,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self, state: NarwalState, *, immediate: bool = False
     ) -> None:
         """Schedule a throttled save of the latest display-map trajectory."""
-        display = state.map_display_data
-        if display is None or not display.has_trajectory:
+        snapshot = self._map_display_cache_snapshot(state)
+        if snapshot is None:
             return
-        if display.trajectory_signature == self._map_display_cache_signature:
+        if snapshot.trajectory_signature == self._map_display_cache_signature:
             return
-        payload = self._map_display_cache_payload(state)
-        if payload is None:
-            return
-        signature = self._map_display_signature_from_payload(payload)
-        if signature == self._map_display_cache_signature:
-            return
-        self._pending_map_display_cache = payload
+        self._pending_map_display_cache_snapshot = snapshot
         if (
             self._map_display_cache_save_task is not None
             and not self._map_display_cache_save_task.done()
@@ -656,19 +709,18 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         """Persist the newest queued display-map trajectory cache payload."""
         if delay > 0:
             await asyncio.sleep(delay)
-        while self._pending_map_display_cache is not None:
-            payload = self._pending_map_display_cache
-            self._pending_map_display_cache = None
+        while self._pending_map_display_cache_snapshot is not None:
+            snapshot = self._pending_map_display_cache_snapshot
+            self._pending_map_display_cache_snapshot = None
+            payload = self._map_display_cache_payload_from_snapshot(snapshot)
             try:
                 await self._map_display_cache_store.async_save(payload)
             except Exception:
                 _LOGGER.debug("Could not save display-map trajectory cache")
                 return
-            self._map_display_cache_signature = (
-                self._map_display_signature_from_payload(payload)
-            )
+            self._map_display_cache_signature = snapshot.trajectory_signature
             self._map_display_cache_last_save = time.monotonic()
-            if self._pending_map_display_cache is not None:
+            if self._pending_map_display_cache_snapshot is not None:
                 await asyncio.sleep(MAP_DISPLAY_CACHE_SAVE_INTERVAL)
 
     async def _async_flush_map_display_cache(self) -> None:
@@ -681,10 +733,16 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             with contextlib.suppress(asyncio.CancelledError):
                 await self._map_display_cache_save_task
 
-        payload = self._pending_map_display_cache or self._map_display_cache_payload(
-            self.client.state
+        snapshot = (
+            self._pending_map_display_cache_snapshot
+            or self._map_display_cache_snapshot(self.client.state)
         )
-        self._pending_map_display_cache = None
+        self._pending_map_display_cache_snapshot = None
+        payload = (
+            self._map_display_cache_payload_from_snapshot(snapshot)
+            if snapshot is not None
+            else None
+        )
         if payload is None:
             return
 
@@ -847,6 +905,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 self._fetch_missing_map(),
                 f"{DOMAIN}_map_fetch",
             )
+        elif state.map_data is not None:
+            self._restore_pending_map_display_cache()
 
         # Detect return-to-dock transition: CLEANING/CLEANING_ALT → docked state.
         # Broadcast dock fields are stale after docking — immediate poll
@@ -917,6 +977,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             _LOGGER.debug("Map fetch failed — will retry on next broadcast")
             self._map_fetch_pending = False
             return
+        self._restore_pending_map_display_cache()
         if self.client.supports_broadcasts:
             try:
                 await self.client.subscribe_to_topics()
