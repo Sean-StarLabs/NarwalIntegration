@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -21,6 +22,7 @@ from custom_components.narwal.cloud import (  # noqa: E402
     NarwalCloudError,
 )
 from custom_components.narwal.const import DOMAIN  # noqa: E402
+from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
 from custom_components.narwal.sensor import (  # noqa: E402
     NarwalConsumableLifeSensor,
     NarwalConsumableUsedSensor,
@@ -165,6 +167,31 @@ async def test_cloud_consumable_list_refreshes_expired_token_from_code() -> None
     session = _Session(
         {"code": 0, "result": {"token": "old-token"}},
         {"code": 130105, "msg": "access token error"},
+        {"code": 0, "result": {"token": "new-token"}},
+        {"code": 0, "result": []},
+    )
+
+    with patch(
+        "custom_components.narwal.cloud.async_get_clientsession",
+        return_value=session,
+    ):
+        client = NarwalCloudClient(MagicMock(), email="owner@example.com", password="pw")
+
+    assert await client.async_get_consumables(device_id="dev1", product_id="prod1") == []
+    assert [call["headers"].get("Auth-Token") for call in session.calls] == [
+        None,
+        "old-token",
+        None,
+        "new-token",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_cloud_consumable_list_checks_both_token_error_code_fields() -> None:
+    """A non-token err_code must not mask a token error in code."""
+    session = _Session(
+        {"code": 0, "result": {"token": "old-token"}},
+        {"err_code": 0, "code": 130105, "msg": "access token error"},
         {"code": 0, "result": {"token": "new-token"}},
         {"code": 0, "result": []},
     )
@@ -428,6 +455,38 @@ def test_cloud_consumable_entities_unavailable_when_refresh_failed() -> None:
     coordinator.cloud_consumables_error = "cloud down"
 
     assert not any(entity.available for entity in entities)
+
+
+@pytest.mark.asyncio
+async def test_cloud_refresh_waits_for_in_flight_refresh() -> None:
+    """Concurrent refresh callers wait for the active cloud request."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator._cloud_client = MagicMock()
+    coordinator._cloud_consumables_lock = asyncio.Lock()
+    coordinator.cloud_consumables_error = None
+    coordinator.async_update_listeners = MagicMock()
+
+    lock_acquired = asyncio.Event()
+    release_lock = asyncio.Event()
+
+    async def hold_lock() -> None:
+        async with coordinator._cloud_consumables_lock:
+            lock_acquired.set()
+            await release_lock.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    await lock_acquired.wait()
+
+    waiter = asyncio.create_task(coordinator.async_refresh_cloud_consumables())
+    await asyncio.sleep(0)
+
+    assert not waiter.done()
+    coordinator._cloud_client.async_get_consumables.assert_not_called()
+
+    release_lock.set()
+    await holder
+
+    assert await waiter
 
 
 def test_cloud_consumable_entities_unavailable_when_signal_disappears() -> None:

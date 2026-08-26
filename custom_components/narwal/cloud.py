@@ -288,9 +288,9 @@ def _success_code(value: Any) -> bool:
 
 def _is_token_error(data: dict[str, Any]) -> bool:
     """Return true if the cloud payload says the token is invalid."""
-    code = data.get("err_code", data.get("code"))
+    codes = (data.get("err_code"), data.get("code"))
     return (
-        code in (130105, 130109, "130105", "130109")
+        any(code in (130105, 130109, "130105", "130109") for code in codes)
         or data.get("msg") == "access token error"
     )
 

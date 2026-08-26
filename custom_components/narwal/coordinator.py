@@ -1330,7 +1330,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if self._cloud_client is None:
             return False
         if self._cloud_consumables_lock.locked() and not force:
-            return False
+            async with self._cloud_consumables_lock:
+                return self.cloud_consumables_error is None
         async with self._cloud_consumables_lock:
             now = time.monotonic()
             try:
