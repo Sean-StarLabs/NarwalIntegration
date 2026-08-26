@@ -172,7 +172,10 @@ def is_narwal_task_busy(state: NarwalState | None) -> bool:
         or _state_attr_is_true(state, "has_paused_clean_task_context")
         or _state_attr_is_true(state, "is_returning")
         or _state_attr_is_true(state, "is_charging_to_resume")
-        or _state_attr_is_true(state, "is_station_active")
+        or (
+            _state_attr_is_true(state, "is_station_active")
+            and _state_attr_is_true(state, "blocks_robot_start_for_dock_task")
+        )
     )
 
 

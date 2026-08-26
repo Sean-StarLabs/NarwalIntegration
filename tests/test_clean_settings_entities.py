@@ -19,7 +19,10 @@ from homeassistant.components.select import SelectEntity  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 from homeassistant.helpers.restore_state import RestoreEntity  # noqa: E402
 
-from custom_components.narwal.coordinator import CleanSettings  # noqa: E402
+from custom_components.narwal.coordinator import (  # noqa: E402
+    CleanSettings,
+    can_edit_pending_clean_settings,
+)
 from custom_components.narwal.number import NarwalPassesNumber  # noqa: E402
 from custom_components.narwal.select import (  # noqa: E402
     INHERIT_OPTION,
@@ -31,7 +34,7 @@ from custom_components.narwal.select import (  # noqa: E402
     RoomNarwalSettingSelect,
     async_setup_entry,
 )
-from narwal_client import RoomCleanSettings  # noqa: E402
+from narwal_client import NarwalState, RoomCleanSettings  # noqa: E402
 from narwal_client.const import (  # noqa: E402
     CleaningRoute,
     CommandResult,
@@ -42,6 +45,7 @@ from narwal_client.const import (  # noqa: E402
     WorkMode,
 )
 from narwal_client.models import (  # noqa: E402
+    DOCK_TASK_DRY_DOCK_BAG,
     CommandResponse,  # noqa: E402
     MapData,
     RoomInfo,
@@ -337,6 +341,23 @@ class TestNarwalSelect:
         assert not NarwalSelect(coord, _DESCS["work_mode"]).available
         assert not NarwalSelect(coord, _DESCS["mop_strength"]).available
         assert NarwalSelect(coord, _DESCS["water"]).available
+
+    def test_pending_settings_available_during_compatible_dock_bag_drying(self) -> None:
+        state = NarwalState(working_status=WorkingStatus.DOCKED)
+        state.dock_presence = 1
+        state.dock_field11 = 2
+        state.dock_field47 = 3
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=45,
+            target=180,
+            fields=("12", "13"),
+        )
+        coord = _coordinator(state=state)
+
+        assert state.is_station_active
+        assert can_edit_pending_clean_settings(state)
+        assert NarwalSelect(coord, _DESCS["work_mode"]).available
 
     def test_primary_settings_unavailable_when_not_applicable_to_mode(self) -> None:
         coord = _coordinator(state=_state())
