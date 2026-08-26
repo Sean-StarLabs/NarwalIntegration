@@ -769,6 +769,7 @@ class NarwalState:
 
         Dock signals (checked for STANDBY, UNKNOWN, and any unmapped status):
           - dock_sub_state == 1 (field 3.10, old FW only)
+          - dock_presence in (1, 6) (field 3.3, dock-present variants)
           - dock_activity > 0 (field 3.12, old FW only)
           - dock_field11 >= 2 (field 11: old FW 2=docked/1=undocked,
                                v01.07.23 3=docked)
@@ -792,6 +793,8 @@ class NarwalState:
         #   Old FW: dock_sub_state=1, dock_field11=2, dock_field47=3
         #   v01.07.23.00: dock_sub_state absent, dock_field11=3, dock_field47=1
         if self.dock_sub_state == 1:
+            return True
+        if self.dock_presence in (1, 6):
             return True
         if self.dock_activity > 0:
             return True
@@ -879,8 +882,11 @@ class NarwalState:
 
     @property
     def active_dock_task_keys(self) -> tuple[str, ...]:
-        """Return active known dock task keys from robot telemetry only."""
-        return self.telemetry_dock_task_keys
+        """Return active known dock task keys from telemetry and accepted guards."""
+        tasks = set(self.telemetry_dock_task_keys)
+        if assumed := self.assumed_active_dock_task:
+            tasks.add(assumed)
+        return tuple(task for task in DOCK_TASK_KEYS if task in tasks)
 
     @property
     def telemetry_dock_task_keys(self) -> tuple[str, ...]:

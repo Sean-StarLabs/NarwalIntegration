@@ -290,12 +290,22 @@ async def test_successful_start_reserves_private_guard_when_post_refresh_fails()
             or CommandResponse(result_code=CommandResult.SUCCESS)
         )
     )
-    coordinator.async_refresh_dock_status = AsyncMock(side_effect=[True, False])
+    refresh_calls = 0
+
+    async def refresh_dock_status() -> bool:
+        nonlocal refresh_calls
+        refresh_calls += 1
+        if refresh_calls == 2:
+            coordinator.has_fresh_state = False
+            return False
+        return True
+
+    coordinator.async_refresh_dock_status = AsyncMock(side_effect=refresh_dock_status)
     switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[0])
 
     await switch.async_turn_on()
 
-    assert not switch.is_on
+    assert switch.is_on
     assert not switch.available
     coordinator.client.empty_dustbin.assert_awaited_once()
 

@@ -705,16 +705,37 @@ class TestDockTaskCommands:
         mock_send.assert_not_awaited()
 
     @pytest.mark.asyncio
+    async def test_direct_dock_command_rejects_battery_only_refresh(self) -> None:
+        """Direct dock starts require live dock status, not only any status field."""
+        client = self._docked_client()
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send:
+            mock_status.return_value = CommandResponse(data={"2": {"2": 85.0}})
+            result = await client.empty_dustbin()
+
+        assert result.result_code == CommandResult.NOT_READY
+        mock_status.assert_awaited_once_with(full_update=True)
+        mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_stop_dock_task_rejects_unscoped_clean_context(self) -> None:
         """Direct dock stops cannot use generic force-end during robot return."""
         client = self._docked_client()
         client.state.working_status = WorkingStatus.TASK_COMPLETED
         client.state.station_activity = 1
 
-        with patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+            mock_status.return_value = self._docked_status_response()
             result = await client.stop_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
 
         assert result.result_code == CommandResult.NOT_APPLICABLE
+        mock_status.assert_awaited_once_with(full_update=True)
         mock_stop.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -729,12 +750,15 @@ class TestDockTaskCommands:
         success = CommandResponse(result_code=CommandResult.SUCCESS)
 
         with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
             client, "send_command", new_callable=AsyncMock
         ) as mock_send, patch.object(
             client, "_refresh_after_dock_stop", new_callable=AsyncMock
         ) as mock_refresh, patch(
             "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
         ):
+            mock_status.return_value = self._docked_status_response()
             mock_send.return_value = success
             mock_refresh.return_value = True
             result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
@@ -745,6 +769,7 @@ class TestDockTaskCommands:
             payload=b"\x08\x01",
             timeout=15.0,
         )
+        mock_status.assert_awaited_once_with(full_update=True)
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is not None
 
     @pytest.mark.asyncio
@@ -759,10 +784,14 @@ class TestDockTaskCommands:
         )
         client.state.dock_presence = 1
 
-        with patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+            mock_status.return_value = self._docked_status_response()
             result = await client.stop_dock_task(DOCK_TASK_DRY_DUST_BIN)
 
         assert result.result_code == CommandResult.NOT_APPLICABLE
+        mock_status.assert_awaited_once_with(full_update=True)
         mock_stop.assert_not_awaited()
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is not None
 
@@ -778,10 +807,14 @@ class TestDockTaskCommands:
         )
         client.state.dock_presence = 1
 
-        with patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+            mock_status.return_value = self._docked_status_response()
             result = await client.stop_dock_task()
 
         assert result.result_code == CommandResult.NOT_APPLICABLE
+        mock_status.assert_awaited_once_with(full_update=True)
         mock_stop.assert_not_awaited()
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is not None
 
@@ -797,18 +830,58 @@ class TestDockTaskCommands:
         success = CommandResponse(result_code=CommandResult.SUCCESS)
 
         with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
             client, "send_command", new_callable=AsyncMock
         ) as mock_send, patch.object(
             client, "_refresh_after_dock_stop", new_callable=AsyncMock
         ) as mock_refresh, patch(
             "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
         ):
+            mock_status.return_value = self._docked_status_response()
             mock_send.return_value = success
             mock_refresh.return_value = False
             result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
 
         assert result is success
+        mock_status.assert_awaited_once_with(full_update=True)
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is not None
+
+    @pytest.mark.asyncio
+    async def test_stop_dock_task_clears_timer_after_confirmed_idle_refresh(self) -> None:
+        """Accepted dock stop clears the stopped timer once fresh dock status is idle."""
+        client = NarwalClient("127.0.0.1")
+        client.state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+
+        async def refresh_idle() -> bool:
+            client.state.update_from_base_status(
+                {"3": {"1": int(WorkingStatus.DOCKED), "3": 6}, "11": 2}
+            )
+            return True
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send, patch.object(
+            client, "_refresh_after_dock_stop", new_callable=AsyncMock
+        ) as mock_refresh, patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ):
+            mock_status.return_value = self._docked_status_response()
+            mock_send.return_value = success
+            mock_refresh.side_effect = refresh_idle
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+        assert result is success
+        mock_status.assert_awaited_once_with(full_update=True)
+        assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is None
 
     @pytest.mark.asyncio
     async def test_concurrent_direct_dock_stops_serialize_preflight(self) -> None:
@@ -834,12 +907,15 @@ class TestDockTaskCommands:
             return True
 
         with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
             client, "send_command", new_callable=AsyncMock
         ) as mock_send, patch.object(
             client, "_refresh_after_dock_stop", new_callable=AsyncMock
         ) as mock_refresh, patch(
             "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
         ):
+            mock_status.return_value = self._docked_status_response()
             mock_send.side_effect = slow_send
             mock_refresh.side_effect = refresh_state
             first = asyncio.create_task(client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG))
@@ -856,6 +932,7 @@ class TestDockTaskCommands:
             payload=b"\x08\x01",
             timeout=15.0,
         )
+        assert mock_status.await_count == 2
 
     @pytest.mark.asyncio
     async def test_refresh_after_dock_stop_rejects_missing_base_status_payload(self) -> None:
@@ -886,10 +963,14 @@ class TestDockTaskCommands:
             fields=("12", "13"),
         )
 
-        with patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+            mock_status.return_value = self._docked_status_response()
             result = await client.stop_dock_task(DOCK_TASK_DRY_MOP)
 
         assert result.result_code == CommandResult.NOT_APPLICABLE
+        mock_status.assert_awaited_once_with(full_update=True)
         mock_stop.assert_not_awaited()
 
     @pytest.mark.asyncio

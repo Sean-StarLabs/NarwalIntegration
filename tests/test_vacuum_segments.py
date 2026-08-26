@@ -377,7 +377,7 @@ class TestAsyncStartWholeHouse:
 
     async def test_enumerates_all_rooms(self, caplog) -> None:
         """Whole-house start passes every room id to clean/start_clean, skipping plan/start."""
-        state = NarwalState()
+        state = _docked_state()
         state.map_data = MapData(map_id=2, rooms=[
             RoomInfo(room_id=1), RoomInfo(room_id=2), RoomInfo(room_id=0),  # 0 filtered
         ])
@@ -399,7 +399,7 @@ class TestAsyncStartWholeHouse:
 
     async def test_falls_back_to_saved_plan_without_map(self) -> None:
         """With no map rooms available, falls back to the saved-plan start()."""
-        state = NarwalState()  # no map_data
+        state = _docked_state()  # no map_data
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.get_map = AsyncMock()  # does not populate map_data
@@ -415,7 +415,7 @@ class TestAsyncStartWholeHouse:
 
     async def test_rejected_whole_house_start_raises_service_error(self) -> None:
         """Rejected whole-house starts fail the HA service call."""
-        state = NarwalState()
+        state = _docked_state()
         state.map_data = MapData(map_id=2, rooms=[RoomInfo(room_id=1)])
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True

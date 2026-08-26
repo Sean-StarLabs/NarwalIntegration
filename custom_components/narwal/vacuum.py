@@ -247,6 +247,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         """Stop cleaning."""
         await self._ensure_awake()
         async with self.coordinator.dock_action_lock:
+            refreshed = await self.coordinator.async_refresh_dock_status()
             state = self.coordinator.client.state
             if state.is_station_active and not is_clean_session_context(state):
                 if not can_stop_dock_task(state):
@@ -254,6 +255,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                         "Narwal dock task cannot be stopped safely right now"
                     )
                 resp = await self.coordinator.client.stop_dock_task()
+            elif not is_clean_session_context(state):
+                if not refreshed:
+                    raise HomeAssistantError("Narwal status could not be refreshed")
+                raise HomeAssistantError("Narwal has no active task to stop")
             else:
                 resp = await self.coordinator.client.stop()
         _LOGGER.info("Stop response: code=%s, success=%s", resp.result_code, resp.success)
@@ -340,9 +345,26 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         a room-specific clean command to the robot.
         """
         await self._ensure_awake()
+        try:
+            room_ids = [int(sid) for sid in segment_ids]
+        except (TypeError, ValueError) as err:
+            raise HomeAssistantError("Narwal segment IDs must be numeric") from err
+
+        state = self.coordinator.data
+        if state is not None and state.map_data is not None:
+            known_room_ids = {
+                room.room_id for room in state.map_data.rooms if room.room_id > 0
+            }
+            unknown_room_ids = [
+                room_id for room_id in room_ids if room_id not in known_room_ids
+            ]
+            if unknown_room_ids:
+                raise HomeAssistantError(
+                    f"Unknown Narwal room ID: {', '.join(map(str, unknown_room_ids))}"
+                )
+
         async with self.coordinator.dock_action_lock:
             await self._validate_clean_start()
-            room_ids = [int(sid) for sid in segment_ids]
             settings = self.coordinator.clean_settings
             _LOGGER.info(
                 "Starting room-specific clean: rooms=%s mode=%s fan=%s water=%s "

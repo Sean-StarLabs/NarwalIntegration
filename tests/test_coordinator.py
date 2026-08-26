@@ -28,6 +28,7 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     CommandResult,
     NarwalConnectionError,
     NarwalState,
+    WorkingStatus,
 )
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
@@ -268,6 +269,42 @@ class TestCoordinatorResilience:
         coordinator.async_set_updated_data = MagicMock()
 
         assert not await coordinator.async_refresh_dock_status()
+
+    async def test_refresh_dock_status_marks_fresh_before_notifying(self) -> None:
+        """Listeners see fresh dock availability on the successful refresh update."""
+        coordinator = self._make_coordinator()
+        coordinator._dock_status_refresh_failed = True
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(
+                data={"2": {"3": {"1": int(WorkingStatus.DOCKED)}, "11": 2}}
+            )
+        )
+        seen: list[bool] = []
+
+        def capture_update(_state):
+            seen.append(coordinator.has_fresh_state)
+
+        coordinator.async_set_updated_data = MagicMock(side_effect=capture_update)
+
+        assert await coordinator.async_refresh_dock_status()
+        assert seen == [True]
+
+    async def test_refresh_dock_status_marks_stale_before_notifying(self) -> None:
+        """Listeners see stale dock availability on the failed refresh update."""
+        coordinator = self._make_coordinator()
+        coordinator._dock_status_refresh_failed = False
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"2": 85.0}})
+        )
+        seen: list[bool] = []
+
+        def capture_update(_state):
+            seen.append(coordinator.has_fresh_state)
+
+        coordinator.async_set_updated_data = MagicMock(side_effect=capture_update)
+
+        assert not await coordinator.async_refresh_dock_status()
+        assert seen == [False]
 
 
 class TestTopicSubscriptionRenewal:

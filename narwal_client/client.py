@@ -177,6 +177,37 @@ def _base_status_payload(response: CommandResponse) -> dict[str, Any] | None:
     return None
 
 
+def _has_dock_status_payload(response: CommandResponse) -> bool:
+    """Return true when a response carries the dock/base status submessage."""
+    if not response.accepted:
+        return False
+    status_data = _base_status_payload(response)
+    if status_data is None:
+        return False
+    field3 = status_data.get("3")
+    if isinstance(field3, list):
+        field3 = field3[0] if field3 else None
+    return isinstance(field3, dict)
+
+
+def _dock_status_confirms_idle(state: NarwalState) -> bool:
+    """Return true when fresh dock status reports no active station task."""
+    return (
+        state.station_activity <= 0
+        and state.dock_activity in (0, 2, 6)
+        and state.has_dock_presence_signal
+        and state.working_status
+        in (
+            WorkingStatus.UNKNOWN,
+            WorkingStatus.STANDBY,
+            WorkingStatus.DOCKED,
+            WorkingStatus.CHARGED,
+            WorkingStatus.DOCKED_V2,
+            WorkingStatus.TASK_COMPLETED,
+        )
+    )
+
+
 class NarwalConnectionError(Exception):
     """Raised when connection to the vacuum fails."""
 
@@ -1433,11 +1464,22 @@ class NarwalClient:
         except (NarwalCommandError, NarwalConnectionError) as err:
             _LOGGER.debug("Status refresh after dock stop failed: %s", err)
             return False
-        return _base_status_payload(response) is not None
+        return _has_dock_status_payload(response)
 
     async def stop_dock_task(self, task: str | None = None) -> CommandResponse:
         """Stop the active dock task without targeting a different task."""
         async with self._dock_task_lock:
+            if self.state.has_unmapped_active_dock_task:
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            refresh = await self.get_status(full_update=True)
+            if not refresh.accepted:
+                return refresh
+            if not _has_dock_status_payload(refresh):
+                return CommandResponse(
+                    result_code=CommandResult.NOT_READY,
+                    data=refresh.data,
+                    raw_payload=refresh.raw_payload,
+                )
             if self.state.has_unmapped_active_dock_task:
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             active_tasks = self.state.active_dock_task_keys
@@ -1467,9 +1509,11 @@ class NarwalClient:
                 )
 
             await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
-            await self._refresh_after_dock_stop()
+            refreshed = await self._refresh_after_dock_stop()
             if _accepted_response(response):
                 self.state.clear_assumed_dock_task(active_task)
+                if refreshed and _dock_status_confirms_idle(self.state):
+                    self.state.clear_dock_drying_task(active_task)
             return response
 
     async def return_to_base(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
@@ -1542,7 +1586,7 @@ class NarwalClient:
             )
             if not refresh.accepted:
                 return refresh
-            if _base_status_payload(refresh) is None:
+            if not _has_dock_status_payload(refresh):
                 return CommandResponse(
                     result_code=CommandResult.NOT_READY,
                     data=refresh.data,

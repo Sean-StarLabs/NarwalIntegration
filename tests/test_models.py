@@ -249,7 +249,7 @@ class TestNarwalState:
 
         state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2})
 
-        assert state.active_dock_task_keys == ()
+        assert state.active_dock_task_keys == (DOCK_TASK_EMPTY_DUSTBIN,)
         assert state.blocks_robot_start_for_dock_task
 
     def test_confirmed_dock_task_clears_reservation_then_idle_clears_task(self) -> None:
@@ -365,6 +365,7 @@ class TestNarwalState:
         state = NarwalState()
         state.assume_dock_task(DOCK_TASK_DRY_DOCK_BAG)
 
+        assert state.active_dock_task_keys == (DOCK_TASK_DRY_DOCK_BAG,)
         assert state.blocks_robot_start_for_dock_task
 
     def test_assumed_robot_clean_clears_on_active_telemetry(self) -> None:
@@ -385,8 +386,10 @@ class TestNarwalState:
             state.assume_dock_task(DOCK_TASK_DRY_DOCK_BAG)
         with patch("narwal_client.models.time.monotonic", return_value=1029.0):
             assert state.assumed_active_dock_task == DOCK_TASK_DRY_DOCK_BAG
+            assert state.active_dock_task_keys == (DOCK_TASK_DRY_DOCK_BAG,)
         with patch("narwal_client.models.time.monotonic", return_value=1031.0):
             assert state.assumed_active_dock_task is None
+            assert state.active_dock_task_keys == ()
 
     def test_update_from_base_status_charged(self) -> None:
         """Status 14 = fully charged on dock."""
@@ -432,6 +435,13 @@ class TestNarwalState:
         assert state.working_status == WorkingStatus.STANDBY
         assert state.dock_field11 == 2
         assert state.dock_field47 == 3
+        assert state.is_docked
+
+    def test_update_from_base_status_standby_on_dock_presence_only(self) -> None:
+        """STANDBY with field 3.3 dock presence means on dock."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 1, "3": 6}})
+        assert state.working_status == WorkingStatus.STANDBY
         assert state.is_docked
 
     def test_update_from_base_status_standby_on_dock_field47_only(self) -> None:

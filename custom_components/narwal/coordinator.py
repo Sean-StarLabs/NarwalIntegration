@@ -325,9 +325,16 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 raise NarwalConnectionError(
                     f"Status refresh failed with code {response.result_code}"
                 )
+            if not _has_dock_status_payload(response):
+                raise NarwalConnectionError(
+                    "Status refresh returned no dock-status payload"
+                )
+            self._mark_dock_status_refresh_succeeded()
             self.async_set_updated_data(self.client.state)
         except Exception:
+            self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Failed to refresh dock status after transition")
+            self.async_set_updated_data(self.client.state)
 
     async def async_refresh_dock_status(self) -> bool:
         """Refresh full dock/base-station status for action gating."""
@@ -336,20 +343,23 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         except Exception:
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Failed to refresh dock status")
+            self.async_set_updated_data(self.client.state)
             return False
-        self.async_set_updated_data(self.client.state)
         if not response.accepted:
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug(
                 "Dock status refresh was rejected with code %s",
                 response.result_code,
             )
+            self.async_set_updated_data(self.client.state)
             return False
         if not _has_dock_status_payload(response):
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Dock status refresh returned no dock-status payload")
+            self.async_set_updated_data(self.client.state)
             return False
         self._mark_dock_status_refresh_succeeded()
+        self.async_set_updated_data(self.client.state)
         return True
 
     async def _async_update_data(self) -> NarwalState:
