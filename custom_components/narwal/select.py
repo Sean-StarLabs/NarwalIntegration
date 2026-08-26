@@ -343,19 +343,23 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
     @property
     def available(self) -> bool:
         """Return True when this clean parameter can be changed now."""
-        if not clean_setting_applies_to_mode(
-            self.entity_description.attr,
-            self.coordinator.clean_settings.work_mode,
-        ):
-            return False
         state = self.coordinator.data
         setup_available = can_edit_pending_clean_settings(state)
+        setup_applies = clean_setting_applies_to_mode(
+            self.entity_description.attr,
+            self.coordinator.clean_settings.work_mode,
+        )
         if self.entity_description.attr in START_ONLY_CLEAN_SETTING_ATTRS:
-            return setup_available
+            return setup_available and setup_applies
+        live_available = super().available and is_live_clean_setting_available(state)
+        live_mode = self.coordinator.clean_setting_applicability_mode(live=True)
+        live_applies = clean_setting_applies_to_mode(
+            self.entity_description.attr,
+            live_mode,
+        )
         return (
-            setup_available
-            or super().available
-            and is_live_clean_setting_available(state)
+            (setup_available and setup_applies)
+            or (live_available and live_applies)
         )
 
     @property
@@ -371,12 +375,29 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
         state = self.coordinator.data
         setup_available = can_edit_pending_clean_settings(state)
         live_available = super().available and is_live_clean_setting_available(state)
-        if not clean_setting_applies_to_mode(
+        setup_applies = clean_setting_applies_to_mode(
             self.entity_description.attr,
             self.coordinator.clean_settings.work_mode,
+        )
+        live_mode = self.coordinator.clean_setting_applicability_mode(live=True)
+        live_applies = clean_setting_applies_to_mode(
+            self.entity_description.attr,
+            live_mode,
+        )
+        if not (
+            (setup_available and setup_applies)
+            or (
+                self.entity_description.attr not in START_ONLY_CLEAN_SETTING_ATTRS
+                and live_available
+                and live_applies
+            )
         ):
+            if not setup_applies and not live_applies:
+                raise HomeAssistantError(
+                    "This Narwal setting is not available for the selected mode"
+                )
             raise HomeAssistantError(
-                "This Narwal setting is not available for the selected mode"
+                "This Narwal setting cannot be changed right now"
             )
         if (
             self.entity_description.attr in START_ONLY_CLEAN_SETTING_ATTRS
@@ -395,6 +416,7 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
             self.entity_description.live_setter
             and state is not None
             and live_available
+            and live_applies
         ):
             response = await getattr(
                 self.coordinator.client, self.entity_description.live_setter
@@ -714,6 +736,26 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             or "Vacuum and mop"
         )
 
+    def _mode_for_applicability(self, *, live: bool = False) -> str | None:
+        """Return the mode label used for pending or live setting applicability."""
+        if not live:
+            return self._selected_mode
+        mode = self.coordinator.clean_setting_applicability_mode(live=True)
+        if mode is None:
+            return None
+        return LEGACY_MODE_LABELS.get(mode) or self._selected_mode
+
+    def _setting_applies_to_mode(self, key: str, *, live: bool = False) -> bool:
+        """Return whether the legacy setting applies to the selected mode."""
+        mode = self._mode_for_applicability(live=live)
+        if mode is None:
+            return True
+        if key == "water" and mode not in LEGACY_MOP_MODES:
+            return False
+        if key == "scrub" and mode not in LEGACY_MOP_MODES:
+            return False
+        return not (key == "suction" and mode not in LEGACY_VACUUM_MODES)
+
     @property
     def _is_cleaning_or_paused(self) -> bool:
         """Return True while the robot is in an active clean session."""
@@ -722,18 +764,17 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
     def _setting_available(self) -> bool:
         """Return whether this setting is currently meaningful and actionable."""
         key = self.entity_description.setting_key
-        if key == "water" and self._selected_mode not in LEGACY_MOP_MODES:
-            return False
-        if key == "scrub" and self._selected_mode not in LEGACY_MOP_MODES:
-            return False
-        if key == "suction" and self._selected_mode not in LEGACY_VACUUM_MODES:
-            return False
         state = self.coordinator.data
         setup_available = can_edit_pending_clean_settings(state)
         live_available = super().available and is_live_clean_setting_available(state)
+        setup_applies = self._setting_applies_to_mode(key)
         if key in LEGACY_START_ONLY_SETTINGS:
-            return setup_available
-        return setup_available or live_available
+            return setup_available and setup_applies
+        live_applies = self._setting_applies_to_mode(key, live=True)
+        return (
+            (setup_available and setup_applies)
+            or (live_available and live_applies)
+        )
 
     def _apply_option(self, option: str) -> None:
         """Store a legacy option and mirror it into clean settings."""
@@ -806,12 +847,23 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         state = self.coordinator.data
         setup_available = can_edit_pending_clean_settings(state)
         live_available = super().available and is_live_clean_setting_available(state)
-        if key == "water" and self._selected_mode not in LEGACY_MOP_MODES:
-            raise HomeAssistantError("Water level is not available in vacuum-only mode")
-        if key == "scrub" and self._selected_mode not in LEGACY_MOP_MODES:
-            raise HomeAssistantError("Scrub level is not available in vacuum-only mode")
-        if key == "suction" and self._selected_mode not in LEGACY_VACUUM_MODES:
-            raise HomeAssistantError("Suction is not available in mop-only mode")
+        setup_applies = self._setting_applies_to_mode(key)
+        live_applies = self._setting_applies_to_mode(key, live=True)
+        if not (
+            (setup_available and setup_applies)
+            or (
+                key not in LEGACY_START_ONLY_SETTINGS
+                and live_available
+                and live_applies
+            )
+        ):
+            if key in {"water", "scrub"} and not setup_applies and not live_applies:
+                raise HomeAssistantError(
+                    f"{self.entity_description.name} is not available in vacuum-only mode"
+                )
+            if key == "suction" and not setup_applies and not live_applies:
+                raise HomeAssistantError("Suction is not available in mop-only mode")
+            raise HomeAssistantError("This Narwal setting cannot be changed right now")
         if key in LEGACY_START_ONLY_SETTINGS and not setup_available:
             raise HomeAssistantError("This Narwal setting cannot be changed right now")
         if key not in LEGACY_START_ONLY_SETTINGS and not setup_available and not live_available:
@@ -820,7 +872,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             raise HomeAssistantError("AI suction cannot be selected mid-clean")
 
         response = None
-        if live_available and not setup_available:
+        if live_available and live_applies and not setup_available:
             if key == "suction":
                 response = await self.coordinator.client.set_fan_speed(
                     LEGACY_SUCTION_MAP[option]

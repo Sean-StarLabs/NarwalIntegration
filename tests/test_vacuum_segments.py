@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import sys
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -54,12 +54,32 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     coordinator.client.state.firmware_version = "1.0.0"
     coordinator.last_update_success = True
     coordinator.clean_settings = CleanSettings()
+    coordinator.active_clean_work_mode = None
     coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
     coordinator.dock_action_lock = asyncio.Lock()
     coordinator.room_clean_settings_for_rooms = MagicMock(
         side_effect=lambda room_ids: {
             room_id: RoomCleanSettings() for room_id in room_ids
         }
+    )
+    coordinator.compatible_room_clean_work_mode = MagicMock(
+        side_effect=lambda room_settings: next(
+            iter({settings.work_mode for settings in room_settings.values()})
+        )
+    )
+    coordinator.record_accepted_clean_start = MagicMock(
+        side_effect=lambda room_settings: setattr(
+            coordinator,
+            "active_clean_work_mode",
+            next(iter({settings.work_mode for settings in room_settings.values()})),
+        )
+    )
+    coordinator.clean_setting_applicability_mode = MagicMock(
+        side_effect=lambda live=False: (
+            coordinator.active_clean_work_mode
+            if live and coordinator.active_clean_work_mode is not None
+            else coordinator.clean_settings.work_mode
+        )
     )
 
     vac = NarwalVacuum.__new__(NarwalVacuum)
@@ -276,6 +296,33 @@ class TestAsyncCleanSegments:
         await vac.async_clean_segments(["11"])
 
         assert state.has_assumed_robot_clean
+        vac.coordinator.record_accepted_clean_start.assert_called_once()
+
+    async def test_mixed_room_modes_raise_before_segment_start(self) -> None:
+        """Unsupported mixed-mode room profiles fail before dispatch."""
+        state = _docked_state()
+        state.map_data = MapData(
+            map_id=2,
+            rooms=[RoomInfo(room_id=11), RoomInfo(room_id=12)],
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        room_settings = {
+            11: RoomCleanSettings(work_mode=WorkMode.MOP),
+            12: RoomCleanSettings(work_mode=WorkMode.VACUUM),
+        }
+        vac.coordinator.room_clean_settings_for_rooms = MagicMock(
+            return_value=room_settings
+        )
+        vac.coordinator.compatible_room_clean_work_mode = MagicMock(
+            side_effect=ValueError("Mixed Narwal room clean modes are not supported")
+        )
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="Mixed Narwal room clean modes"):
+            await vac.async_clean_segments(["11", "12"])
+
+        vac.coordinator.client.start_rooms.assert_not_awaited()
 
     async def test_rejected_room_clean_raises_service_error(self) -> None:
         """Rejected clean/start_clean responses fail the HA service call."""
@@ -335,6 +382,20 @@ class TestAsyncCleanSegments:
 
 
 class TestVacuumFanSpeed:
+    async def test_restore_none_fan_speed_as_ai_suction(self) -> None:
+        """HA persists AI fan_speed as None; restore it as FanLevel.UNSPECIFIED."""
+        vac = _make_vacuum(state=_docked_state())
+        vac.coordinator.clean_settings.fan = FanLevel.NORMAL
+
+        with patch.object(
+            vac,
+            "async_get_last_state",
+            AsyncMock(return_value=MagicMock(attributes={"fan_speed": None})),
+        ):
+            await vac.async_added_to_hass()
+
+        assert vac.coordinator.clean_settings.fan == FanLevel.UNSPECIFIED
+
     async def test_live_fan_change_applies_while_paused(self) -> None:
         state = _active_clean_state()
         state.is_paused = True
@@ -348,6 +409,18 @@ class TestVacuumFanSpeed:
         vac.coordinator.client.set_fan_speed.assert_awaited_once_with(FanLevel.STRONG)
         assert vac.coordinator.clean_settings.fan == FanLevel.STRONG
 
+    async def test_fan_change_stages_when_unavailable_idle(self) -> None:
+        """Idle pending fan changes do not need a live coordinator connection."""
+        state = _docked_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.last_update_success = False
+        vac.coordinator.client.set_fan_speed = AsyncMock()
+
+        await vac.async_set_fan_speed("Strong")
+
+        vac.coordinator.client.set_fan_speed.assert_not_awaited()
+        assert vac.coordinator.clean_settings.fan == FanLevel.STRONG
+
     async def test_fan_change_rejected_when_entity_unavailable(self) -> None:
         state = _active_clean_state()
         vac = _make_vacuum(state=state)
@@ -355,6 +428,34 @@ class TestVacuumFanSpeed:
         vac.coordinator.client.set_fan_speed = AsyncMock()
 
         with pytest.raises(Exception, match="fan speed cannot be changed"):
+            await vac.async_set_fan_speed("Strong")
+
+        vac.coordinator.client.set_fan_speed.assert_not_awaited()
+
+    async def test_live_fan_change_uses_active_room_mode(self) -> None:
+        """Live fan gating follows the accepted room mode, not pending global mode."""
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.clean_settings.work_mode = WorkMode.MOP
+        vac.coordinator.active_clean_work_mode = WorkMode.VACUUM
+        vac.coordinator.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+
+        await vac.async_set_fan_speed("Strong")
+
+        vac.coordinator.client.set_fan_speed.assert_awaited_once_with(FanLevel.STRONG)
+        assert vac.coordinator.clean_settings.fan == FanLevel.STRONG
+
+    async def test_live_fan_change_rejects_active_mop_mode(self) -> None:
+        """Pending vacuum mode must not expose fan control for an active mop-only task."""
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.clean_settings.work_mode = WorkMode.VACUUM
+        vac.coordinator.active_clean_work_mode = WorkMode.MOP
+        vac.coordinator.client.set_fan_speed = AsyncMock()
+
+        with pytest.raises(Exception, match="fan speed cannot be changed|mop-only"):
             await vac.async_set_fan_speed("Strong")
 
         vac.coordinator.client.set_fan_speed.assert_not_awaited()

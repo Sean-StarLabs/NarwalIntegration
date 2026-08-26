@@ -318,7 +318,14 @@ def _async_register_services(hass: HomeAssistant) -> None:
             if not coordinator.client.robot_awake:
                 await coordinator.client.wake(timeout=10.0)
 
-        plans: list[tuple[NarwalCoordinator, list[int], RoomCleanSettings]] = []
+        plans: list[
+            tuple[
+                NarwalCoordinator,
+                list[int],
+                RoomCleanSettings,
+                dict[int, RoomCleanSettings],
+            ]
+        ] = []
         for coordinator in coordinators:
             room_ids = await _async_room_ids_for_coordinator(
                 coordinator,
@@ -342,13 +349,22 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 passes=passes,
                 route=route,
             )
-            plans.append((coordinator, room_ids, requested_settings))
+            room_settings = coordinator.room_clean_settings_for_rooms(
+                room_ids,
+                default=requested_settings,
+                use_room_profiles=False,
+            )
+            try:
+                coordinator.compatible_room_clean_work_mode(room_settings)
+            except ValueError as err:
+                raise HomeAssistantError(str(err)) from err
+            plans.append((coordinator, room_ids, requested_settings, room_settings))
 
         async with AsyncExitStack() as stack:
             for coordinator in sorted(coordinators, key=id):
                 await stack.enter_async_context(coordinator.dock_action_lock)
 
-            for coordinator, _, _ in plans:
+            for coordinator, _, _, _ in plans:
                 if not await coordinator.async_refresh_dock_status():
                     raise HomeAssistantError("Narwal status could not be refreshed")
                 if not can_start_cleaning(coordinator.client.state):
@@ -356,7 +372,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                         "Narwal room clean cannot be started right now"
                     )
 
-            for coordinator, room_ids, requested_settings in plans:
+            for coordinator, room_ids, requested_settings, room_settings in plans:
                 client = coordinator.client
                 resp = await client.start_rooms(
                     room_ids,
@@ -366,11 +382,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                     mop_strength=requested_settings.mop_strength,
                     passes=requested_settings.passes,
                     route=requested_settings.route,
-                    room_settings=coordinator.room_clean_settings_for_rooms(
-                        room_ids,
-                        default=requested_settings,
-                        use_room_profiles=False,
-                    ),
+                    room_settings=room_settings,
                 )
                 if resp.result_code == 0:
                     result_name = "ACCEPTED"
@@ -395,6 +407,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
                 coordinator.clean_settings.mop_strength = requested_settings.mop_strength
                 coordinator.clean_settings.passes = requested_settings.passes
                 coordinator.clean_settings.route = requested_settings.route
+                coordinator.record_accepted_clean_start(room_settings)
                 client.state.assume_robot_clean()
                 coordinator.async_set_updated_data(client.state)
 

@@ -26,7 +26,11 @@ from custom_components.narwal import (  # noqa: E402
     _validate_pass_count,
 )
 from custom_components.narwal.const import DOMAIN, SERVICE_CLEAN_ROOMS  # noqa: E402
-from custom_components.narwal.coordinator import CleanSettings, NarwalCoordinator  # noqa: E402
+from custom_components.narwal.coordinator import (  # noqa: E402
+    CleanSettings,
+    NarwalCoordinator,
+    can_start_cleaning,
+)
 from custom_components.narwal.narwal_client import (  # noqa: E402
     CommandResponse,
     CommandResult,
@@ -34,6 +38,7 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     MapData,
     NarwalState,
     RoomInfo,
+    WorkMode,
 )
 
 
@@ -61,6 +66,7 @@ def _coordinator(
     coordinator.clean_settings = CleanSettings()
     coordinator.room_clean_settings = {}
     coordinator.room_clean_settings_customized = {}
+    coordinator.active_clean_work_mode = None
     coordinator.data = state
     coordinator.async_set_updated_data = MagicMock()
     return coordinator
@@ -123,6 +129,8 @@ async def test_clean_rooms_service_starts_requested_rooms() -> None:
     coordinator.client.start_rooms.assert_awaited_once()
     assert coordinator.client.start_rooms.await_args.args[0] == [4, 7]
     assert coordinator.client.state.has_assumed_robot_clean
+    assert coordinator.active_clean_work_mode == WorkMode.VACUUM_AND_MOP
+    assert not can_start_cleaning(coordinator.client.state)
     coordinator.async_set_updated_data.assert_called_once_with(coordinator.client.state)
 
 

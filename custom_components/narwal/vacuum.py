@@ -30,7 +30,7 @@ from .coordinator import (
 )
 from .dock_tasks import can_start_robot_clean, can_stop_dock_task, is_clean_session_context
 from .entity import NarwalEntity
-from .narwal_client import CommandResult, WorkingStatus
+from .narwal_client import CommandResult, FanLevel, WorkingStatus
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 _LOGGER = logging.getLogger(__name__)
@@ -112,7 +112,12 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         """Restore the pending fan speed into clean_settings (persists across restarts)."""
         await super().async_added_to_hass()
         last = await self.async_get_last_state()
-        if last is not None and (fan := last.attributes.get("fan_speed")) in FAN_SPEED_MAP:
+        if last is None or "fan_speed" not in last.attributes:
+            return
+        fan = last.attributes.get("fan_speed")
+        if fan is None:
+            self.coordinator.clean_settings.fan = FanLevel.UNSPECIFIED
+        elif fan in FAN_SPEED_MAP:
             self.coordinator.clean_settings.fan = FAN_SPEED_MAP[fan]
 
     @property
@@ -209,6 +214,11 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             if not room_ids:
                 raise HomeAssistantError("Narwal room map is not available")
             settings = self.coordinator.clean_settings
+            room_settings = self.coordinator.room_clean_settings_for_rooms(room_ids)
+            try:
+                self.coordinator.compatible_room_clean_work_mode(room_settings)
+            except ValueError as err:
+                raise HomeAssistantError(str(err)) from err
             resp = await self.coordinator.client.start_rooms(
                 room_ids,
                 work_mode=settings.work_mode,
@@ -217,9 +227,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 mop_strength=settings.mop_strength,
                 passes=settings.passes,
                 route=settings.route,
-                room_settings=self.coordinator.room_clean_settings_for_rooms(room_ids),
+                room_settings=room_settings,
             )
             if resp.accepted:
+                self.coordinator.record_accepted_clean_start(room_settings)
                 self.coordinator.client.state.assume_robot_clean()
                 self.coordinator.async_set_updated_data(self.coordinator.client.state)
         _LOGGER.info(
@@ -321,19 +332,31 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         level = FAN_SPEED_MAP.get(fan_speed)
         if level is None:
             return
-        if not self.available:
-            raise HomeAssistantError("Narwal fan speed cannot be changed right now")
         state = self.coordinator.data
-        if not clean_setting_applies_to_mode("fan", self.coordinator.clean_settings.work_mode):
+        setup_available = can_edit_pending_clean_settings(state)
+        live_available = super().available and is_live_clean_setting_available(state)
+        setup_applies = clean_setting_applies_to_mode(
+            "fan",
+            self.coordinator.clean_settings.work_mode,
+        )
+        live_applies = clean_setting_applies_to_mode(
+            "fan",
+            self.coordinator.clean_setting_applicability_mode(live=True),
+        )
+        if not (
+            (setup_available and setup_applies)
+            or (live_available and live_applies)
+        ):
+            if not setup_applies and not live_applies:
+                raise HomeAssistantError(
+                    "Narwal fan speed is not available in mop-only mode"
+                )
+            raise HomeAssistantError("Narwal fan speed cannot be changed right now")
+        if live_available and not live_applies:
             raise HomeAssistantError(
                 "Narwal fan speed is not available in mop-only mode"
             )
-        if not (
-            can_edit_pending_clean_settings(state)
-            or is_live_clean_setting_available(state)
-        ):
-            raise HomeAssistantError("Narwal fan speed cannot be changed right now")
-        if is_live_clean_setting_available(state):
+        if live_available:
             resp = await self.coordinator.client.set_fan_speed(level)
             _raise_if_command_failed(resp, "set fan speed")
         self.coordinator.clean_settings.fan = level
@@ -416,6 +439,11 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                     f"{', '.join(str(room_id) for room_id in unknown_ids)}"
                 )
             settings = self.coordinator.clean_settings
+            room_settings = self.coordinator.room_clean_settings_for_rooms(room_ids)
+            try:
+                self.coordinator.compatible_room_clean_work_mode(room_settings)
+            except ValueError as err:
+                raise HomeAssistantError(str(err)) from err
             _LOGGER.info(
                 "Starting room-specific clean: rooms=%s mode=%s fan=%s water=%s "
                 "mop_strength=%s passes=%s route=%s",
@@ -431,9 +459,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 mop_strength=settings.mop_strength,
                 passes=settings.passes,
                 route=settings.route,
-                room_settings=self.coordinator.room_clean_settings_for_rooms(room_ids),
+                room_settings=room_settings,
             )
             if resp.accepted:
+                self.coordinator.record_accepted_clean_start(room_settings)
                 self.coordinator.client.state.assume_robot_clean()
                 self.coordinator.async_set_updated_data(self.coordinator.client.state)
         result_name = _result_name(resp.result_code)

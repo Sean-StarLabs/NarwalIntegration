@@ -36,6 +36,7 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     NarwalState,
     RoomCleanSettings,
     WorkingStatus,
+    WorkMode,
 )
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
@@ -297,6 +298,19 @@ class TestCoordinatorResilience:
 
         assert coordinator._consecutive_failures == 0
         assert not coordinator.has_fresh_state
+
+    async def test_idle_push_clears_active_clean_work_mode(self) -> None:
+        """Accepted-task mode metadata is only kept for active clean contexts."""
+        coordinator = self._make_coordinator()
+        coordinator.active_clean_work_mode = WorkMode.MOP
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator._prev_working_status = WorkingStatus.CLEANING
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": int(WorkingStatus.DOCKED), "3": 6}})
+
+        coordinator._on_state_update(state)
+
+        assert coordinator.active_clean_work_mode is None
 
     async def test_poll_does_not_call_connect(self) -> None:
         """_async_update_data does NOT call client.connect() when disconnected."""

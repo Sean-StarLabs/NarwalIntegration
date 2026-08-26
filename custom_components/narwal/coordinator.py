@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass, fields
 from datetime import timedelta
 
@@ -116,6 +117,7 @@ def is_active_clean_session(state: NarwalState | None) -> bool:
         return False
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
+        or _state_attr_is_true(state, "has_assumed_robot_clean")
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
     ) and not _state_attr_is_true(state, "is_returning")
@@ -128,6 +130,7 @@ def is_clean_session_context(state: NarwalState | None) -> bool:
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
         or state.working_status == WorkingStatus.REMAPPING
+        or _state_attr_is_true(state, "has_assumed_robot_clean")
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
         or _state_attr_is_true(state, "is_returning")
@@ -146,8 +149,10 @@ def is_live_clean_setting_available(state: NarwalState | None) -> bool:
     )
 
 
-def clean_setting_applies_to_mode(attr: str, work_mode: WorkMode) -> bool:
+def clean_setting_applies_to_mode(attr: str, work_mode: WorkMode | None) -> bool:
     """Return True when a clean setting is meaningful for the selected mode."""
+    if work_mode is None:
+        return True
     if attr in {"water", "mop_strength"}:
         return work_mode in MOP_WORK_MODES
     if attr == "fan":
@@ -162,6 +167,7 @@ def is_narwal_task_busy(state: NarwalState | None) -> bool:
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
         or state.working_status == WorkingStatus.REMAPPING
+        or _state_attr_is_true(state, "has_assumed_robot_clean")
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
         or _state_attr_is_true(state, "is_returning")
@@ -224,6 +230,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.clean_settings = CleanSettings()
         self.room_clean_settings: dict[tuple[str | None, int], RoomCleanSettings] = {}
         self.room_clean_settings_customized: dict[tuple[str | None, int], set[str]] = {}
+        self.active_clean_work_mode: WorkMode | None = None
         self._listen_task: asyncio.Task[None] | None = None
         self._fast_poll_remaining = 0
         self._prev_working_status = WorkingStatus.UNKNOWN
@@ -259,6 +266,40 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             passes=self.clean_settings.passes,
             route=self.clean_settings.route,
         )
+
+    @staticmethod
+    def compatible_room_clean_work_mode(
+        room_settings: Mapping[int, RoomCleanSettings],
+    ) -> WorkMode:
+        """Return the shared work mode, rejecting mixed-mode room profiles."""
+        modes = {settings.work_mode for settings in room_settings.values()}
+        if len(modes) == 1:
+            return next(iter(modes))
+        raise ValueError("Mixed Narwal room clean modes are not supported")
+
+    def record_accepted_clean_start(
+        self,
+        room_settings: Mapping[int, RoomCleanSettings],
+    ) -> None:
+        """Record the effective mode for the accepted robot task."""
+        self.active_clean_work_mode = self.compatible_room_clean_work_mode(
+            room_settings
+        )
+
+    def clean_setting_applicability_mode(
+        self, *, live: bool = False
+    ) -> WorkMode | None:
+        """Return the mode used to decide whether fan/water controls apply."""
+        if live:
+            state = self.data or self.client.state
+            if is_clean_session_context(state):
+                return self.active_clean_work_mode
+        return self.clean_settings.work_mode
+
+    def _sync_active_clean_context(self, state: NarwalState) -> None:
+        """Clear accepted-task metadata once the robot is no longer in a clean context."""
+        if not is_clean_session_context(state):
+            self.active_clean_work_mode = None
 
     @staticmethod
     def _normalise_room_settings_map_id(map_id: object) -> str | None:
@@ -516,6 +557,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     f"{DOMAIN}_resub",
                 )
 
+        self._sync_active_clean_context(state)
         self.async_set_updated_data(state)
 
         # Broadcast arrived — switch back to normal polling if in fast mode
@@ -569,10 +611,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     "Status refresh returned no dock-status payload"
                 )
             self._mark_dock_status_refresh_succeeded()
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
         except Exception:
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Failed to refresh dock status after transition")
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
 
     async def async_refresh_dock_status(self) -> bool:
@@ -583,6 +627,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         except Exception:
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Failed to refresh dock status")
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
             return False
         if not response.accepted:
@@ -591,15 +636,18 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 "Dock status refresh was rejected with code %s",
                 response.result_code,
             )
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
             return False
         if full_update and not _has_dock_status_payload(response):
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Dock status refresh returned no dock-status payload")
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
             return False
         if full_update:
             self._mark_dock_status_refresh_succeeded()
+        self._sync_active_clean_context(self.client.state)
         self.async_set_updated_data(self.client.state)
         return True
 
@@ -684,6 +732,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 if self._fast_poll_remaining <= 0:
                     self.update_interval = POLL_INTERVAL
 
+        self._sync_active_clean_context(self.client.state)
         return self.client.state
 
     async def async_shutdown(self) -> None:

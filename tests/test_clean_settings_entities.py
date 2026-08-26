@@ -69,6 +69,7 @@ def _coordinator(
     coord.clean_settings = settings or CleanSettings()
     coord.room_clean_settings = {}
     coord.room_clean_settings_customized = {}
+    coord.active_clean_work_mode = None
     coord.data = state
     coord._legacy_mode_option = "Vacuum and mop"
 
@@ -147,6 +148,18 @@ def _coordinator(
     coord.effective_room_clean_settings_for.side_effect = effective_room_clean_settings_for
     coord.set_room_clean_setting.side_effect = set_room_clean_setting
     coord.clear_room_clean_setting.side_effect = clear_room_clean_setting
+    def clean_setting_applicability_mode(*, live: bool = False) -> WorkMode | None:
+        if not live:
+            return coord.clean_settings.work_mode
+        if (
+            getattr(coord.data, "is_cleaning", False) is True
+            or getattr(coord.data, "has_recent_active_working_status", False) is True
+            or getattr(coord.data, "has_paused_clean_task_context", False) is True
+        ):
+            return coord.active_clean_work_mode
+        return coord.clean_settings.work_mode
+
+    coord.clean_setting_applicability_mode.side_effect = clean_setting_applicability_mode
     return coord
 
 
@@ -217,6 +230,49 @@ class TestNarwalSelect:
         await sel.async_select_option("wet")
 
         assert coord.clean_settings.water == MopHumidity.WET
+        coord.client.set_mop_humidity.assert_awaited_once_with(MopHumidity.WET)
+
+    async def test_live_water_uses_active_room_mode(self) -> None:
+        """Live water gating follows the accepted room mode, not pending globals."""
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.clean_settings.work_mode = WorkMode.VACUUM
+        coord.active_clean_work_mode = WorkMode.MOP
+        coord.client.set_mop_humidity = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+        sel = NarwalSelect(coord, _DESCS["water"])
+
+        await sel.async_select_option("wet")
+
+        assert coord.clean_settings.water == MopHumidity.WET
+        coord.client.set_mop_humidity.assert_awaited_once_with(MopHumidity.WET)
+
+    async def test_live_water_rejects_active_vacuum_mode(self) -> None:
+        """Pending mop mode must not expose water for an active vacuum-only task."""
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.clean_settings.work_mode = WorkMode.MOP
+        coord.active_clean_work_mode = WorkMode.VACUUM
+        coord.client.set_mop_humidity = AsyncMock()
+        sel = NarwalSelect(coord, _DESCS["water"])
+
+        with pytest.raises(HomeAssistantError, match="changed right now|selected mode"):
+            await sel.async_select_option("wet")
+
+        coord.client.set_mop_humidity.assert_not_awaited()
+
+    async def test_live_water_allows_unknown_active_mode(self) -> None:
+        """Unknown active mode keeps live controls exposed for device-side gating."""
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.clean_settings.work_mode = WorkMode.MOP
+        coord.active_clean_work_mode = None
+        coord.client.set_mop_humidity = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+        sel = NarwalSelect(coord, _DESCS["water"])
+
+        assert sel.available
+        await sel.async_select_option("wet")
+
         coord.client.set_mop_humidity.assert_awaited_once_with(MopHumidity.WET)
 
     async def test_water_applies_live_while_paused(self) -> None:
@@ -354,6 +410,46 @@ class TestLegacyNarwalSettingSelect:
 
         coord.clean_settings.work_mode = WorkMode.MOP
         assert not LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"]).available
+
+    async def test_legacy_live_water_uses_active_room_mode(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.clean_settings.work_mode = WorkMode.VACUUM
+        coord.active_clean_work_mode = WorkMode.MOP
+        coord.client.set_mop_humidity = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["water"])
+
+        await sel.async_select_option("Wet")
+
+        assert coord.clean_settings.water == MopHumidity.WET
+        coord.client.set_mop_humidity.assert_awaited_once_with(MopHumidity.WET)
+
+    async def test_legacy_live_suction_rejects_active_mop_mode(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.clean_settings.work_mode = WorkMode.VACUUM
+        coord.active_clean_work_mode = WorkMode.MOP
+        coord.client.set_fan_speed = AsyncMock()
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+
+        with pytest.raises(HomeAssistantError, match="changed right now|mop-only"):
+            await sel.async_select_option("Strong")
+
+        coord.client.set_fan_speed.assert_not_awaited()
+
+    async def test_legacy_live_suction_allows_unknown_active_mode(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.clean_settings.work_mode = WorkMode.VACUUM
+        coord.active_clean_work_mode = None
+        coord.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+
+        assert sel.available
+        await sel.async_select_option("Strong")
+
+        coord.client.set_fan_speed.assert_awaited_once_with(FanLevel.STRONG)
 
     def test_legacy_settings_are_config_entities(self) -> None:
         coord = _coordinator(state=_state())
