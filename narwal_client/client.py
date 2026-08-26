@@ -187,7 +187,9 @@ def _has_dock_status_payload(response: CommandResponse) -> bool:
     field3 = status_data.get("3")
     if isinstance(field3, list):
         field3 = field3[0] if field3 else None
-    return isinstance(field3, dict)
+    if not isinstance(field3, dict):
+        return False
+    return bool({"1", "2", "3", "7", "10", "12", "18"}.intersection(field3))
 
 
 def _dock_status_confirms_idle(state: NarwalState) -> bool:

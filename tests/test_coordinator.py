@@ -270,6 +270,16 @@ class TestCoordinatorResilience:
 
         assert not await coordinator.async_refresh_dock_status()
 
+    async def test_refresh_dock_status_rejects_empty_dock_status_payload(self) -> None:
+        """Dock command gates require real status subfields inside field 3."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"3": {}}})
+        )
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert not await coordinator.async_refresh_dock_status()
+
     async def test_refresh_dock_status_marks_fresh_before_notifying(self) -> None:
         """Listeners see fresh dock availability on the successful refresh update."""
         coordinator = self._make_coordinator()

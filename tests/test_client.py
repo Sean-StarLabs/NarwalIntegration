@@ -948,6 +948,17 @@ class TestDockTaskCommands:
         mock_status.assert_awaited_once_with(full_update=True)
 
     @pytest.mark.asyncio
+    async def test_refresh_after_dock_stop_rejects_empty_dock_status(self) -> None:
+        """An empty dock-status submessage must not clear active dock tasks."""
+        client = NarwalClient("127.0.0.1")
+
+        with patch.object(client, "get_status", new_callable=AsyncMock) as mock_status:
+            mock_status.return_value = CommandResponse(data={"2": {"3": {}}})
+            assert not await client._refresh_after_dock_stop()
+
+        mock_status.assert_awaited_once_with(full_update=True)
+
+    @pytest.mark.asyncio
     async def test_stop_dock_task_rejects_ambiguous_generic_stop(self) -> None:
         client = NarwalClient("127.0.0.1")
         client.state.set_dock_drying_task(
