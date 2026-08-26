@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import struct
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -747,6 +746,25 @@ class TestDockTaskCommands:
             timeout=15.0,
         )
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is not None
+
+    @pytest.mark.asyncio
+    async def test_stop_dry_dust_bag_rejects_generic_force_end(self) -> None:
+        """Dry dust-bin force_end variants accept but do not stop the task."""
+        client = NarwalClient("127.0.0.1")
+        client.state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
+        client.state.dock_presence = 1
+
+        with patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DUST_BIN)
+
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+        mock_stop.assert_not_awaited()
+        assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is not None
 
     @pytest.mark.asyncio
     async def test_stop_dock_task_keeps_timer_when_refresh_fails(self) -> None:

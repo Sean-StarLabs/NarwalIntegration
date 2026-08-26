@@ -1454,6 +1454,8 @@ class NarwalClient:
 
             payload = _DOCK_TASK_FORCE_END_PAYLOADS.get(active_task)
             if payload is None:
+                if active_task == DOCK_TASK_DRY_DUST_BIN:
+                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
                 if len(active_tasks) > 1:
                     return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
                 response = await self.stop(timeout=15.0)

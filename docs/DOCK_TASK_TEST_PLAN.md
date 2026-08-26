@@ -152,6 +152,9 @@ Verify:
 - Timer fields `10/11`, if present, produce `progress` and `time_left`.
 - Polling-only fallback survives the immediate stale post-command refresh.
 - Stop does not use generic force-end when another task is also active.
+- Live 2026-08-26: `task/force_end` with field-1 values 1..12 returned
+  success on Flow 2 but did not stop `dry_dust_bin`; do not expose a local stop
+  for this task until an app capture identifies the real command.
 
 ### Dry dock bag
 
