@@ -136,7 +136,10 @@ def can_stop_dock_task(state: NarwalState | None, task_key: str | None = None) -
         return task_key in SCOPED_STOP_DOCK_TASKS and task_key in active_keys
     active_key_set = set(active_keys)
     if task_key is None:
-        return len(active_key_set) == 1 and next(iter(active_key_set)) in STOPPABLE_DOCK_TASKS
+        return (
+            len(active_key_set) == 1
+            and next(iter(active_key_set)) in STOPPABLE_DOCK_TASKS
+        )
     if task_key not in active_key_set or task_key not in STOPPABLE_DOCK_TASKS:
         return False
     if task_key in SCOPED_STOP_DOCK_TASKS:

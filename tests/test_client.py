@@ -767,6 +767,25 @@ class TestDockTaskCommands:
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is not None
 
     @pytest.mark.asyncio
+    async def test_stop_dry_dust_bag_rejects_unscoped_generic_stop(self) -> None:
+        """Unscoped dock stop must not use generic stop for dry dust-bin drying."""
+        client = NarwalClient("127.0.0.1")
+        client.state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
+        client.state.dock_presence = 1
+
+        with patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+            result = await client.stop_dock_task()
+
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+        mock_stop.assert_not_awaited()
+        assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is not None
+
+    @pytest.mark.asyncio
     async def test_stop_dock_task_keeps_timer_when_refresh_fails(self) -> None:
         client = NarwalClient("127.0.0.1")
         client.state.set_dock_drying_task(
