@@ -93,6 +93,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
     """Camera entity that streams the vacuum's map as MJPEG."""
 
     _attr_name = "Map"
+    _attr_frame_interval = _MIN_RENDER_INTERVAL
     _attr_is_streaming = True
 
     def __init__(self, coordinator: NarwalCoordinator) -> None:
@@ -169,7 +170,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
 
     @property
     def extra_state_attributes(self) -> dict[str, str | int]:
-        """Expose render count so HA detects state changes for MJPEG refresh."""
+        """Expose render count for diagnostics in local test stubs."""
         return {"render_count": self._render_count}
 
     @staticmethod
@@ -503,6 +504,7 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 self._cache_key = new_key
                 self._last_render_time = time.monotonic()
                 self._render_count += 1
+                self.async_update_token()
 
         except Exception:
             _LOGGER.exception("Failed to render map overlay")

@@ -32,12 +32,18 @@ def _camera(state: NarwalState) -> NarwalMapCamera:
     camera.hass = MagicMock()
     camera.hass.async_create_task = MagicMock()
     camera.async_write_ha_state = MagicMock()
+    camera.async_update_token = MagicMock()
     camera._cached_image = None
     camera._cache_key = ()
     camera._last_render_time = 0.0
     camera._pending_render = None
     camera._render_task = None
     camera._async_render = MagicMock(return_value="render-task")
+    camera._base_map_image = None
+    camera._base_map_ts = 0
+    camera._base_map_options_key = (True, True, True)
+    camera._room_label_points = []
+    camera._render_count = 0
     return camera
 
 
@@ -191,3 +197,38 @@ async def test_render_pending_delays_throttled_native_update() -> None:
     sleep.assert_awaited_once_with(1.0)
     camera._async_render.assert_awaited_once_with(latest, latest_key)
     assert camera._render_task is None
+
+
+async def test_render_updates_camera_token_for_new_snapshot_url() -> None:
+    """Rendered map frames rotate the camera token so picture cards reload."""
+    state = NarwalState()
+    state.map_data = MapData(
+        width=100,
+        height=100,
+        resolution=50,
+        origin_x=2,
+        origin_y=4,
+        created_at=123,
+        compressed_map=b"\x01",
+    )
+    camera = _camera(state)
+    camera._async_render = NarwalMapCamera._async_render.__get__(
+        camera, NarwalMapCamera
+    )
+
+    async def executor_job(fn, *args):
+        if getattr(fn, "__name__", "") == "render_base_map":
+            return object()
+        if getattr(fn, "__name__", "") == "room_label_points":
+            return []
+        return b"png"
+
+    camera.hass.async_add_executor_job = AsyncMock(side_effect=executor_job)
+
+    with patch.object(NarwalMapCamera, "_render_overlay_image", return_value=b"png"):
+        await camera._async_render(MapDisplayData(robot_x=4.0, robot_y=6.0), ("key",))
+
+    assert camera._cached_image == b"png"
+    assert camera._render_count == 1
+    camera.async_update_token.assert_called_once()
+    camera.async_write_ha_state.assert_called_once()
