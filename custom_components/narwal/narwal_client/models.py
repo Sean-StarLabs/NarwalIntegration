@@ -992,7 +992,7 @@ class NarwalState:
             return None
         if task == DOCK_TASK_DRY_DOCK_BAG:
             return timer
-        if not self.has_dock_presence_signal:
+        if not self.has_dock_presence_signal and not self.is_docked:
             return None
         return timer
 

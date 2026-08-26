@@ -304,6 +304,24 @@ class TestNarwalState:
 
         assert state.dock_task_timer(DOCK_TASK_DRY_MOP) is not None
 
+    def test_explicit_docked_status_is_timer_presence_signal(self) -> None:
+        """Docked working status keeps typed dock timers active without field 11/47."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}})
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+
+        assert state.working_status == WorkingStatus.DOCKED_V2
+        assert state.is_docked
+        assert not state.has_dock_presence_signal
+        assert state.dock_task_timer(DOCK_TASK_DRY_MOP) is not None
+        assert state.active_dock_task_keys == (DOCK_TASK_DRY_MOP,)
+        assert state.blocks_robot_start_for_dock_task
+
     def test_stale_dock_timer_does_not_remain_active(self) -> None:
         """Typed dock timers stop driving visible state after telemetry expires."""
         state = NarwalState()
