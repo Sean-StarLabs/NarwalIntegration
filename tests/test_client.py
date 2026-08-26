@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 from unittest.mock import AsyncMock, patch
 
 import pytest
