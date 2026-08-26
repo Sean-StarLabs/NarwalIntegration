@@ -8,7 +8,10 @@
         "data": {
           "host": "Adresse IP",
           "port": "Port",
-          "model": "Modèle"
+          "model": "Modèle",
+          "cloud_email": "E-mail cloud Narwal",
+          "cloud_password": "Mot de passe cloud Narwal",
+          "cloud_region": "Région cloud Narwal"
         }
       },
       "device_id": {
@@ -21,10 +24,29 @@
     },
     "error": {
       "cannot_connect": "Impossible de se connecter à l’aspirateur. Vérifiez l’adresse IP et assurez-vous que l’aspirateur est allumé.",
+      "cloud_credentials_incomplete": "Saisissez l’e-mail et le mot de passe cloud Narwal, ou laissez les deux champs vides.",
+      "cloud_cannot_connect": "Impossible de se connecter au cloud Narwal. Vérifiez l’e-mail, le mot de passe et la région.",
       "unknown": "Une erreur inattendue s’est produite."
     },
     "abort": {
       "already_configured": "Cet aspirateur est déjà configuré."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Cloud Narwal",
+        "description": "Connexion cloud facultative utilisée pour les données de durée de vie des consommables et les boutons de réinitialisation. Effacez l’e-mail pour désactiver l’accès cloud.",
+        "data": {
+          "cloud_email": "E-mail cloud Narwal",
+          "cloud_password": "Mot de passe cloud Narwal",
+          "cloud_region": "Région cloud Narwal"
+        }
+      }
+    },
+    "error": {
+      "cloud_credentials_incomplete": "Saisissez l’e-mail et le mot de passe cloud Narwal, ou laissez les deux champs vides.",
+      "cloud_cannot_connect": "Impossible de se connecter au cloud Narwal. Vérifiez l’e-mail, le mot de passe et la région."
     }
   },
   "entity": {

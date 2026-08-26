@@ -16,8 +16,17 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.config_flow import NarwalConfigFlow  # noqa: E402
+from custom_components.narwal.cloud import NarwalCloudError  # noqa: E402
+from custom_components.narwal.config_flow import (  # noqa: E402
+    NarwalConfigFlow,
+    NarwalOptionsFlow,
+)
 from custom_components.narwal.const import (  # noqa: E402
+    CONF_CLOUD_EMAIL,
+    CONF_CLOUD_PASSWORD,
+    CONF_CLOUD_PRODUCT_ID,
+    CONF_CLOUD_REGION,
+    DEFAULT_CLOUD_REGION,
     NARWAL_MODELS,
     NO_BROADCAST_PRODUCT_KEYS,
 )
@@ -42,6 +51,7 @@ class TestNarwalConfigFlow:
         flow.async_create_entry = MagicMock(return_value={"type": "create_entry"})
         flow.async_set_unique_id = AsyncMock()
         flow._abort_if_unique_id_configured = MagicMock()
+        flow.hass = MagicMock()
         return flow
 
     async def test_show_form_when_no_input(self) -> None:
@@ -86,8 +96,34 @@ class TestNarwalConfigFlow:
         assert entry_kwargs["data"]["port"] == 9002
         assert entry_kwargs["data"]["device_id"] == "test_device_123"
         assert entry_kwargs["data"]["product_key"] == "QoEsI5qYXO"
+        assert entry_kwargs["data"][CONF_CLOUD_PRODUCT_ID] == "QoEsI5qYXO"
         assert entry_kwargs["data"]["model"] == "Narwal Flow"
         mock_client.disconnect.assert_awaited_once()
+
+    async def test_invalid_cloud_credentials_show_error(self) -> None:
+        """Paired cloud credentials are authenticated before being stored."""
+        flow = self._make_flow()
+
+        with patch("custom_components.narwal.config_flow.NarwalCloudClient") as cloud:
+            cloud.return_value.async_login = AsyncMock(
+                side_effect=NarwalCloudError("bad login")
+            )
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.100",
+                    "port": 9002,
+                    "model": "Narwal Flow",
+                    CONF_CLOUD_EMAIL: "owner@example.com",
+                    CONF_CLOUD_PASSWORD: "wrong",
+                    CONF_CLOUD_REGION: DEFAULT_CLOUD_REGION,
+                },
+            )
+
+        flow.async_show_form.assert_called_once()
+        assert flow.async_show_form.call_args.kwargs["errors"] == {
+            "base": "cloud_cannot_connect"
+        }
+        flow.async_create_entry.assert_not_called()
 
     async def test_connection_error_shows_form_with_error(self) -> None:
         """async_step_user with connection failure returns form with cannot_connect."""
@@ -113,6 +149,63 @@ class TestNarwalConfigFlow:
         assert call_kwargs["errors"] == {"base": "cannot_connect"}
         mock_client.disconnect.assert_awaited_once()
 
+    async def test_cloud_email_requires_password(self) -> None:
+        """Cloud setup should not silently store unusable partial credentials."""
+        flow = self._make_flow()
+
+        await flow.async_step_user(
+            user_input={
+                "host": "10.0.0.100",
+                "port": 9002,
+                "model": "Narwal Flow",
+                CONF_CLOUD_EMAIL: "user@example.com",
+            },
+        )
+
+        flow.async_show_form.assert_called_once()
+        assert flow.async_show_form.call_args.kwargs["errors"] == {
+            "base": "cloud_credentials_incomplete"
+        }
+
+    async def test_cloud_credential_error_preserves_user_form_defaults(self) -> None:
+        """Retry form should keep the selected model/region, not reset to defaults."""
+        flow = self._make_flow()
+        user_input = {
+            "host": "10.0.0.100",
+            "port": 9002,
+            "model": "Narwal Freo Z Ultra (CX7)",
+            CONF_CLOUD_EMAIL: "user@example.com",
+            CONF_CLOUD_REGION: "de",
+        }
+
+        with patch.object(
+            NarwalConfigFlow,
+            "_user_schema",
+            return_value="schema",
+        ) as schema:
+            await flow.async_step_user(user_input=user_input)
+
+        schema.assert_called_once_with("10.0.0.100", user_input)
+        assert flow.async_show_form.call_args.kwargs["data_schema"] == "schema"
+
+    async def test_cloud_password_requires_email(self) -> None:
+        """A password without an email is also incomplete."""
+        flow = self._make_flow()
+
+        await flow.async_step_user(
+            user_input={
+                "host": "10.0.0.100",
+                "port": 9002,
+                "model": "Narwal Flow",
+                CONF_CLOUD_PASSWORD: "secret",
+            },
+        )
+
+        flow.async_show_form.assert_called_once()
+        assert flow.async_show_form.call_args.kwargs["errors"] == {
+            "base": "cloud_credentials_incomplete"
+        }
+
     async def test_duplicate_device_aborts(self) -> None:
         """async_step_user with duplicate unique_id aborts with already_configured."""
         flow = self._make_flow()
@@ -130,15 +223,14 @@ class TestNarwalConfigFlow:
         with patch(
             "custom_components.narwal.config_flow.NarwalClient",
             return_value=mock_client,
-        ):
-            with pytest.raises(AbortFlow, match="already_configured"):
-                await flow.async_step_user(
-                    user_input={
-                        "host": "10.0.0.100",
-                        "port": 9002,
-                        "model": "Narwal Flow",
-                    },
-                )
+        ), pytest.raises(AbortFlow, match="already_configured"):
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.100",
+                    "port": 9002,
+                    "model": "Narwal Flow",
+                },
+            )
 
         flow.async_set_unique_id.assert_awaited_once_with("duplicate_device")
         mock_client.disconnect.assert_awaited_once()
@@ -168,6 +260,7 @@ class TestNarwalConfigFlow:
         flow.async_create_entry.assert_called_once()
         entry_kwargs = flow.async_create_entry.call_args.kwargs
         assert entry_kwargs["data"]["product_key"] == "DrzDKQ0MU8"
+        assert entry_kwargs["data"][CONF_CLOUD_PRODUCT_ID] == "DrzDKQ0MU8"
         assert "Narwal DrzDKQ0MU8" in entry_kwargs["title"]
 
     async def test_non_broadcast_model_opens_device_id_step(self) -> None:
@@ -234,6 +327,7 @@ class TestNarwalConfigFlow:
         entry_kwargs = flow.async_create_entry.call_args.kwargs
         assert entry_kwargs["data"]["device_id"] == device_id
         assert entry_kwargs["data"]["product_key"] == product_key
+        assert entry_kwargs["data"][CONF_CLOUD_PRODUCT_ID] == "J5"
         mock_client.disconnect.assert_awaited_once()
 
     async def test_failed_auto_discovery_opens_device_id_step(self) -> None:
@@ -257,6 +351,108 @@ class TestNarwalConfigFlow:
         call_kwargs = flow.async_show_form.call_args.kwargs
         assert call_kwargs["step_id"] == "device_id"
         mock_client.disconnect.assert_awaited_once()
+
+
+class TestNarwalOptionsFlow:
+    """Tests for Narwal cloud options."""
+
+    def _make_flow(
+        self,
+        *,
+        data: dict | None = None,
+        options: dict | None = None,
+    ) -> NarwalOptionsFlow:
+        """Create an options flow with stubbed base-class methods."""
+        flow = NarwalOptionsFlow()
+        flow.config_entry = MagicMock()
+        flow.config_entry.data = data or {}
+        flow.config_entry.options = options or {}
+        flow.hass = MagicMock()
+        flow.async_show_form = MagicMock(return_value={"type": "form"})
+        flow.async_create_entry = MagicMock(return_value={"type": "create_entry"})
+        return flow
+
+    async def test_changed_cloud_email_requires_password(self) -> None:
+        """Changing account email must not reuse the prior account password."""
+        flow = self._make_flow(
+            data={
+                CONF_CLOUD_EMAIL: "old@example.com",
+                CONF_CLOUD_PASSWORD: "old-pass",
+            }
+        )
+
+        await flow.async_step_init(
+            {
+                CONF_CLOUD_EMAIL: "new@example.com",
+                CONF_CLOUD_REGION: DEFAULT_CLOUD_REGION,
+            }
+        )
+
+        flow.async_show_form.assert_called_once()
+        assert flow.async_show_form.call_args.kwargs["errors"] == {
+            "base": "cloud_credentials_incomplete"
+        }
+        flow.async_create_entry.assert_not_called()
+
+    async def test_unchanged_cloud_email_preserves_existing_password(self) -> None:
+        """Leaving the password blank preserves credentials for the same account."""
+        flow = self._make_flow(
+            data={
+                CONF_CLOUD_EMAIL: "old@example.com",
+                CONF_CLOUD_PASSWORD: "old-pass",
+            }
+        )
+
+        with patch("custom_components.narwal.config_flow.NarwalCloudClient") as cloud:
+            cloud.return_value.async_login = AsyncMock()
+            await flow.async_step_init(
+                {
+                    CONF_CLOUD_EMAIL: "old@example.com",
+                    CONF_CLOUD_REGION: DEFAULT_CLOUD_REGION,
+                }
+            )
+
+        flow.async_create_entry.assert_called_once()
+        flow.async_show_form.assert_not_called()
+
+    async def test_cloud_email_without_existing_password_is_rejected(self) -> None:
+        """An options email without any password source is incomplete."""
+        flow = self._make_flow()
+
+        await flow.async_step_init(
+            {
+                CONF_CLOUD_EMAIL: "user@example.com",
+                CONF_CLOUD_REGION: DEFAULT_CLOUD_REGION,
+            }
+        )
+
+        flow.async_show_form.assert_called_once()
+        assert flow.async_show_form.call_args.kwargs["errors"] == {
+            "base": "cloud_credentials_incomplete"
+        }
+        flow.async_create_entry.assert_not_called()
+
+    async def test_invalid_cloud_options_credentials_are_rejected(self) -> None:
+        """Options flow validates a newly provided cloud password."""
+        flow = self._make_flow()
+
+        with patch("custom_components.narwal.config_flow.NarwalCloudClient") as cloud:
+            cloud.return_value.async_login = AsyncMock(
+                side_effect=NarwalCloudError("bad login")
+            )
+            await flow.async_step_init(
+                {
+                    CONF_CLOUD_EMAIL: "user@example.com",
+                    CONF_CLOUD_PASSWORD: "wrong",
+                    CONF_CLOUD_REGION: DEFAULT_CLOUD_REGION,
+                }
+            )
+
+        flow.async_show_form.assert_called_once()
+        assert flow.async_show_form.call_args.kwargs["errors"] == {
+            "base": "cloud_cannot_connect"
+        }
+        flow.async_create_entry.assert_not_called()
 
 
 class TestDiscovery:

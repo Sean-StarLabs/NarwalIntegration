@@ -7,7 +7,7 @@ import contextlib
 import logging
 import random
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from typing import Any
 
@@ -48,6 +48,7 @@ from .const import (
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
     TOPIC_CMD_RECALL,
+    TOPIC_CMD_RESET_CONSUMABLE_INFO,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_SET_LED,
@@ -700,6 +701,29 @@ class NarwalClient:
     def _encode_string_field(cls, field_num: int, text: str) -> bytes:
         """Encode a protobuf string field."""
         return cls._encode_bytes_field(field_num, text.encode("utf-8"))
+
+    @classmethod
+    def _encode_packed_varint_field(cls, field_num: int, values: Iterable[int]) -> bytes:
+        """Encode a packed repeated varint field."""
+        data = b"".join(cls._encode_varint(value) for value in values)
+        return cls._encode_bytes_field(field_num, data)
+
+    @classmethod
+    def _build_reset_consumable_info_payload(
+        cls,
+        *,
+        maintain_items: Iterable[int] = (),
+        replace_items: Iterable[int] = (),
+    ) -> bytes:
+        """Build a ConsumableInfoPayload for reset_consumable_info."""
+        maintain = tuple(int(item) for item in maintain_items)
+        replace = tuple(int(item) for item in replace_items)
+        inner = b""
+        if maintain:
+            inner += cls._encode_packed_varint_field(1, maintain)
+        if replace:
+            inner += cls._encode_packed_varint_field(2, replace)
+        return cls._encode_bytes_field(1, inner) if inner else b""
 
     # Broadcast topics needed for state, maps and diagnostics.
     _ALL_BROADCAST_TOPICS = [
@@ -1808,6 +1832,50 @@ class NarwalClient:
         resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE_INFO, timeout=15.0)
         self.state.update_from_consumable_info(resp.data)
         return resp
+
+    async def reset_consumable_info(
+        self,
+        *,
+        maintain_items: Iterable[int] = (),
+        replace_items: Iterable[int] = (),
+    ) -> CommandResponse:
+        """Clear robot-reported consumable maintenance/replacement alerts."""
+        maintain = tuple(int(item) for item in maintain_items)
+        replace = tuple(int(item) for item in replace_items)
+        payload = self._build_reset_consumable_info_payload(
+            maintain_items=maintain,
+            replace_items=replace,
+        )
+        response = await self.send_command(
+            TOPIC_CMD_RESET_CONSUMABLE_INFO,
+            payload,
+            timeout=15.0,
+        )
+        refresh_response: CommandResponse | None = None
+        if response.success:
+            refresh_response = await self.get_consumable_info()
+
+        refresh_verified = refresh_response is None or refresh_response.success
+        target_still_reported = (
+            refresh_verified
+            and bool(
+                set(maintain).intersection(self.state.maintain_items)
+                or set(replace).intersection(self.state.replace_items)
+            )
+        )
+        if payload and target_still_reported:
+            _LOGGER.debug(
+                "Consumable reset target still reported after targeted clear: "
+                "maintain=%s replace=%s",
+                maintain,
+                replace,
+            )
+            return CommandResponse(
+                result_code=CommandResult.NOT_APPLICABLE,
+                data=response.data,
+                raw_payload=response.raw_payload,
+            )
+        return response
 
     async def get_map(self) -> MapData:
         """Download the full map data."""
