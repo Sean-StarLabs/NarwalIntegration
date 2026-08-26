@@ -131,6 +131,7 @@ class TestVacuumActivity:
         attrs = vac.extra_state_attributes
 
         assert attrs["progress"] == 72
+        assert attrs["status_summary"] == "Kitchen - 72%"
         assert "charging_to_resume" not in attrs
         assert "progress_display" not in attrs
         assert "remaining_time" not in attrs
@@ -230,6 +231,25 @@ class TestVacuumSupportedFeatures:
 
         assert features & VacuumEntityFeature.RETURN_HOME
         assert not features & VacuumEntityFeature.STOP
+
+    def test_active_clean_with_dock_bag_drying_keeps_robot_controls(self) -> None:
+        """A compatible dock task must not hide controls for an active off-dock clean."""
+        state = _active_clean_state()
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert features & VacuumEntityFeature.PAUSE
+        assert features & VacuumEntityFeature.STOP
+        assert features & VacuumEntityFeature.RETURN_HOME
+        assert features & VacuumEntityFeature.LOCATE
+        assert features & VacuumEntityFeature.FAN_SPEED
 
     def test_off_dock_mop_drying_hides_return_home(self) -> None:
         """Mop drying still blocks return-home until hardware proves otherwise."""
@@ -880,6 +900,28 @@ class TestAsyncStop:
         vac.coordinator.async_refresh_action_status.assert_awaited_once()
         vac.coordinator.client.stop.assert_not_awaited()
         vac.coordinator.client.stop_dock_task.assert_awaited_once_with()
+
+    async def test_stop_routes_active_clean_with_dock_bag_to_robot_stop(self) -> None:
+        """Drying the dock bag does not make robot STOP ambiguous while cleaning."""
+        state = _active_clean_state()
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        await vac.async_stop()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_awaited_once()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()
 
     async def test_stop_rejects_ambiguous_dock_only_task(self) -> None:
         state = NarwalState(working_status=WorkingStatus.DOCKED)

@@ -133,6 +133,8 @@ def _has_dock_stop_context(state: Any) -> bool:
 
 def _can_stop_vacuum(state: Any) -> bool:
     """Return true when the aggregate vacuum stop command is safe to expose."""
+    if _has_live_robot_stop_context(state):
+        return can_stop_cleaning(state) and not dock_task_blocks_robot_return(state)
     if _has_dock_stop_context(state):
         return False
     return can_stop_cleaning(state)
@@ -146,6 +148,22 @@ def _has_live_robot_stop_context(state: Any) -> bool:
         or state.has_paused_clean_task_context
         or state.is_returning
     )
+
+
+def _status_summary(state: Any) -> str:
+    """Return one concise status line for HA tile state content."""
+    status = _task_status(state)
+    active_cleaning_metrics = _has_active_cleaning_metrics(state)
+    parts: list[str] = []
+
+    if active_cleaning_metrics and state.current_room_name:
+        parts.append(state.current_room_name)
+    if active_cleaning_metrics and state.task_progress_percent is not None:
+        parts.append(f"{state.task_progress_percent}%")
+    if parts:
+        return " - ".join(parts)
+
+    return status.replace("_", " ").title()
 
 
 async def async_setup_entry(
@@ -277,6 +295,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
 
         attributes: dict[str, Any] = {
             "task_status": _task_status(state),
+            "status_summary": _status_summary(state),
         }
         active_cleaning_metrics = _has_active_cleaning_metrics(state)
         if active_cleaning_metrics and state.task_progress_percent is not None:
@@ -401,7 +420,13 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 raise HomeAssistantError(
                     "Narwal dock task cannot be stopped safely right now"
                 )
-            if _has_dock_stop_context(state):
+            if (
+                _has_live_robot_stop_context(state)
+                and can_stop_cleaning(state)
+                and not dock_task_blocks_robot_return(state)
+            ):
+                resp = await self.coordinator.client.stop()
+            elif _has_dock_stop_context(state):
                 if _has_live_robot_stop_context(state):
                     raise HomeAssistantError(
                         "Narwal dock task cannot be stopped safely right now"

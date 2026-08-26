@@ -144,7 +144,7 @@ def is_live_clean_setting_available(state: NarwalState | None) -> bool:
         return False
     return (
         (_state_attr_is_true(state, "is_cleaning") or is_active_clean_session(state))
-        and not _state_attr_is_true(state, "is_station_active")
+        and not dock_task_blocks_robot_return(state)
     )
 
 
@@ -208,7 +208,7 @@ def can_pause_cleaning(state: NarwalState | None) -> bool:
             or state.working_status == WorkingStatus.REMAPPING
         )
         and not _state_attr_is_true(state, "is_paused")
-        and not _state_attr_is_true(state, "is_station_active")
+        and not dock_task_blocks_robot_return(state)
     )
 
 
@@ -222,7 +222,7 @@ def can_resume_cleaning(state: NarwalState | None) -> bool:
             or _state_attr_is_true(state, "has_paused_clean_task_context")
         )
         and _state_attr_is_true(state, "is_paused")
-        and not _state_attr_is_true(state, "is_station_active")
+        and not dock_task_blocks_robot_return(state)
     )
 
 
@@ -249,7 +249,7 @@ def can_locate_robot(state: NarwalState | None) -> bool:
     """Return True when the locate command can be sent."""
     if has_blocking_error(state):
         return False
-    return not _state_attr_is_true(state, "is_station_active")
+    return not dock_task_blocks_robot_return(state)
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
