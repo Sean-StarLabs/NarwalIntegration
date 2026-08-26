@@ -374,6 +374,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             if resp.accepted:
                 self.coordinator.record_accepted_clean_start(room_settings)
                 self.coordinator.client.state.assume_robot_clean()
+                await self.coordinator.async_clear_map_display_cache()
                 self.coordinator.async_set_updated_data(self.coordinator.client.state)
         _LOGGER.info(
             "Whole-house start: code=%s, success=%s, rooms=%s",
@@ -633,6 +634,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             if resp.accepted:
                 self.coordinator.record_accepted_clean_start(room_settings)
                 self.coordinator.client.state.assume_robot_clean()
+                await self.coordinator.async_clear_map_display_cache()
                 self.coordinator.async_set_updated_data(self.coordinator.client.state)
         result_name = _result_name(resp.result_code)
         _LOGGER.info(
