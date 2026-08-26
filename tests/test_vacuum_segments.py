@@ -31,6 +31,7 @@ from narwal_client.const import (  # noqa: E402
 )
 from narwal_client.models import (  # noqa: E402
     DOCK_TASK_DRY_DOCK_BAG,
+    DOCK_TASK_DRY_DUST_BIN,
     DOCK_TASK_DRY_MOP,
     CommandResponse,
     MapData,
@@ -895,6 +896,27 @@ class TestAsyncStop:
         state = NarwalState(working_status=WorkingStatus.CLEANING)
 
         state.dock_activity = 99
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
+            await vac.async_stop()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_stop_rejects_unstoppable_dry_dust_task(self) -> None:
+        state = NarwalState(working_status=WorkingStatus.DOCKED)
+        state.dock_presence = 6
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.stop = AsyncMock()
