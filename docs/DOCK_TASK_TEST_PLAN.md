@@ -112,6 +112,33 @@ Expected conservative default before verification:
 - Locate and return-to-base should not run while station work would make the
   result ambiguous.
 
+## Live Evidence
+
+### 2026-08-26, Downstairs Flow 2, firmware `v01.09.08.00`
+
+Tested through Home Assistant service calls against a live docked robot:
+
+| Task | Start from idle | Stop from HA | Follow-up state |
+|---|---|---|---|
+| `dry_mop` | verified | verified | task cleared and all dock switches returned to idle |
+| `dry_dock_bag` | verified | verified | scoped `task/force_end` cleared the task; also verified while `dry_mop` remained active |
+| `dry_dust_bin` | verified | rejected | switch stayed on with typed timer/progress; generic stop remains blocked |
+
+Notes:
+
+- `dry_mop` exposed a `3h 30m` timer and stopped through the single-task
+  generic stop path.
+- `dry_dock_bag` exposed a `5h` timer. A stale/unmapped coarse station flag
+  initially blocked the scoped stop despite typed dock-bag telemetry; the stop
+  gate was corrected so typed dock-bag force-end is allowed while generic stops
+  remain blocked. The retry returned HTTP 200 and cleared the task.
+- `dry_dust_bin` exposed a `45m` timer and progress, then rejected
+  `switch.turn_off` with "Narwal dock task cannot be stopped right now". This
+  matches the current safe policy: no stop is exposed until an app capture
+  identifies a real task-specific stop command.
+- Parallel dock-task starts were not relaxed. While one task was active, the
+  other task switches were unavailable.
+
 ## Per-Task Evidence
 
 ### Empty dustbin
