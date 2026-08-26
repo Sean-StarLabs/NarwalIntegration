@@ -214,7 +214,7 @@ class TestNarwalSelect:
         assert coord.clean_settings.mop_strength == MopStrengthLevel.HIGH
 
     async def test_water_applies_live_while_cleaning(self) -> None:
-        coord = _coordinator(state=MagicMock(is_cleaning=True))
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         coord.client.set_mop_humidity = AsyncMock(
             return_value=CommandResponse(result_code=CommandResult.SUCCESS)
         )
@@ -224,7 +224,7 @@ class TestNarwalSelect:
         coord.client.set_mop_humidity.assert_awaited_once_with(MopHumidity.WET)
 
     async def test_water_accepts_live_accepted_response(self) -> None:
-        coord = _coordinator(state=MagicMock(is_cleaning=True))
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         coord.client.set_mop_humidity = AsyncMock(
             return_value=CommandResponse(result_code=0)
         )
@@ -294,7 +294,7 @@ class TestNarwalSelect:
         coord.client.set_mop_humidity.assert_awaited_once_with(MopHumidity.WET)
 
     async def test_rejected_live_water_change_does_not_update_settings(self) -> None:
-        coord = _coordinator(state=MagicMock(is_cleaning=True))
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         coord.clean_settings.water = MopHumidity.NORMAL
         coord.client.set_mop_humidity = AsyncMock(
             return_value=CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
@@ -311,7 +311,7 @@ class TestNarwalSelect:
         assert coord.clean_settings.water == MopHumidity.NORMAL
 
     async def test_no_live_setter_when_not_cleaning(self) -> None:
-        coord = _coordinator(state=MagicMock(is_cleaning=False))
+        coord = _coordinator(state=_state())
         coord.client.set_mop_humidity = AsyncMock()
         sel = NarwalSelect(coord, _DESCS["water"])
         await sel.async_select_option("dry")
