@@ -125,6 +125,11 @@ def _robot_start_blocked(state: NarwalState) -> bool:
     return state.has_assumed_robot_clean or state.blocks_robot_start_for_dock_task
 
 
+def _can_force_end_scoped_dock_task(state: NarwalState, task: str | None) -> bool:
+    """Return true when a typed force-end can safely target a known task."""
+    return task in _DOCK_TASK_FORCE_END_PAYLOADS and task in state.active_dock_task_keys
+
+
 def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStatus | None:
     """Extract robot_base_status field 3.1."""
     if not isinstance(decoded, dict):
@@ -1469,7 +1474,9 @@ class NarwalClient:
     async def stop_dock_task(self, task: str | None = None) -> CommandResponse:
         """Stop the active dock task without targeting a different task."""
         async with self._dock_task_lock:
-            if self.state.has_unmapped_active_dock_task:
+            if self.state.has_unmapped_active_dock_task and not (
+                _can_force_end_scoped_dock_task(self.state, task)
+            ):
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             refresh = await self.get_status(full_update=True)
             if not refresh.accepted:
@@ -1480,7 +1487,9 @@ class NarwalClient:
                     data=refresh.data,
                     raw_payload=refresh.raw_payload,
                 )
-            if self.state.has_unmapped_active_dock_task:
+            if self.state.has_unmapped_active_dock_task and not (
+                _can_force_end_scoped_dock_task(self.state, task)
+            ):
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             active_tasks = self.state.active_dock_task_keys
             if task is not None and task not in active_tasks:

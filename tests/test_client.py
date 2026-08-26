@@ -807,6 +807,41 @@ class TestDockTaskCommands:
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is not None
 
     @pytest.mark.asyncio
+    async def test_stop_dry_station_bag_allows_unmapped_coarse_activity(self) -> None:
+        """Typed dock-bag force-end stays safe when coarse station flags are stale."""
+        client = NarwalClient("127.0.0.1")
+        client.state.station_activity = 99
+        client.state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send, patch.object(
+            client, "_refresh_after_dock_stop", new_callable=AsyncMock
+        ) as mock_refresh, patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ):
+            mock_status.return_value = self._docked_status_response()
+            mock_send.return_value = success
+            mock_refresh.return_value = True
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+        assert result is success
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_FORCE_END,
+            payload=b"\x08\x01",
+            timeout=15.0,
+        )
+        mock_status.assert_awaited_once_with(full_update=True)
+
+    @pytest.mark.asyncio
     async def test_stop_dry_dust_bag_rejects_generic_force_end(self) -> None:
         """Dry dust-bin force_end variants accept but do not stop the task."""
         client = NarwalClient("127.0.0.1")

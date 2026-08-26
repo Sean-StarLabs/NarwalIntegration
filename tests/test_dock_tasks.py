@@ -277,6 +277,22 @@ def test_clean_session_context_allows_scoped_dock_bag_stop() -> None:
     assert can_stop_dock_task(state, DOCK_TASK_DRY_DOCK_BAG)
 
 
+def test_unmapped_coarse_activity_allows_scoped_dock_bag_stop() -> None:
+    """Typed dock-bag telemetry can still be force-ended with stale coarse fields."""
+    state = _docked_state()
+    state.station_activity = 99
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DOCK_BAG,
+        elapsed=45,
+        target=180,
+        fields=("12", "13"),
+    )
+
+    assert not can_stop_dock_task(state)
+    assert can_stop_dock_task(state, DOCK_TASK_DRY_DOCK_BAG)
+    assert not can_stop_dock_task(state, DOCK_TASK_DRY_MOP)
+
+
 def test_robot_clean_start_allows_only_typed_dock_bag() -> None:
     """Robot starts are blocked by dock work except typed dock-bag drying."""
     state = _docked_state()

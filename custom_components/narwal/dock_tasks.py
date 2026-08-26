@@ -127,11 +127,11 @@ def can_stop_dock_task(state: NarwalState | None, task_key: str | None = None) -
         return False
     if state.working_status == WorkingStatus.UNKNOWN:
         return False
-    if state.has_unmapped_active_dock_task:
-        return False
     active_keys = state.active_dock_task_keys
     if not active_keys:
         return False
+    if state.has_unmapped_active_dock_task:
+        return task_key in SCOPED_STOP_DOCK_TASKS and task_key in active_keys
     if is_clean_session_context(state):
         return task_key in SCOPED_STOP_DOCK_TASKS and task_key in active_keys
     active_key_set = set(active_keys)
