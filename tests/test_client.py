@@ -842,8 +842,8 @@ class TestDockTaskCommands:
         mock_status.assert_awaited_once_with(full_update=True)
 
     @pytest.mark.asyncio
-    async def test_stop_dry_dust_bag_rejects_generic_force_end(self) -> None:
-        """Dry dust-bin force_end variants accept but do not stop the task."""
+    async def test_stop_dry_dust_bag_uses_scoped_force_end_payload(self) -> None:
+        """Dry dust-bin drying uses the live-validated scoped force-end payload."""
         client = NarwalClient("127.0.0.1")
         client.state.set_dock_drying_task(
             DOCK_TASK_DRY_DUST_BIN,
@@ -852,21 +852,34 @@ class TestDockTaskCommands:
             fields=("10", "11"),
         )
         client.state.dock_presence = 1
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
 
         with patch.object(
             client, "get_status", new_callable=AsyncMock
-        ) as mock_status, patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send, patch.object(
+            client, "_refresh_after_dock_stop", new_callable=AsyncMock
+        ) as mock_refresh, patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ):
             mock_status.return_value = self._docked_status_response()
+            mock_send.return_value = success
+            mock_refresh.return_value = True
             result = await client.stop_dock_task(DOCK_TASK_DRY_DUST_BIN)
 
-        assert result.result_code == CommandResult.NOT_APPLICABLE
+        assert result is success
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_FORCE_END,
+            payload=b"\x08\x05",
+            timeout=15.0,
+        )
         mock_status.assert_awaited_once_with(full_update=True)
-        mock_stop.assert_not_awaited()
-        assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is not None
+        assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is None
 
     @pytest.mark.asyncio
-    async def test_stop_dry_dust_bag_rejects_unscoped_generic_stop(self) -> None:
-        """Unscoped dock stop must not use generic stop for dry dust-bin drying."""
+    async def test_unscoped_stop_dry_dust_bag_uses_scoped_force_end(self) -> None:
+        """Unscoped stop can use the dry dust-bin payload when it is the only task."""
         client = NarwalClient("127.0.0.1")
         client.state.set_dock_drying_task(
             DOCK_TASK_DRY_DUST_BIN,
@@ -875,17 +888,30 @@ class TestDockTaskCommands:
             fields=("10", "11"),
         )
         client.state.dock_presence = 1
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
 
         with patch.object(
             client, "get_status", new_callable=AsyncMock
-        ) as mock_status, patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send, patch.object(
+            client, "_refresh_after_dock_stop", new_callable=AsyncMock
+        ) as mock_refresh, patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ):
             mock_status.return_value = self._docked_status_response()
+            mock_send.return_value = success
+            mock_refresh.return_value = True
             result = await client.stop_dock_task()
 
-        assert result.result_code == CommandResult.NOT_APPLICABLE
+        assert result is success
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_FORCE_END,
+            payload=b"\x08\x05",
+            timeout=15.0,
+        )
         mock_status.assert_awaited_once_with(full_update=True)
-        mock_stop.assert_not_awaited()
-        assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is not None
+        assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is None
 
     @pytest.mark.asyncio
     async def test_stop_dock_task_keeps_timer_when_refresh_fails(self) -> None:

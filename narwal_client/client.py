@@ -100,6 +100,9 @@ _DOCK_TASK_FORCE_END_PAYLOADS = {
     # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
     # with ParallelTaskType.DRY_STATION_BAG to stop dock-bag drying.
     DOCK_TASK_DRY_DOCK_BAG: b"\x08\x01",
+    # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
+    # with ParallelTaskType.DRY_BAG to stop robot dust-bin drying.
+    DOCK_TASK_DRY_DUST_BIN: b"\x08\x05",
 }
 
 

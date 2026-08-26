@@ -122,7 +122,7 @@ Tested through Home Assistant service calls against a live docked robot:
 |---|---|---|---|
 | `dry_mop` | verified | verified | task cleared and all dock switches returned to idle |
 | `dry_dock_bag` | verified | verified | scoped `task/force_end` cleared the task; also verified while `dry_mop` remained active |
-| `dry_dust_bin` | verified | rejected | switch stayed on with typed timer/progress; generic stop remains blocked |
+| `dry_dust_bin` | verified | verified | scoped `task/force_end` cleared the task; generic robot stop remains blocked |
 
 Notes:
 
@@ -132,10 +132,9 @@ Notes:
   initially blocked the scoped stop despite typed dock-bag telemetry; the stop
   gate was corrected so typed dock-bag force-end is allowed while generic stops
   remain blocked. The retry returned HTTP 200 and cleared the task.
-- `dry_dust_bin` exposed a `45m` timer and progress, then rejected
-  `switch.turn_off` with "Narwal dock task cannot be stopped right now". This
-  matches the current safe policy: no stop is exposed until an app capture
-  identifies a real task-specific stop command.
+- `dry_dust_bin` exposed a `45m` timer and progress. After a bounded payload
+  sweep found `task/force_end` payload `0805`, a fresh start/stop repeat
+  returned success and cleared the task.
 - Parallel dock-task starts were not relaxed. While one task was active, the
   other task switches were unavailable.
 
@@ -178,10 +177,9 @@ Verify:
 - Active state maps to `dry_dust_bin`.
 - Timer fields `10/11`, if present, produce `progress` and `time_left`.
 - Polling-only fallback survives the immediate stale post-command refresh.
-- Stop does not use generic force-end when another task is also active.
-- Live 2026-08-26: `task/force_end` with field-1 values 1..12 returned
-  success on Flow 2 but did not stop `dry_dust_bin`; do not expose a local stop
-  for this task until an app capture identifies the real command.
+- Stop uses scoped `task/force_end`, not generic robot stop.
+- Live 2026-08-26: two Flow 2 runs confirmed `task/force_end` payload
+  `0805` clears `dry_dust_bin` telemetry and keeps it clear.
 
 ### Dry dock bag
 

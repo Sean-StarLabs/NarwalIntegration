@@ -195,8 +195,8 @@ def test_dock_task_attributes_use_timer_progress() -> None:
     }
 
 
-def test_dry_dust_bin_is_active_but_not_stoppable() -> None:
-    """Dry dust-bin remains visible, but stop is blocked until its command is known."""
+def test_dry_dust_bin_is_active_and_stoppable() -> None:
+    """Dry dust-bin remains visible and can be stopped with its scoped command."""
     state = _docked_state()
     state.set_dock_drying_task(
         DOCK_TASK_DRY_DUST_BIN,
@@ -208,16 +208,16 @@ def test_dry_dust_bin_is_active_but_not_stoppable() -> None:
 
     assert switch.is_on
     assert switch.available
-    assert not can_stop_dock_task(state)
-    assert not can_stop_dock_task(state, DOCK_TASK_DRY_DUST_BIN)
+    assert can_stop_dock_task(state)
+    assert can_stop_dock_task(state, DOCK_TASK_DRY_DUST_BIN)
     assert switch.extra_state_attributes == {
         "time_left": "2m",
         "progress": 34,
     }
 
 
-async def test_active_non_stoppable_task_rejects_turn_off() -> None:
-    """Visible active dock tasks still reject unsafe stop requests."""
+async def test_active_dry_dust_bin_switch_stops_with_scoped_command() -> None:
+    """The dry dust-bin switch uses the validated scoped stop path."""
     state = _docked_state()
     state.set_dock_drying_task(
         DOCK_TASK_DRY_DUST_BIN,
@@ -226,10 +226,14 @@ async def test_active_non_stoppable_task_rejects_turn_off() -> None:
         fields=("10", "11"),
     )
     coordinator = _coordinator(state)
+    coordinator.client.stop_dock_task = AsyncMock(
+        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+    )
     switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[3])
 
-    with pytest.raises(HomeAssistantError, match="cannot be stopped"):
-        await switch.async_turn_off()
+    await switch.async_turn_off()
+
+    coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
 
 
 def test_multiple_tasks_only_allow_scoped_stop() -> None:
@@ -251,6 +255,14 @@ def test_multiple_tasks_only_allow_scoped_stop() -> None:
     assert not can_stop_dock_task(state)
     assert not can_stop_dock_task(state, DOCK_TASK_DRY_MOP)
     assert can_stop_dock_task(state, DOCK_TASK_DRY_DOCK_BAG)
+
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DUST_BIN,
+        elapsed=45,
+        target=180,
+        fields=("10", "11"),
+    )
+    assert can_stop_dock_task(state, DOCK_TASK_DRY_DUST_BIN)
 
 
 def test_clean_session_context_rejects_unscoped_dock_stop() -> None:
