@@ -196,7 +196,7 @@ def test_dock_task_attributes_use_timer_progress() -> None:
 
 
 def test_dry_dust_bin_is_active_but_not_stoppable() -> None:
-    """Dry dust-bin stop is hidden until the real app command is known."""
+    """Dry dust-bin remains visible, but stop is blocked until its command is known."""
     state = _docked_state()
     state.set_dock_drying_task(
         DOCK_TASK_DRY_DUST_BIN,
@@ -207,13 +207,29 @@ def test_dry_dust_bin_is_active_but_not_stoppable() -> None:
     switch = _switch(DOCK_TASK_DRY_DUST_BIN, state)
 
     assert switch.is_on
-    assert not switch.available
+    assert switch.available
     assert not can_stop_dock_task(state)
     assert not can_stop_dock_task(state, DOCK_TASK_DRY_DUST_BIN)
     assert switch.extra_state_attributes == {
         "time_left": "2m",
         "progress": 34,
     }
+
+
+async def test_active_non_stoppable_task_rejects_turn_off() -> None:
+    """Visible active dock tasks still reject unsafe stop requests."""
+    state = _docked_state()
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DUST_BIN,
+        elapsed=61,
+        target=180,
+        fields=("10", "11"),
+    )
+    coordinator = _coordinator(state)
+    switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[3])
+
+    with pytest.raises(HomeAssistantError, match="cannot be stopped"):
+        await switch.async_turn_off()
 
 
 def test_multiple_tasks_only_allow_scoped_stop() -> None:

@@ -153,7 +153,7 @@ class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
             return False
         state = self.coordinator.data
         if self.is_on:
-            return can_stop_dock_task(state, self.entity_description.key)
+            return True
         return can_start_dock_task(state, self.entity_description.key)
 
     @property
