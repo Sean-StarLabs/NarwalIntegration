@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from typing import Any
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -541,6 +541,42 @@ def test_cloud_consumable_entities_unavailable_when_refresh_failed() -> None:
     coordinator.cloud_consumables_error = "cloud down"
 
     assert not any(entity.available for entity in entities)
+
+
+@pytest.mark.asyncio
+async def test_cloud_reset_error_does_not_mark_consumables_unavailable() -> None:
+    """Reset failures should not poison the shared cloud-refresh state."""
+    consumable = NarwalCloudConsumable(
+        code="side_brush",
+        name="Side brush",
+        usage_duration=3600,
+        total_duration=7200,
+        progress_bar=True,
+        reset_supported=True,
+    )
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator._cloud_client = MagicMock()
+    coordinator._cloud_client.async_reset_consumable = AsyncMock(
+        side_effect=NarwalCloudError("reset failed")
+    )
+    coordinator.config_entry = MagicMock()
+    coordinator.config_entry.data = {"device_id": "dev1"}
+    coordinator.config_entry.title = "Narwal Test"
+    coordinator.cloud_consumables = {consumable.code: consumable}
+    coordinator.cloud_consumables_error = None
+    coordinator.cloud_consumables_reset_error = None
+    coordinator._cloud_consumables_next_attempt = 123.0
+    coordinator._wake_cloud_consumables_loop = MagicMock()
+    coordinator.async_update_listeners = MagicMock()
+
+    with pytest.raises(NarwalCloudError, match="reset failed"):
+        await coordinator.async_reset_cloud_consumable(consumable.code)
+
+    assert coordinator.cloud_consumables_error is None
+    assert coordinator.cloud_consumables_reset_error == "reset failed"
+    assert coordinator._cloud_consumables_next_attempt == 123.0
+    coordinator._wake_cloud_consumables_loop.assert_not_called()
+    coordinator.async_update_listeners.assert_not_called()
 
 
 @pytest.mark.asyncio

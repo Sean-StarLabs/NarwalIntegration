@@ -100,6 +100,8 @@ _STALE_DOCK_BASE_STATUSES = {
 _DOCK_TASK_REFRESH_DELAY = 6.0
 _DOCK_TASK_IDENTIFY_ATTEMPTS = 4
 _DOCK_TASK_IDENTIFY_DELAY = 1.5
+_CONSUMABLE_RESET_VERIFY_ATTEMPTS = 3
+_CONSUMABLE_RESET_VERIFY_DELAY = 1.0
 _DOCK_TASK_FORCE_END_PAYLOADS = {
     # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
     # with ParallelTaskType.DRY_STATION_BAG to stop dock-bag drying.
@@ -1852,19 +1854,19 @@ class NarwalClient:
             payload,
             timeout=15.0,
         )
-        refresh_response: CommandResponse | None = None
-        if response.accepted:
-            refresh_response = await self.get_consumable_info()
-            if not refresh_response.accepted:
-                return refresh_response
-
-        target_still_reported = (
-            response.accepted
-            and bool(
-                set(maintain).intersection(self.state.maintain_items)
-                or set(replace).intersection(self.state.replace_items)
-            )
-        )
+        target_still_reported = False
+        if response.accepted and payload:
+            for _ in range(_CONSUMABLE_RESET_VERIFY_ATTEMPTS):
+                await asyncio.sleep(_CONSUMABLE_RESET_VERIFY_DELAY)
+                refresh_response = await self.get_consumable_info()
+                if not refresh_response.accepted:
+                    return refresh_response
+                target_still_reported = bool(
+                    set(maintain).intersection(self.state.maintain_items)
+                    or set(replace).intersection(self.state.replace_items)
+                )
+                if not target_still_reported:
+                    break
         if payload and target_still_reported:
             _LOGGER.debug(
                 "Consumable reset target still reported after targeted clear: "

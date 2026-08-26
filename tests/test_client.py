@@ -103,7 +103,10 @@ class TestNarwalClientInit:
         client = NarwalClient("10.0.0.1")
         client.state.maintain_items = [300]
 
-        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+        with (
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock),
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+        ):
             mock_send.side_effect = [
                 CommandResponse(result_code=0, data={}),
                 CommandResponse(result_code=CommandResult.SUCCESS, data={"1": {}}),
@@ -123,7 +126,10 @@ class TestNarwalClientInit:
         client = NarwalClient("10.0.0.1")
         client.state.maintain_items = [300]
 
-        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+        with (
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock),
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+        ):
             mock_send.side_effect = [
                 CommandResponse(result_code=CommandResult.SUCCESS, data={}),
                 CommandResponse(result_code=CommandResult.NOT_READY, data={}),
@@ -132,6 +138,33 @@ class TestNarwalClientInit:
 
         assert result.result_code == CommandResult.NOT_READY
         assert client.state.maintain_items == [300]
+
+    @pytest.mark.asyncio
+    async def test_reset_consumable_info_retries_stale_verification(self) -> None:
+        """Reset verification should tolerate one stale alert payload."""
+        client = NarwalClient("10.0.0.1")
+        client.state.maintain_items = [300]
+
+        with (
+            patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock) as sleep,
+            patch.object(client, "send_command", new_callable=AsyncMock) as mock_send,
+        ):
+            mock_send.side_effect = [
+                CommandResponse(result_code=CommandResult.SUCCESS, data={}),
+                CommandResponse(
+                    result_code=CommandResult.SUCCESS,
+                    data={"1": {"1": [300]}},
+                ),
+                CommandResponse(result_code=CommandResult.SUCCESS, data={"1": {}}),
+            ]
+            result = await client.reset_consumable_info(maintain_items=(300,))
+
+        assert result.result_code == CommandResult.SUCCESS
+        assert client.state.maintain_items == []
+        assert sleep.await_count == 2
+        assert mock_send.await_args_list[0].args[0] == TOPIC_CMD_RESET_CONSUMABLE_INFO
+        assert mock_send.await_args_list[1].args[0] == TOPIC_CMD_GET_CONSUMABLE_INFO
+        assert mock_send.await_args_list[2].args[0] == TOPIC_CMD_GET_CONSUMABLE_INFO
 
     def test_topic_subscription_excludes_planned_route_trails(self) -> None:
         """Map trails come only from map/display_map's accumulated trajectory."""

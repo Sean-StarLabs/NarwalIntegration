@@ -333,6 +333,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._consumable_poll_countdown = 0
         self.cloud_consumables: dict[str, NarwalCloudConsumable] = {}
         self.cloud_consumables_error: str | None = None
+        self.cloud_consumables_reset_error: str | None = None
         self._cloud_consumables_last_update = 0.0
         self._cloud_consumables_next_attempt = 0.0
         self._cloud_consumables_lock = asyncio.Lock()
@@ -1404,13 +1405,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 consumable_type=consumable.consumable_type,
             )
         except NarwalCloudError as err:
-            self.cloud_consumables_error = str(err)
-            self._cloud_consumables_next_attempt = (
-                time.monotonic() + CLOUD_CONSUMABLES_RETRY_INTERVAL.total_seconds()
-            )
-            self._wake_cloud_consumables_loop()
-            self.async_update_listeners()
+            self.cloud_consumables_reset_error = str(err)
             raise
+        self.cloud_consumables_reset_error = None
         await asyncio.sleep(1.0)
         await self.async_refresh_cloud_consumables(force=True, raise_on_error=True)
 
