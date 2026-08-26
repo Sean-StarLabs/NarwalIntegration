@@ -362,6 +362,59 @@ def test_idle_to_cleaning_transition_clears_stale_restored_trail() -> None:
     coordinator.config_entry.async_create_background_task.assert_called_once()
 
 
+def test_new_clean_with_fresh_native_trail_replaces_cached_trail() -> None:
+    """Fresh display-map data at clean start should be persisted, not cleared."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.hass = MagicMock()
+    coordinator.config_entry = MagicMock()
+    coordinator.config_entry.async_create_background_task = MagicMock()
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator.client.last_display_map_age = 1.0
+    coordinator._map_display_cache_store = _FakeStore({"old": "trail"})
+    coordinator._pending_map_display_cache = None
+    coordinator._map_display_cache_signature = (1, 1, 1)
+    coordinator._map_display_cache_restored = True
+    coordinator._map_display_cache_save_task = None
+    coordinator._map_display_cache_last_save = time.monotonic()
+    coordinator.config_entry.async_create_background_task.side_effect = (
+        _close_background_task
+    )
+
+    state = coordinator.client.state
+    state.update_from_working_status({"3": 42})
+
+    coordinator._clear_map_display_cache_for_new_clean(state)
+
+    assert state.map_display_data is not None
+    assert coordinator._pending_map_display_cache is not None
+    assert coordinator._pending_map_display_cache["trajectory_signature"] == [4, 4, 99]
+    assert coordinator._map_display_cache_store.saved == []
+    coordinator.config_entry.async_create_background_task.assert_called_once()
+
+
+async def test_shutdown_flushes_current_display_map_cache() -> None:
+    """HA shutdown should persist the newest trail even when no save is queued."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator._map_display_cache_store = _FakeStore()
+    coordinator._pending_map_display_cache = None
+    coordinator._map_display_cache_save_task = None
+    coordinator._map_display_cache_signature = ()
+    coordinator._map_display_cache_last_save = 0.0
+
+    await coordinator._async_flush_map_display_cache()
+
+    assert coordinator._map_display_cache_store.saved
+    assert coordinator._map_display_cache_store.saved[-1]["trajectory_signature"] == [
+        4,
+        4,
+        99,
+    ]
+    assert coordinator._map_display_cache_signature == (4, 4, 99)
+
+
 class TestCoordinatorResilience:
     """Tests for NarwalCoordinator failure buffering and availability."""
 
