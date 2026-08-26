@@ -263,14 +263,12 @@ class NarwalClient:
         self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
         # Lock to prevent concurrent send_command calls from racing on the queue
         self._command_lock = asyncio.Lock()
-        # Lock dock task preflight through accepted-command reservation. The
-        # lower command lock only serializes wire traffic; this prevents two
-        # direct dock commands from both validating the same idle snapshot.
-        self._dock_task_lock = asyncio.Lock()
-        # Same accepted-command guard for direct clean starts. Higher-level HA
-        # availability still comes from reported robot state; this only prevents
-        # duplicate command dispatch before telemetry catches up.
-        self._robot_start_lock = asyncio.Lock()
+        # Lock high-level action preflight through accepted-command reservation.
+        # The lower command lock only serializes wire traffic; this prevents
+        # direct robot and dock commands from validating the same idle snapshot.
+        self._action_lock = asyncio.Lock()
+        self._dock_task_lock = self._action_lock
+        self._robot_start_lock = self._action_lock
 
     def _full_topic(self, short_topic: str) -> str:
         """Build the full topic path."""

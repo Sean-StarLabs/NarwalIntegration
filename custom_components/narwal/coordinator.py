@@ -340,8 +340,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def async_refresh_dock_status(self) -> bool:
         """Refresh full dock/base-station status for action gating."""
+        full_update = not self.client.state.has_recent_active_working_status
         try:
-            response = await self.client.get_status(full_update=True)
+            response = await self.client.get_status(full_update=full_update)
         except Exception:
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Failed to refresh dock status")
@@ -355,12 +356,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             )
             self.async_set_updated_data(self.client.state)
             return False
-        if not _has_dock_status_payload(response):
+        if full_update and not _has_dock_status_payload(response):
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Dock status refresh returned no dock-status payload")
             self.async_set_updated_data(self.client.state)
             return False
-        self._mark_dock_status_refresh_succeeded()
+        if full_update:
+            self._mark_dock_status_refresh_succeeded()
         self.async_set_updated_data(self.client.state)
         return True
 

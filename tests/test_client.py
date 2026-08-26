@@ -682,6 +682,40 @@ class TestDockTaskCommands:
         assert client.state.assumed_active_dock_task == DOCK_TASK_DRY_DUST_BIN
 
     @pytest.mark.asyncio
+    async def test_direct_robot_and_dock_starts_share_action_preflight(self) -> None:
+        """A robot clean and dock task cannot both validate the same idle snapshot."""
+        client = self._docked_client()
+        client.state.map_data = MapData(map_id=1, rooms=[RoomInfo(room_id=2)])
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+        command_started = asyncio.Event()
+        release_command = asyncio.Event()
+
+        async def slow_send(*args, **kwargs):
+            command_started.set()
+            await release_command.wait()
+            return success
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send:
+            mock_status.return_value = self._docked_status_response()
+            mock_send.side_effect = slow_send
+            robot = asyncio.create_task(client.start_rooms([2]))
+            await command_started.wait()
+            dock = asyncio.create_task(client.empty_dustbin())
+            await asyncio.sleep(0)
+            release_command.set()
+            robot_result, dock_result = await asyncio.gather(robot, dock)
+
+        assert robot_result is success
+        assert dock_result.result_code == CommandResult.NOT_APPLICABLE
+        mock_status.assert_not_awaited()
+        mock_send.assert_awaited_once()
+        assert client.state.has_assumed_robot_clean
+
+    @pytest.mark.asyncio
     async def test_direct_dock_command_refreshes_before_start(self) -> None:
         """Direct dock starts revalidate the device state inside the action lock."""
         client = self._docked_client()

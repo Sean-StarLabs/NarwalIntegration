@@ -156,6 +156,19 @@ def test_dock_task_switch_unavailable_when_state_is_stale() -> None:
     assert not switch.available
 
 
+async def test_dock_task_switch_restores_on_state_as_private_guard() -> None:
+    """A restored on switch blocks conflicting starts until fresh status corrects it."""
+    state = _docked_state()
+    coordinator = _coordinator(state)
+    switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[0])
+    switch.async_get_last_state = AsyncMock(return_value=MagicMock(state="on"))
+
+    await switch.async_added_to_hass()
+
+    assert state.assumed_active_dock_task == DOCK_TASK_EMPTY_DUSTBIN
+    assert not can_start_dock_task(state, DOCK_TASK_WASH_MOP)
+
+
 def test_unmapped_dock_activity_blocks_start_and_stop() -> None:
     """Unknown station activity is not treated as safe idle state."""
     state = _docked_state()

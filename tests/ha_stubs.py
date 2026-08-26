@@ -44,6 +44,7 @@ def install() -> None:
     ha_const = _mod("homeassistant.const", ha)
     ha_const.Platform = MagicMock()  # type: ignore[attr-defined]
     ha_const.PERCENTAGE = "%"  # type: ignore[attr-defined]
+    ha_const.STATE_ON = "on"  # type: ignore[attr-defined]
     ha_const.UnitOfArea = MagicMock()  # type: ignore[attr-defined]
     ha_const.UnitOfTime = MagicMock()  # type: ignore[attr-defined]
 

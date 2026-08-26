@@ -249,13 +249,18 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         async with self.coordinator.dock_action_lock:
             refreshed = await self.coordinator.async_refresh_dock_status()
             state = self.coordinator.client.state
-            if state.is_station_active and not is_clean_session_context(state):
+            clean_context = is_clean_session_context(state)
+            if state.has_unmapped_active_dock_task:
+                raise HomeAssistantError(
+                    "Narwal dock task cannot be stopped safely right now"
+                )
+            if state.is_station_active and not clean_context:
                 if not can_stop_dock_task(state):
                     raise HomeAssistantError(
                         "Narwal dock task cannot be stopped safely right now"
                     )
                 resp = await self.coordinator.client.stop_dock_task()
-            elif not is_clean_session_context(state):
+            elif not clean_context:
                 if not refreshed:
                     raise HomeAssistantError("Narwal status could not be refreshed")
                 raise HomeAssistantError("Narwal has no active task to stop")

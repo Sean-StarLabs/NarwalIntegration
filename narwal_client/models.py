@@ -1017,10 +1017,10 @@ class NarwalState:
             self.dock_drying_status_time = 0.0
             self.has_dock_drying_timer_snapshot = False
 
-    def assume_dock_task(self, task: str) -> None:
+    def assume_dock_task(self, task: str, *, ttl: float = _DOCK_TASK_ASSUME_TTL) -> None:
         """Briefly reserve a dock task after an accepted command."""
         self.assumed_dock_task = task
-        self.assumed_dock_task_until = time.monotonic() + _DOCK_TASK_ASSUME_TTL
+        self.assumed_dock_task_until = time.monotonic() + ttl
 
     def clear_assumed_dock_task(self, task: str | None = None) -> None:
         """Clear a local dock task reservation."""

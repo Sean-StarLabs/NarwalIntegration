@@ -476,3 +476,18 @@ class TestAsyncStop:
 
         vac.coordinator.client.stop.assert_not_awaited()
         vac.coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_stop_rejects_unmapped_dock_activity_during_clean_context(self) -> None:
+        """Unknown dock activity must not fall through to generic robot force-end."""
+        state = NarwalState(working_status=WorkingStatus.CLEANING)
+        state.dock_activity = 99
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
+            await vac.async_stop()
+
+        vac.coordinator.client.stop.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()

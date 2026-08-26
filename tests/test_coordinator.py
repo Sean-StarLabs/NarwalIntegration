@@ -299,6 +299,20 @@ class TestCoordinatorResilience:
         assert await coordinator.async_refresh_dock_status()
         assert seen == [True]
 
+    async def test_refresh_dock_status_preserves_live_working_status(self) -> None:
+        """Action preflight must not clobber fresh working_status task telemetry."""
+        coordinator = self._make_coordinator()
+        coordinator.client.state.update_from_working_status({"3": 42})
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"2": 85.0}})
+        )
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert await coordinator.async_refresh_dock_status()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=False)
+        assert not coordinator._dock_status_refresh_failed
+
     async def test_refresh_dock_status_marks_stale_before_notifying(self) -> None:
         """Listeners see stale dock availability on the failed refresh update."""
         coordinator = self._make_coordinator()
