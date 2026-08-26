@@ -432,6 +432,29 @@ class TestNarwalOptionsFlow:
         }
         flow.async_create_entry.assert_not_called()
 
+    async def test_cloud_password_without_email_is_rejected(self) -> None:
+        """A password without an email must not silently disable cloud access."""
+        flow = self._make_flow(
+            data={
+                CONF_CLOUD_EMAIL: "old@example.com",
+                CONF_CLOUD_PASSWORD: "old-pass",
+            }
+        )
+
+        await flow.async_step_init(
+            {
+                CONF_CLOUD_EMAIL: "",
+                CONF_CLOUD_PASSWORD: "new-pass",
+                CONF_CLOUD_REGION: DEFAULT_CLOUD_REGION,
+            }
+        )
+
+        flow.async_show_form.assert_called_once()
+        assert flow.async_show_form.call_args.kwargs["errors"] == {
+            "base": "cloud_credentials_incomplete"
+        }
+        flow.async_create_entry.assert_not_called()
+
     async def test_invalid_cloud_options_credentials_are_rejected(self) -> None:
         """Options flow validates a newly provided cloud password."""
         flow = self._make_flow()

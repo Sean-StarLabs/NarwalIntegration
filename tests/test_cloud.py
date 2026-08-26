@@ -15,7 +15,11 @@ tests.ha_stubs.install()
 from custom_components.narwal.binary_sensor import (  # noqa: E402
     NarwalConsumableOverdueBinarySensor,
 )
-from custom_components.narwal.button import NarwalConsumableResetButton  # noqa: E402
+from custom_components.narwal.button import (  # noqa: E402
+    NarwalConsumableInfoResetButton,
+    NarwalConsumableResetButton,
+    _active_consumable_info_reset_descriptions,
+)
 from custom_components.narwal.cloud import (  # noqa: E402
     NarwalCloudClient,
     NarwalCloudConsumable,
@@ -23,6 +27,7 @@ from custom_components.narwal.cloud import (  # noqa: E402
 )
 from custom_components.narwal.const import DOMAIN  # noqa: E402
 from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
+from custom_components.narwal.narwal_client import CommandResponse, NarwalState  # noqa: E402
 from custom_components.narwal.sensor import (  # noqa: E402
     NarwalConsumableLifeSensor,
     NarwalConsumableUsedSensor,
@@ -248,6 +253,28 @@ async def test_cloud_consumable_reset_posts_expected_payload() -> None:
     assert session.calls[1]["headers"]["Auth-Token"] == "tok1"
 
 
+@pytest.mark.asyncio
+async def test_cloud_error_rejects_nonzero_code_with_zero_err_code() -> None:
+    """A zero err_code must not hide a failing code value."""
+    session = _Session(
+        {"code": 0, "result": {"token": "tok1"}},
+        {"err_code": 0, "code": 500, "msg": "reset failed"},
+    )
+
+    with patch(
+        "custom_components.narwal.cloud.async_get_clientsession",
+        return_value=session,
+    ):
+        client = NarwalCloudClient(MagicMock(), email="owner@example.com", password="pw")
+
+    with pytest.raises(NarwalCloudError, match=r"reset failed \(500\)"):
+        await client.async_reset_consumable(
+            device_id="dev1",
+            product_id="prod1",
+            consumable_code="dock_filter",
+        )
+
+
 def test_non_progress_consumable_can_still_report_overdue() -> None:
     """Detergent has no progress bar, but the app marks it overdue via usage >= total."""
     consumable = NarwalCloudConsumable.from_api(
@@ -317,6 +344,65 @@ def test_cloud_consumable_preserves_zero_reset_metadata() -> None:
     assert consumable.item_type == 0
     assert consumable.record_type == 0
     assert consumable.consumable_type == 0
+
+
+def test_consumable_info_reset_descriptions_include_unknown_active_codes() -> None:
+    """Unmapped robot alert codes still need reset controls while active."""
+    state = NarwalState()
+    state.maintain_items = [300]
+    state.replace_items = [301]
+
+    descriptions = {
+        description.key: description
+        for description in _active_consumable_info_reset_descriptions(state)
+    }
+
+    assert descriptions["maintenance_300_clear"].maintain_items == (300,)
+    assert descriptions["replacement_301_clear"].replace_items == (301,)
+
+
+def test_consumable_info_reset_button_does_not_require_base_status() -> None:
+    """Consumable-info reset availability is driven by alert lists."""
+    state = NarwalState()
+    state.maintain_items = [300]
+    description = _active_consumable_info_reset_descriptions(state)[0]
+    coordinator = MagicMock()
+    coordinator.config_entry.data = {"device_id": "dev1", "model": "flow"}
+    coordinator.config_entry.title = "Narwal Test"
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.last_update_success = True
+
+    button = NarwalConsumableInfoResetButton(coordinator, description)
+
+    assert button.available
+
+
+@pytest.mark.asyncio
+async def test_consumable_info_reset_button_accepts_zero_result_code() -> None:
+    """Robot alert reset buttons use the accepted command contract."""
+    state = NarwalState()
+    state.maintain_items = [300]
+    description = _active_consumable_info_reset_descriptions(state)[0]
+    coordinator = MagicMock()
+    coordinator.config_entry.data = {"device_id": "dev1", "model": "flow"}
+    coordinator.config_entry.title = "Narwal Test"
+    coordinator.client.state = state
+    coordinator.client.robot_awake = True
+    coordinator.data = state
+    coordinator.last_update_success = True
+    coordinator.async_set_updated_data = MagicMock()
+
+    async def reset_consumable_info(**_kwargs: object) -> CommandResponse:
+        state.maintain_items = []
+        return CommandResponse(result_code=0)
+
+    coordinator.client.reset_consumable_info = reset_consumable_info
+    button = NarwalConsumableInfoResetButton(coordinator, description)
+
+    await button.async_press()
+
+    coordinator.async_set_updated_data.assert_called_once_with(state)
 
 
 def test_cloud_consumable_preserves_zero_snake_case_values() -> None:

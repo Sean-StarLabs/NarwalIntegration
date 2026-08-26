@@ -17,7 +17,9 @@ from narwal_client.const import (
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_BASE_STATUS,
+    TOPIC_CMD_GET_CONSUMABLE_INFO,
     TOPIC_CMD_GET_MAP,
+    TOPIC_CMD_RESET_CONSUMABLE_INFO,
     TOPIC_CMD_WASH_MOP,
     AmbientLightCtrlType,
     CleaningRoute,
@@ -94,6 +96,42 @@ class TestNarwalClientInit:
         assert result.data == {"1": 1}
         assert result.raw_payload == b"raw"
         mock_send.assert_awaited_once_with(TOPIC_CMD_GET_BASE_STATUS)
+
+    @pytest.mark.asyncio
+    async def test_reset_consumable_info_accepts_zero_result_code(self) -> None:
+        """Consumable reset code 0 is accepted and should be verified."""
+        client = NarwalClient("10.0.0.1")
+        client.state.maintain_items = [300]
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.side_effect = [
+                CommandResponse(result_code=0, data={}),
+                CommandResponse(result_code=CommandResult.SUCCESS, data={"1": {}}),
+            ]
+            result = await client.reset_consumable_info(maintain_items=(300,))
+
+        assert result.result_code == 0
+        assert client.state.maintain_items == []
+        assert mock_send.await_args_list[0].args[0] == TOPIC_CMD_RESET_CONSUMABLE_INFO
+        assert mock_send.await_args_list[1].args[0] == TOPIC_CMD_GET_CONSUMABLE_INFO
+
+    @pytest.mark.asyncio
+    async def test_reset_consumable_info_rejected_verification_preserves_alerts(
+        self,
+    ) -> None:
+        """A failed verification request must not look like a successful clear."""
+        client = NarwalClient("10.0.0.1")
+        client.state.maintain_items = [300]
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.side_effect = [
+                CommandResponse(result_code=CommandResult.SUCCESS, data={}),
+                CommandResponse(result_code=CommandResult.NOT_READY, data={}),
+            ]
+            result = await client.reset_consumable_info(maintain_items=(300,))
+
+        assert result.result_code == CommandResult.NOT_READY
+        assert client.state.maintain_items == [300]
 
     def test_topic_subscription_excludes_planned_route_trails(self) -> None:
         """Map trails come only from map/display_map's accumulated trajectory."""

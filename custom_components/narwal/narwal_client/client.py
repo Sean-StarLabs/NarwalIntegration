@@ -1830,7 +1830,8 @@ class NarwalClient:
     async def get_consumable_info(self) -> CommandResponse:
         """Query consumable maintain/replace alert lists (not broadcast)."""
         resp = await self.send_command(TOPIC_CMD_GET_CONSUMABLE_INFO, timeout=15.0)
-        self.state.update_from_consumable_info(resp.data)
+        if resp.accepted:
+            self.state.update_from_consumable_info(resp.data)
         return resp
 
     async def reset_consumable_info(
@@ -1852,12 +1853,13 @@ class NarwalClient:
             timeout=15.0,
         )
         refresh_response: CommandResponse | None = None
-        if response.success:
+        if response.accepted:
             refresh_response = await self.get_consumable_info()
+            if not refresh_response.accepted:
+                return refresh_response
 
-        refresh_verified = refresh_response is None or refresh_response.success
         target_still_reported = (
-            refresh_verified
+            response.accepted
             and bool(
                 set(maintain).intersection(self.state.maintain_items)
                 or set(replace).intersection(self.state.replace_items)

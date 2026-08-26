@@ -95,6 +95,45 @@ def _maintenance_reset_descriptions() -> tuple[NarwalConsumableInfoResetDescript
 CONSUMABLE_INFO_RESET_DESCRIPTIONS = _maintenance_reset_descriptions()
 
 
+def _active_consumable_info_reset_descriptions(
+    state,
+) -> tuple[NarwalConsumableInfoResetDescription, ...]:
+    """Return reset button descriptions for currently reported alert items."""
+    maintain_items = set(getattr(state, "maintain_items", ()))
+    replace_items = set(getattr(state, "replace_items", ()))
+    descriptions = [
+        description
+        for description in CONSUMABLE_INFO_RESET_DESCRIPTIONS
+        if (
+            maintain_items.intersection(description.maintain_items)
+            or replace_items.intersection(description.replace_items)
+        )
+    ]
+
+    known_maintain_items = set(CONSUMABLE_MAINTAIN_ITEMS)
+    known_replace_items = set(CONSUMABLE_REPLACE_ITEMS)
+    for code in sorted(maintain_items - known_maintain_items):
+        descriptions.append(
+            NarwalConsumableInfoResetDescription(
+                key=f"maintenance_{code}_clear",
+                name=f"Maintenance code {code} clear",
+                icon="mdi:wrench-clock",
+                maintain_items=(code,),
+            )
+        )
+    for code in sorted(replace_items - known_replace_items):
+        descriptions.append(
+            NarwalConsumableInfoResetDescription(
+                key=f"replacement_{code}_clear",
+                name=f"Replacement code {code} clear",
+                icon="mdi:package-variant-closed",
+                replace_items=(code,),
+            )
+        )
+
+    return tuple(descriptions)
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: NarwalConfigEntry,
@@ -107,19 +146,13 @@ async def async_setup_entry(
     @callback
     def async_add_consumable_info_reset_buttons() -> None:
         state = coordinator.data or coordinator.client.state
-        if state is None or not getattr(state, "raw_base_status", None):
+        if state is None:
             return
-        maintain_items = set(getattr(state, "maintain_items", ()))
-        replace_items = set(getattr(state, "replace_items", ()))
         new_descriptions = sorted(
             (
                 description
-                for description in CONSUMABLE_INFO_RESET_DESCRIPTIONS
+                for description in _active_consumable_info_reset_descriptions(state)
                 if description.key not in known_consumable_info_resets
-                and (
-                    maintain_items.intersection(description.maintain_items)
-                    or replace_items.intersection(description.replace_items)
-                )
             ),
             key=lambda description: description.name.lower(),
         )
@@ -255,8 +288,8 @@ class NarwalConsumableInfoResetButton(NarwalEntity, ButtonEntity):
         """Return True when this alert clear button has an active item to clear."""
         if not super().available:
             return False
-        state = self.coordinator.data
-        if state is None or not getattr(state, "raw_base_status", None):
+        state = self.coordinator.data or self.coordinator.client.state
+        if state is None:
             return False
         return bool(
             set(self.description.maintain_items).intersection(state.maintain_items)
@@ -290,7 +323,7 @@ class NarwalConsumableInfoResetButton(NarwalEntity, ButtonEntity):
             maintain_items=self.description.maintain_items,
             replace_items=self.description.replace_items,
         )
-        if not response.success:
+        if not response.accepted:
             try:
                 result_name = CommandResult(response.result_code).name
             except ValueError:

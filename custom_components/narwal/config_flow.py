@@ -390,6 +390,15 @@ class NarwalOptionsFlow(OptionsFlow):
                 if CONF_CLOUD_PASSWORD in options
                 else self.config_entry.data.get(CONF_CLOUD_PASSWORD, "")
             )
+            if cloud_password and not cloud_email:
+                return self.async_show_form(
+                    step_id="init",
+                    data_schema=self._options_schema(
+                        cloud_email,
+                        cloud_region,
+                    ),
+                    errors={"base": "cloud_credentials_incomplete"},
+                )
             if (
                 cloud_email
                 and not cloud_password

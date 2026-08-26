@@ -156,8 +156,8 @@ async def test_clean_rooms_service_accepts_async_accepted_response() -> None:
     coordinator.async_set_updated_data.assert_called_once_with(coordinator.client.state)
 
 
-async def test_clean_rooms_service_uses_room_profiles_over_requested_defaults() -> None:
-    """Explicit service settings provide defaults for rooms without profiles."""
+async def test_clean_rooms_service_uses_requested_settings_over_room_profiles() -> None:
+    """Explicit service settings should not be silently overridden by room profiles."""
     coordinator = _coordinator()
     coordinator.set_room_clean_setting(4, "fan", FanLevel.MUTE)
     handler, registry = _register_clean_rooms_handler(coordinator)
@@ -174,7 +174,7 @@ async def test_clean_rooms_service_uses_room_profiles_over_requested_defaults() 
         await handler(call)
 
     kwargs = coordinator.client.start_rooms.await_args.kwargs
-    assert kwargs["room_settings"][4].fan == FanLevel.MUTE
+    assert kwargs["room_settings"][4].fan == FanLevel.STRONG
     assert kwargs["room_settings"][7].fan == FanLevel.STRONG
 
 

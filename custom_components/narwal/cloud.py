@@ -286,6 +286,11 @@ def _success_code(value: Any) -> bool:
     return value == 0 or value == "0"
 
 
+def _present_code(value: Any) -> bool:
+    """Return true when an API error-code field was present."""
+    return value is not None and value != ""
+
+
 def _is_token_error(data: dict[str, Any]) -> bool:
     """Return true if the cloud payload says the token is invalid."""
     codes = (data.get("err_code"), data.get("code"))
@@ -297,12 +302,16 @@ def _is_token_error(data: dict[str, Any]) -> bool:
 
 def _raise_for_cloud_error(data: dict[str, Any], action: str) -> None:
     """Raise a redacted cloud error for failed API calls."""
-    if (
-        _success_code(data.get("code"))
-        or _success_code(data.get("err_code"))
-        or data.get("success") is True
-    ):
+    codes = [
+        data[key]
+        for key in ("err_code", "code")
+        if key in data and _present_code(data[key])
+    ]
+    if codes:
+        if all(_success_code(code) for code in codes):
+            return
+    elif data.get("success") is True:
         return
     message = data.get("msg") or "unknown error"
-    code = data.get("err_code", data.get("code", "unknown"))
+    code = next((code for code in codes if not _success_code(code)), "unknown")
     raise NarwalCloudError(f"Narwal cloud {action} failed: {message} ({code})")
