@@ -182,6 +182,27 @@ def test_dock_task_attributes_use_timer_progress() -> None:
     }
 
 
+def test_dry_dust_bin_is_active_but_not_stoppable() -> None:
+    """Dry dust-bin stop is hidden until the real app command is known."""
+    state = _docked_state()
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DUST_BIN,
+        elapsed=61,
+        target=180,
+        fields=("10", "11"),
+    )
+    switch = _switch(DOCK_TASK_DRY_DUST_BIN, state)
+
+    assert switch.is_on
+    assert not switch.available
+    assert not can_stop_dock_task(state)
+    assert not can_stop_dock_task(state, DOCK_TASK_DRY_DUST_BIN)
+    assert switch.extra_state_attributes == {
+        "time_left": "2m",
+        "progress": 34,
+    }
+
+
 def test_multiple_tasks_only_allow_scoped_stop() -> None:
     """Generic stop is unavailable for ambiguous multi-task dock activity."""
     state = _docked_state()

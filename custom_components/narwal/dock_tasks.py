@@ -58,7 +58,15 @@ DOCK_TASKS: tuple[DockTaskDefinition, ...] = (
     ),
 )
 
+GENERIC_STOP_DOCK_TASKS = frozenset(
+    {
+        DOCK_TASK_EMPTY_DUSTBIN,
+        DOCK_TASK_WASH_MOP,
+        DOCK_TASK_DRY_MOP,
+    }
+)
 SCOPED_STOP_DOCK_TASKS = frozenset({DOCK_TASK_DRY_DOCK_BAG})
+STOPPABLE_DOCK_TASKS = GENERIC_STOP_DOCK_TASKS | SCOPED_STOP_DOCK_TASKS
 
 
 def has_blocking_error(state: NarwalState | None) -> bool:
@@ -126,8 +134,11 @@ def can_stop_dock_task(state: NarwalState | None, task_key: str | None = None) -
         return False
     if is_clean_session_context(state):
         return task_key in SCOPED_STOP_DOCK_TASKS and task_key in active_keys
+    active_key_set = set(active_keys)
     if task_key is None:
-        return len(active_keys) == 1
-    if task_key not in active_keys:
+        return len(active_key_set) == 1 and next(iter(active_key_set)) in STOPPABLE_DOCK_TASKS
+    if task_key not in active_key_set or task_key not in STOPPABLE_DOCK_TASKS:
         return False
-    return len(active_keys) == 1 or task_key in SCOPED_STOP_DOCK_TASKS
+    if task_key in SCOPED_STOP_DOCK_TASKS:
+        return True
+    return active_key_set == {task_key}
