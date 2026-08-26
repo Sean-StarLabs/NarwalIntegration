@@ -68,6 +68,7 @@ class _MapDisplayCacheSnapshot:
 
     map_id: int
     map_created_at: int
+    active_clean: bool
     display: MapDisplayData
 
     @property
@@ -327,6 +328,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._pending_map_display_cache_restore: dict[str, object] | None = None
         self._map_display_cache_save_task: asyncio.Task[None] | None = None
         self._map_display_cache_restored = False
+        self._map_display_cache_restored_from_active = False
         self.dock_action_lock = asyncio.Lock()
 
     @property
@@ -530,6 +532,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         return _MapDisplayCacheSnapshot(
             map_id=getattr(static_map, "map_id", 0) if static_map else 0,
             map_created_at=getattr(static_map, "created_at", 0) if static_map else 0,
+            active_clean=is_active_clean_session(state),
             display=display,
         )
 
@@ -542,6 +545,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         return {
             "map_id": snapshot.map_id,
             "map_created_at": snapshot.map_created_at,
+            "active_clean": snapshot.active_clean,
             "robot_x": display.robot_x,
             "robot_y": display.robot_y,
             "robot_heading": display.robot_heading,
@@ -609,6 +613,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         payload = await self._map_display_cache_store.async_load()
         if not isinstance(payload, Mapping):
             return
+        if self._has_current_map_display_trajectory():
+            return
         if self.client.state.map_data is None:
             self._pending_map_display_cache_restore = dict(payload)
             return
@@ -620,6 +626,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if payload is None:
             return
         self._pending_map_display_cache_restore = None
+        if self._has_current_map_display_trajectory():
+            return
         self._restore_map_display_cache_payload(payload)
 
     def _restore_map_display_cache_payload(
@@ -644,10 +652,15 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             and cached_created_at != static_map.created_at
         ):
             return False
+        if self._has_current_map_display_trajectory():
+            return False
 
         self.client.state.map_display_data = display
         self._map_display_cache_signature = display.trajectory_signature
         self._map_display_cache_restored = True
+        self._map_display_cache_restored_from_active = bool(
+            payload.get("active_clean")
+        )
         _LOGGER.debug(
             "Restored Narwal display-map trajectory cache with %d bytes",
             len(display.trajectory_x_values) + len(display.trajectory_y_values),
@@ -660,8 +673,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._pending_map_display_cache_restore = None
         self._map_display_cache_signature = ()
         self._map_display_cache_restored = False
+        self._map_display_cache_restored_from_active = False
         if clear_memory:
             self.client.state.map_display_data = None
+
+    def _has_current_map_display_trajectory(self) -> bool:
+        """Return true when current state already has native trajectory data."""
+        display = self.client.state.map_display_data
+        return display is not None and display.has_trajectory
 
     @staticmethod
     def _map_display_signature_from_payload(
@@ -705,6 +724,23 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             f"{DOMAIN}_map_display_cache_save",
         )
 
+    def _cancel_map_display_cache_save_task(self) -> asyncio.Task[None] | None:
+        """Cancel any queued trajectory-cache write and return the task."""
+        task = self._map_display_cache_save_task
+        if task is None or task.done():
+            return None
+        task.cancel()
+        return task
+
+    async def _async_cancel_map_display_cache_save(self) -> None:
+        """Cancel and await any queued trajectory-cache write."""
+        task = self._cancel_map_display_cache_save_task()
+        if task is not None:
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
+        if self._map_display_cache_save_task is task:
+            self._map_display_cache_save_task = None
+
     async def _async_save_pending_map_display_cache(self, delay: float) -> None:
         """Persist the newest queued display-map trajectory cache payload."""
         if delay > 0:
@@ -725,13 +761,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def _async_flush_map_display_cache(self) -> None:
         """Persist the current display-map trajectory before shutdown."""
-        if (
-            self._map_display_cache_save_task is not None
-            and not self._map_display_cache_save_task.done()
-        ):
-            self._map_display_cache_save_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._map_display_cache_save_task
+        await self._async_cancel_map_display_cache_save()
 
         snapshot = (
             self._pending_map_display_cache_snapshot
@@ -758,17 +788,42 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def async_clear_map_display_cache(self) -> None:
         """Clear cached display-map trajectory after accepting a new clean."""
+        await self._async_cancel_map_display_cache_save()
         self._reset_map_display_cache_state(clear_memory=True)
         with contextlib.suppress(Exception):
             await self._map_display_cache_store.async_save({})
 
-    def _schedule_map_display_cache_clear(self) -> None:
-        """Clear the persisted trail cache from a synchronous update callback."""
+    def _schedule_map_display_cache_clear(
+        self,
+        snapshot: _MapDisplayCacheSnapshot | None,
+    ) -> None:
+        """Clear or replace persisted trail cache from a synchronous callback."""
+        self._cancel_map_display_cache_save_task()
         self.config_entry.async_create_background_task(
             self.hass,
-            self._map_display_cache_store.async_save({}),
+            self._async_clear_or_replace_map_display_cache(snapshot),
             f"{DOMAIN}_map_display_cache_clear",
         )
+
+    async def _async_clear_or_replace_map_display_cache(
+        self,
+        snapshot: _MapDisplayCacheSnapshot | None,
+    ) -> None:
+        """Persist the new-clean cache decision after cancelling stale writes."""
+        await self._async_cancel_map_display_cache_save()
+        self._pending_map_display_cache_snapshot = None
+        if snapshot is None:
+            with contextlib.suppress(Exception):
+                await self._map_display_cache_store.async_save({})
+            return
+        payload = self._map_display_cache_payload_from_snapshot(snapshot)
+        try:
+            await self._map_display_cache_store.async_save(payload)
+        except Exception:
+            _LOGGER.debug("Could not replace display-map trajectory cache")
+            return
+        self._map_display_cache_signature = snapshot.trajectory_signature
+        self._map_display_cache_last_save = time.monotonic()
 
     def _is_new_clean_transition(self, state: NarwalState) -> bool:
         """Return true when state has entered a new robot cleaning session."""
@@ -785,6 +840,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         return not (
             self._prev_working_status == WorkingStatus.UNKNOWN
             and self._map_display_cache_restored
+            and self._map_display_cache_restored_from_active
         )
 
     def _clear_map_display_cache_for_new_clean(self, state: NarwalState) -> None:
@@ -795,14 +851,16 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             and self.client.last_display_map_age <= 5.0
         )
         if keep_fresh_display:
+            snapshot = self._map_display_cache_snapshot(state)
             self._reset_map_display_cache_state(clear_memory=False)
-            self._schedule_map_display_cache_save(state, immediate=True)
+            self._pending_map_display_cache_snapshot = snapshot
+            self._schedule_map_display_cache_clear(snapshot)
             _LOGGER.debug(
                 "Replaced Narwal display-map trajectory cache for new clean"
             )
             return
         self._reset_map_display_cache_state(clear_memory=not keep_fresh_display)
-        self._schedule_map_display_cache_clear()
+        self._schedule_map_display_cache_clear(None)
         _LOGGER.debug(
             "Cleared Narwal display-map trajectory cache for new clean%s",
             " while keeping fresh display_map data" if keep_fresh_display else "",
@@ -1171,8 +1229,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def async_shutdown(self) -> None:
         """Disconnect from the vacuum."""
-        await self._async_flush_map_display_cache()
         await self.client.disconnect()
         if self._listen_task and not self._listen_task.done():
             self._listen_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._listen_task
+        await self._async_flush_map_display_cache()
         await super().async_shutdown()

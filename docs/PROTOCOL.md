@@ -578,7 +578,7 @@ rest are known-to-exist and unexplored — good starting points for anyone probi
 | 70 | `/developer/take_picture` | C→R | Developer | ✓ |
 | 71 | `/developer/take_picture/response` | R→C | Developer | ✓ |
 | 72 | `/developer/led_control` | C→R | Developer | ✓ |
-| 73 | `/developer/planning_debug_info` | R→C | Developer | ✓ |
+| 73 | `/developer/planning_debug_info` | R→C | Developer | |
 | 74 | `/info/get_clean_time_line` | C→R | Status | |
 | 75 | `/info/get_clean_time_line/response` | R→C | Status | |
 
