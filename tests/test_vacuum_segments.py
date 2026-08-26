@@ -247,6 +247,23 @@ class TestVacuumSupportedFeatures:
 
         assert not features & VacuumEntityFeature.RETURN_HOME
 
+    def test_recent_clean_with_unstoppable_dock_task_hides_stop(self) -> None:
+        """Retained clean metrics must not expose generic stop over dry dust-bin."""
+        state = NarwalState(working_status=WorkingStatus.CHARGED)
+        state.update_from_working_status({"3": 120})
+        state.dock_presence = 1
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert not features & VacuumEntityFeature.STOP
+
 
 class TestAsyncGetSegments:
     """Tests for async_get_segments."""
@@ -911,6 +928,29 @@ class TestAsyncStop:
     async def test_stop_rejects_unstoppable_dry_dust_task(self) -> None:
         state = NarwalState(working_status=WorkingStatus.DOCKED)
         state.dock_presence = 6
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
+            await vac.async_stop()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_stop_rejects_recent_clean_with_unstoppable_dry_dust(self) -> None:
+        """Recent clean metrics must not route dry dust-bin through generic stop."""
+        state = NarwalState(working_status=WorkingStatus.CHARGED)
+        state.update_from_working_status({"3": 120})
+        state.dock_presence = 1
         state.set_dock_drying_task(
             DOCK_TASK_DRY_DUST_BIN,
             elapsed=60,

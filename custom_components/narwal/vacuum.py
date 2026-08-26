@@ -38,7 +38,12 @@ from .coordinator import (
     clean_setting_applies_to_mode,
     is_live_clean_setting_available,
 )
-from .dock_tasks import can_start_robot_clean, can_stop_dock_task, is_clean_session_context
+from .dock_tasks import (
+    can_start_robot_clean,
+    can_stop_dock_task,
+    dock_task_blocks_robot_return,
+    is_clean_session_context,
+)
 from .entity import NarwalEntity
 from .narwal_client import CommandResult, FanLevel, WorkingStatus
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES
@@ -117,6 +122,32 @@ def _has_active_cleaning_metrics(state: Any) -> bool:
     )
 
 
+def _has_dock_stop_context(state: Any) -> bool:
+    """Return true when dock-side work must be considered before generic stop."""
+    return (
+        state.is_station_active
+        or state.has_unmapped_active_dock_task
+        or bool(state.active_dock_task_keys)
+    )
+
+
+def _can_stop_vacuum(state: Any) -> bool:
+    """Return true when the aggregate vacuum stop command is safe to expose."""
+    if _has_dock_stop_context(state):
+        return False
+    return can_stop_cleaning(state)
+
+
+def _has_live_robot_stop_context(state: Any) -> bool:
+    """Return true when a robot-side task is actively stoppable, not just retained."""
+    return (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.working_status == WorkingStatus.REMAPPING
+        or state.has_paused_clean_task_context
+        or state.is_returning
+    )
+
+
 async def async_setup_entry(
     hass: HomeAssistant,
     entry: NarwalConfigEntry,
@@ -164,7 +195,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
 
         if can_start_cleaning(state) or can_resume_cleaning(state):
             features |= VacuumEntityFeature.START
-        if can_stop_cleaning(state):
+        if _can_stop_vacuum(state):
             features |= VacuumEntityFeature.STOP
         if can_pause_cleaning(state):
             features |= VacuumEntityFeature.PAUSE
@@ -370,7 +401,11 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 raise HomeAssistantError(
                     "Narwal dock task cannot be stopped safely right now"
                 )
-            if state.is_station_active and not clean_context:
+            if _has_dock_stop_context(state):
+                if _has_live_robot_stop_context(state):
+                    raise HomeAssistantError(
+                        "Narwal dock task cannot be stopped safely right now"
+                    )
                 if not can_stop_dock_task(state):
                     raise HomeAssistantError(
                         "Narwal dock task cannot be stopped safely right now"
