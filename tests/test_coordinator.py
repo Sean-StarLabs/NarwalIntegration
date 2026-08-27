@@ -6,6 +6,7 @@ UpdateFailed after the threshold, and resets counters on success/push.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
@@ -31,6 +32,8 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     CommandResponse,
     CommandResult,
     FanLevel,
+    MapData,
+    MapDisplayData,
     MopHumidity,
     NarwalConnectionError,
     NarwalState,
@@ -40,6 +43,55 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
 )
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
+
+
+class _FakeStore:
+    """Store test double that records saved payloads."""
+
+    def __init__(self, data: object | None = None) -> None:
+        self.data = data
+        self.saved: list[object] = []
+
+    async def async_load(self) -> object | None:
+        return self.data
+
+    async def async_save(self, data: object) -> None:
+        self.saved.append(data)
+        self.data = data
+
+
+def _trajectory_state() -> NarwalState:
+    """Return a state with static map and native display-map trajectory."""
+    state = NarwalState()
+    state.map_data = MapData(
+        map_id=12,
+        width=100,
+        height=100,
+        created_at=34,
+        compressed_map=b"\x01",
+    )
+    state.map_display_data = MapDisplayData(
+        robot_x=1.25,
+        robot_y=2.5,
+        robot_heading=90.0,
+        timestamp=123456,
+        dock_ref_x=3.0,
+        dock_ref_y=4.0,
+        trajectory_x_values=b"xxxx",
+        trajectory_y_values=b"yyyy",
+        trajectory_signature=(4, 4, 99),
+    )
+    return state
+
+
+def _close_background_task(_hass: object, coro: object, _name: str) -> MagicMock:
+    """Consume scheduled coroutine objects in coordinator unit tests."""
+    close = getattr(coro, "close", None)
+    if close is not None:
+        close()
+    task = MagicMock()
+    task.done.return_value = True
+    return task
 
 
 def test_non_broadcast_product_key_configures_polling_client() -> None:
@@ -177,6 +229,315 @@ def test_paused_standby_task_context_blocks_new_actions() -> None:
     assert not can_start_cleaning(state)
 
 
+def test_map_display_cache_payload_round_trips_native_trajectory() -> None:
+    """Native display-map trails can be serialized through HA storage."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    state = _trajectory_state()
+
+    payload = coordinator._map_display_cache_payload(state)
+    restored = NarwalCoordinator._map_display_from_cache(payload)
+
+    assert payload is not None
+    assert restored is not None
+    assert payload["map_id"] == 12
+    assert payload["map_created_at"] == 34
+    assert payload["active_clean"] is False
+    assert restored.robot_x == 0.0
+    assert restored.robot_y == 0.0
+    assert restored.robot_heading == 0.0
+    assert restored.timestamp == state.map_display_data.timestamp
+    assert restored.dock_ref_x == state.map_display_data.dock_ref_x
+    assert restored.dock_ref_y == state.map_display_data.dock_ref_y
+    assert restored.trajectory_x_values == b"xxxx"
+    assert restored.trajectory_y_values == b"yyyy"
+    assert restored.trajectory_signature == (4, 4, 99)
+
+
+async def test_restore_map_display_cache_restores_matching_static_map() -> None:
+    """A saved trail is restored after restart when the static map matches."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    source = _trajectory_state()
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.client.state.map_data = source.map_data
+    coordinator._map_display_cache_store = _FakeStore(
+        coordinator._map_display_cache_payload(source)
+    )
+    coordinator._map_display_cache_signature = ()
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._map_display_cache_restored = False
+
+    await coordinator._async_restore_map_display_cache()
+
+    restored = coordinator.client.state.map_display_data
+    assert restored is not None
+    assert restored.trajectory_signature == (4, 4, 99)
+    assert coordinator._map_display_cache_signature == (4, 4, 99)
+    assert coordinator._map_display_cache_restored
+
+
+async def test_restore_map_display_cache_does_not_overwrite_live_trail() -> None:
+    """A live display_map packet received during startup wins over stored routes."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    cached = _trajectory_state()
+    cached.map_display_data = MapDisplayData(
+        robot_x=5.0,
+        robot_y=6.0,
+        robot_heading=180.0,
+        timestamp=123457,
+        dock_ref_x=3.0,
+        dock_ref_y=4.0,
+        trajectory_x_values=b"aa",
+        trajectory_y_values=b"bb",
+        trajectory_signature=(2, 2, 77),
+    )
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator._map_display_cache_store = _FakeStore(
+        coordinator._map_display_cache_payload(cached)
+    )
+    coordinator._map_display_cache_signature = ()
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._map_display_cache_restored = False
+    coordinator._map_display_cache_restored_from_active = False
+
+    await coordinator._async_restore_map_display_cache()
+
+    assert coordinator.client.state.map_display_data.trajectory_signature == (4, 4, 99)
+    assert coordinator._map_display_cache_signature == ()
+    assert not coordinator._map_display_cache_restored
+
+
+async def test_restore_map_display_cache_waits_for_static_map() -> None:
+    """A saved trail is not restored until the active static map is known."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    source = _trajectory_state()
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator._map_display_cache_store = _FakeStore(
+        coordinator._map_display_cache_payload(source)
+    )
+    coordinator._map_display_cache_signature = ()
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._map_display_cache_restored = False
+
+    await coordinator._async_restore_map_display_cache()
+
+    assert coordinator.client.state.map_display_data is None
+    assert coordinator._pending_map_display_cache_restore is not None
+    assert coordinator._map_display_cache_signature == ()
+    assert not coordinator._map_display_cache_restored
+
+    coordinator.client.state.map_data = source.map_data
+    coordinator._restore_pending_map_display_cache()
+
+    restored = coordinator.client.state.map_display_data
+    assert restored is not None
+    assert restored.trajectory_signature == (4, 4, 99)
+    assert coordinator._pending_map_display_cache_restore is None
+    assert coordinator._map_display_cache_restored
+
+
+async def test_restore_map_display_cache_ignores_different_static_map() -> None:
+    """A saved trail from another map must not be overlaid."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    source = _trajectory_state()
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.client.state.map_data = MapData(
+        map_id=13,
+        width=100,
+        height=100,
+        created_at=34,
+        compressed_map=b"\x01",
+    )
+    coordinator._map_display_cache_store = _FakeStore(
+        coordinator._map_display_cache_payload(source)
+    )
+    coordinator._map_display_cache_signature = ()
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._map_display_cache_restored = False
+
+    await coordinator._async_restore_map_display_cache()
+
+    assert coordinator.client.state.map_display_data is None
+    assert coordinator._map_display_cache_signature == ()
+    assert not coordinator._map_display_cache_restored
+
+
+async def test_clear_map_display_cache_clears_memory_and_store() -> None:
+    """Accepted clean starts clear both memory and persisted trail state."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator._map_display_cache_store = _FakeStore({"old": "trail"})
+    coordinator._pending_map_display_cache_snapshot = (
+        coordinator._map_display_cache_snapshot(coordinator.client.state)
+    )
+    coordinator._pending_map_display_cache_restore = {"pending": "trail"}
+    coordinator._map_display_cache_signature = (4, 4, 99)
+    coordinator._map_display_cache_restored = True
+    coordinator._map_display_cache_restored_from_active = True
+    coordinator._map_display_cache_save_task = asyncio.create_task(asyncio.sleep(60))
+
+    await coordinator.async_clear_map_display_cache()
+
+    assert coordinator.client.state.map_display_data is None
+    assert coordinator._pending_map_display_cache_snapshot is None
+    assert coordinator._pending_map_display_cache_restore is None
+    assert coordinator._map_display_cache_signature == ()
+    assert not coordinator._map_display_cache_restored
+    assert coordinator._map_display_cache_save_task is None
+    assert coordinator._map_display_cache_store.saved == [{}]
+
+
+def test_reconnect_into_running_clean_keeps_restored_trail() -> None:
+    """First cleaning update after restoring a cache is not a new clean start."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator.client.last_display_map_age = float("inf")
+    coordinator._prev_working_status = WorkingStatus.UNKNOWN
+    coordinator._map_display_cache_restored = True
+    coordinator._map_display_cache_restored_from_active = True
+
+    state = coordinator.client.state
+    state.update_from_working_status({"3": 42})
+
+    assert not coordinator._is_new_clean_transition(state)
+
+
+def test_unknown_to_cleaning_clears_inactive_restored_trail() -> None:
+    """A completed cached trail must not be treated as an active reconnect."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator.client.last_display_map_age = float("inf")
+    coordinator._prev_working_status = WorkingStatus.UNKNOWN
+    coordinator._map_display_cache_restored = True
+    coordinator._map_display_cache_restored_from_active = False
+
+    state = coordinator.client.state
+    state.update_from_working_status({"3": 42})
+
+    assert coordinator._is_new_clean_transition(state)
+
+
+def test_idle_to_cleaning_transition_clears_stale_restored_trail() -> None:
+    """A clean started while HA is running must drop the previous clean's trail."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.hass = MagicMock()
+    coordinator.config_entry = MagicMock()
+    coordinator.config_entry.async_create_background_task = MagicMock()
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator.client.last_display_map_age = float("inf")
+    coordinator._map_display_cache_store = _FakeStore({"old": "trail"})
+    coordinator._pending_map_display_cache_snapshot = None
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._map_display_cache_signature = (4, 4, 99)
+    coordinator._map_display_cache_restored = True
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._map_display_cache_save_task = None
+    coordinator._prev_working_status = WorkingStatus.STANDBY
+    coordinator.config_entry.async_create_background_task.side_effect = (
+        _close_background_task
+    )
+
+    state = coordinator.client.state
+    state.update_from_working_status({"3": 42})
+
+    assert coordinator._is_new_clean_transition(state)
+    coordinator._clear_map_display_cache_for_new_clean(state)
+
+    assert state.map_display_data is None
+    assert coordinator._map_display_cache_signature == ()
+    coordinator.config_entry.async_create_background_task.assert_called_once()
+
+
+def test_new_clean_with_fresh_native_trail_replaces_cached_trail() -> None:
+    """Fresh display-map data at clean start should be persisted, not cleared."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.hass = MagicMock()
+    coordinator.config_entry = MagicMock()
+    coordinator.config_entry.async_create_background_task = MagicMock()
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator.client.last_display_map_age = 1.0
+    coordinator._map_display_cache_store = _FakeStore({"old": "trail"})
+    coordinator._pending_map_display_cache_snapshot = None
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._map_display_cache_signature = (1, 1, 1)
+    coordinator._map_display_cache_restored = True
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._map_display_cache_save_task = None
+    coordinator._map_display_cache_last_save = time.monotonic()
+    coordinator.config_entry.async_create_background_task.side_effect = (
+        _close_background_task
+    )
+
+    state = coordinator.client.state
+    state.update_from_working_status({"3": 42})
+
+    coordinator._clear_map_display_cache_for_new_clean(state)
+
+    assert state.map_display_data is not None
+    assert coordinator._pending_map_display_cache_snapshot is not None
+    assert (
+        coordinator._pending_map_display_cache_snapshot.trajectory_signature
+        == (4, 4, 99)
+    )
+    assert coordinator._map_display_cache_store.saved == []
+    coordinator.config_entry.async_create_background_task.assert_called_once()
+
+
+def test_schedule_map_display_cache_save_defers_serialization() -> None:
+    """Scheduling cache persistence must not encode full routes in callbacks."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.hass = MagicMock()
+    coordinator.config_entry = MagicMock()
+    coordinator.config_entry.async_create_background_task = MagicMock(
+        side_effect=_close_background_task
+    )
+    coordinator._map_display_cache_signature = ()
+    coordinator._pending_map_display_cache_snapshot = None
+    coordinator._map_display_cache_save_task = None
+    coordinator._map_display_cache_last_save = time.monotonic()
+
+    with patch.object(
+        NarwalCoordinator,
+        "_map_display_cache_payload_from_snapshot",
+        side_effect=AssertionError("serialization should be throttled"),
+    ):
+        coordinator._schedule_map_display_cache_save(_trajectory_state())
+
+    assert coordinator._pending_map_display_cache_snapshot is not None
+    coordinator.config_entry.async_create_background_task.assert_called_once()
+
+
+async def test_shutdown_flushes_current_display_map_cache() -> None:
+    """HA shutdown should persist the newest trail even when no save is queued."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator._map_display_cache_store = _FakeStore()
+    coordinator._pending_map_display_cache_snapshot = None
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._map_display_cache_save_task = None
+    coordinator._map_display_cache_signature = ()
+    coordinator._map_display_cache_last_save = 0.0
+
+    await coordinator._async_flush_map_display_cache()
+
+    assert coordinator._map_display_cache_store.saved
+    assert coordinator._map_display_cache_store.saved[-1]["trajectory_signature"] == [
+        4,
+        4,
+        99,
+    ]
+    assert coordinator._map_display_cache_signature == (4, 4, 99)
+
+
 class TestCoordinatorResilience:
     """Tests for NarwalCoordinator failure buffering and availability."""
 
@@ -210,9 +571,18 @@ class TestCoordinatorResilience:
         # Fresh subscription so renewal does not fire in unrelated tests.
         coordinator._last_topic_subscribe = time.monotonic()
         coordinator._prev_working_status = MagicMock()
+        coordinator._map_display_cache_store = _FakeStore()
+        coordinator._map_display_cache_signature = ()
+        coordinator._pending_map_display_cache_snapshot = None
+        coordinator._pending_map_display_cache_restore = None
+        coordinator._map_display_cache_save_task = None
+        coordinator._map_display_cache_last_save = 0.0
+        coordinator._map_display_cache_restored = False
         coordinator.update_interval = None
         # Prevent background task warnings
-        mock_entry.async_create_background_task = MagicMock()
+        mock_entry.async_create_background_task = MagicMock(
+            side_effect=_close_background_task
+        )
         return coordinator
 
     async def test_stale_data_on_first_failure(self) -> None:
@@ -282,6 +652,37 @@ class TestCoordinatorResilience:
 
         coordinator.client.get_status.assert_awaited_once_with(full_update=False)
         assert result is coordinator.client.state
+
+    async def test_poll_clean_transition_clears_stale_restored_trail(self) -> None:
+        """Polling must clear a previous clean's trail when push updates are absent."""
+        coordinator = self._make_coordinator()
+        type(coordinator.client).connected = PropertyMock(return_value=True)
+        coordinator.client.state = _trajectory_state()
+        coordinator.client.state.working_status = WorkingStatus.STANDBY
+        coordinator.client.last_display_map_age = float("inf")
+        coordinator._prev_working_status = WorkingStatus.STANDBY
+        coordinator._map_display_cache_signature = (4, 4, 99)
+        coordinator._map_display_cache_restored = True
+        coordinator._map_display_cache_restored_from_active = False
+
+        async def get_status(*, full_update: bool) -> CommandResponse:
+            coordinator.client.state.update_from_base_status(
+                {"3": {"1": int(WorkingStatus.CLEANING)}}
+            )
+            return CommandResponse(
+                data={"2": {"3": {"1": int(WorkingStatus.CLEANING)}}}
+            )
+
+        coordinator.client.get_status = AsyncMock(side_effect=get_status)
+
+        result = await coordinator._async_update_data()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=True)
+        assert result is coordinator.client.state
+        assert result.map_display_data is None
+        assert coordinator._map_display_cache_signature == ()
+        assert coordinator._prev_working_status == WorkingStatus.CLEANING
+        coordinator.config_entry.async_create_background_task.assert_called_once()
 
     async def test_push_update_resets_failure_counter(self) -> None:
         """_on_state_update resets _consecutive_failures to 0."""

@@ -9,7 +9,14 @@ Covers MAP-03 (live overlay / to_grid_coords) validation gaps:
 
 from __future__ import annotations
 
+import struct
+
 from narwal_client.models import MapDisplayData
+
+
+def _float_stream(*values: float) -> bytes:
+    """Encode a packed float32 stream as display_map field 2 uses it."""
+    return b"".join(struct.pack("<f", value) for value in values)
 
 
 class TestToGridCoords:
@@ -22,14 +29,11 @@ class TestToGridCoords:
 
         assert result is not None
         px, py = result
-        # 10.0 - (-100) = 110.0
         assert abs(px - 110.0) < 0.01
-        # 20.0 - (-200) = 220.0
         assert abs(py - 220.0) < 0.01
 
     def test_at_origin(self) -> None:
         """Robot at origin position returns (0, 0) grid coords."""
-        # origin_x=-280, origin_y=-341: robot at (-280, -341) should give (0, 0)
         display = MapDisplayData(robot_x=-280.0, robot_y=-341.0)
         result = display.to_grid_coords(resolution=60, origin_x=-280, origin_y=-341)
 
@@ -48,9 +52,7 @@ class TestToGridCoords:
 
         assert result is not None
         px, py = result
-        # -7.97 - (-280) = 272.03
         assert abs(px - 272.03) < 0.1
-        # 1.25 - (-341) = 342.25
         assert abs(py - 342.25) < 0.1
 
     def test_zero_position_returns_none(self) -> None:
@@ -81,9 +83,7 @@ class TestToGridCoords:
 
         assert result is not None
         px, py = result
-        # 50.0 - 10 = 40.0
         assert abs(px - 40.0) < 0.01
-        # 60.0 - 20 = 40.0
         assert abs(py - 40.0) < 0.01
 
 
@@ -111,9 +111,56 @@ class TestMapDisplayDataFromBroadcast:
         assert abs(result.dock_ref_y - 0.22) < 0.01
         assert result.timestamp == 1709900000000
 
+    def test_accumulated_trajectory_parsing(self) -> None:
+        """Parse display_map field 2 as accumulated native cleaning trajectory."""
+        decoded = {
+            "2": {
+                "1": _float_stream(1.5, 2.0, 2.5),
+                "2": _float_stream(-2.25, 3.0, 3.5),
+            }
+        }
+
+        result = MapDisplayData.from_broadcast(decoded)
+
+        assert result.has_trajectory
+        assert result.trajectory_points() == [(1.5, -2.25), (2.0, 3.0), (2.5, 3.5)]
+
+    def test_accumulated_trajectory_filters_invalid_pairs_without_shifting_axes(
+        self,
+    ) -> None:
+        """Drop bad x/y pairs without inventing coordinates from later values."""
+        decoded = {
+            "2": {
+                "1": _float_stream(1.5, float("nan"), 2.5),
+                "2": _float_stream(-2.25, 3.0, 3.5),
+            }
+        }
+
+        result = MapDisplayData.from_broadcast(decoded)
+
+        assert result.has_trajectory
+        assert result.trajectory_points() == [(1.5, -2.25), (2.5, 3.5)]
+
+    def test_accumulated_trajectory_list_values_preserve_bad_pair_slots(
+        self,
+    ) -> None:
+        """Bad list entries become NaN slots so later x/y values stay aligned."""
+        decoded = {
+            "2": {
+                "1": [1.5, "bad", 2.5],
+                "2": [-2.25, 3.0, 3.5],
+            }
+        }
+
+        result = MapDisplayData.from_broadcast(decoded)
+
+        assert result.has_trajectory
+        assert result.trajectory_points() == [(1.5, -2.25), (2.5, 3.5)]
+
     def test_empty_broadcast(self) -> None:
         """Empty broadcast returns default values."""
         result = MapDisplayData.from_broadcast({})
         assert result.robot_x == 0.0
         assert result.robot_y == 0.0
         assert result.timestamp == 0
+        assert not result.has_trajectory
