@@ -270,6 +270,8 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if _is_dock_side(state):
             return VacuumActivity.DOCKED
         activity = WORKING_STATUS_TO_ACTIVITY.get(state.working_status)
+        if activity == VacuumActivity.DOCKED:
+            return VacuumActivity.IDLE
         if activity is not None:
             return activity
         return VacuumActivity.IDLE

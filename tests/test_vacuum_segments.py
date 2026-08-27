@@ -209,6 +209,7 @@ class TestVacuumSupportedFeatures:
 
         features = vac.supported_features
 
+        assert vac.activity == VacuumActivity.IDLE
         assert features & VacuumEntityFeature.RETURN_HOME
         assert not features & VacuumEntityFeature.START
         assert not features & VacuumEntityFeature.CLEAN_AREA
