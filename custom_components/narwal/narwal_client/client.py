@@ -143,7 +143,12 @@ def _robot_start_blocked(state: NarwalState) -> bool:
 
 def _can_force_end_scoped_dock_task(state: NarwalState, task: str | None) -> bool:
     """Return true when a typed force-end can safely target a known task."""
-    return task in _DOCK_TASK_FORCE_END_PAYLOADS and task in state.active_dock_task_keys
+    return task in _DOCK_TASK_FORCE_END_PAYLOADS and task in state.telemetry_dock_task_keys
+
+
+def _has_generic_dock_stop_proof(state: NarwalState) -> bool:
+    """Return true when generic force-end can only target dock-side work."""
+    return state.is_docked and state.has_dock_presence_signal
 
 
 def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStatus | None:
@@ -1491,8 +1496,10 @@ class NarwalClient:
         """Return true when a typed scoped-stop target may still be settling."""
         if task not in _DOCK_TASK_FORCE_END_PAYLOADS:
             return False
-        if task in self.state.active_dock_task_keys:
+        if task in self.state.telemetry_dock_task_keys:
             return False
+        if task == self.state.assumed_active_dock_task:
+            return True
         if self.state.has_unmapped_active_dock_task:
             return True
         return self.state.station_activity == 4 and not self.state.active_dock_drying_tasks
@@ -1555,10 +1562,14 @@ class NarwalClient:
             if payload is None:
                 if active_task == DOCK_TASK_DRY_DUST_BIN:
                     return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                if not _has_generic_dock_stop_proof(self.state):
+                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
                 if len(active_tasks) > 1:
                     return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
                 response = await self.stop(timeout=15.0)
             else:
+                if active_task not in self.state.telemetry_dock_task_keys:
+                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
                 response = await self.send_command(
                     TOPIC_CMD_FORCE_END,
                     payload=payload,

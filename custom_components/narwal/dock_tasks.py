@@ -148,13 +148,20 @@ def can_stop_dock_task(state: NarwalState | None, task_key: str | None = None) -
     if is_robot_work_context(state):
         return task_key in SCOPED_STOP_DOCK_TASKS and task_key in active_keys
     active_key_set = set(active_keys)
+    telemetry_key_set = set(state.telemetry_dock_task_keys)
     if task_key is None:
-        return (
-            len(active_key_set) == 1
-            and next(iter(active_key_set)) in STOPPABLE_DOCK_TASKS
-        )
+        if len(active_key_set) != 1:
+            return False
+        active_key = next(iter(active_key_set))
+        if active_key not in STOPPABLE_DOCK_TASKS:
+            return False
+        if active_key in SCOPED_STOP_DOCK_TASKS:
+            return active_key in telemetry_key_set
+        return state.is_docked and state.has_dock_presence_signal
     if task_key not in active_key_set or task_key not in STOPPABLE_DOCK_TASKS:
         return False
     if task_key in SCOPED_STOP_DOCK_TASKS:
-        return True
+        return task_key in telemetry_key_set
+    if not (state.is_docked and state.has_dock_presence_signal):
+        return False
     return active_key_set == {task_key}

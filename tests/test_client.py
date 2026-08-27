@@ -799,6 +799,25 @@ class TestDockTaskCommands:
         mock_stop.assert_awaited_once_with(timeout=15.0)
 
     @pytest.mark.asyncio
+    async def test_stop_empty_dustbin_rejects_task_completed_without_dock_proof(
+        self,
+    ) -> None:
+        """Generic dock stop needs a dock signal, not just TASK_COMPLETED."""
+        client = NarwalClient("127.0.0.1")
+        client.state.working_status = WorkingStatus.TASK_COMPLETED
+        client.state.station_activity = 1
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+            mock_status.return_value = self._docked_status_response()
+            result = await client.stop_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+        mock_status.assert_awaited_once_with(full_update=True)
+        mock_stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_stop_dry_station_bag_uses_scoped_force_end_payload(self) -> None:
         client = NarwalClient("127.0.0.1")
         client.state.set_dock_drying_task(
@@ -915,6 +934,106 @@ class TestDockTaskCommands:
         )
         assert mock_status.await_count == 2
         mock_sleep.assert_any_await(1.5)
+
+    @pytest.mark.asyncio
+    async def test_stop_dry_station_bag_waits_past_local_assumption(
+        self,
+    ) -> None:
+        """Scoped stop waits for telemetry rather than a local task reservation."""
+        client = NarwalClient("127.0.0.1")
+        client.state.working_status = WorkingStatus.TASK_COMPLETED
+        client.state.station_activity = 4
+        client.state.dock_presence = 6
+        client.state.dock_field11 = 2
+        client.state.assume_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+        client.state.update_from_working_status({"12": 0, "13": 18000})
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+        refresh_count = 0
+
+        async def refresh_status(*args, **kwargs):
+            nonlocal refresh_count
+            refresh_count += 1
+            client.state.station_activity = 4
+            if refresh_count == 2:
+                client.state.set_dock_drying_task(
+                    DOCK_TASK_DRY_DOCK_BAG,
+                    elapsed=2,
+                    target=18000,
+                    fields=("12", "13"),
+                )
+            return self._docked_status_response()
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send, patch.object(
+            client, "_refresh_after_dock_stop", new_callable=AsyncMock
+        ) as mock_refresh, patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            mock_status.side_effect = refresh_status
+            mock_send.return_value = success
+            mock_refresh.return_value = True
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+        assert result is success
+        assert mock_status.await_count == 2
+        mock_sleep.assert_any_await(1.5)
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_FORCE_END,
+            payload=b"\x08\x01",
+            timeout=15.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_stop_dry_dust_bag_waits_past_local_assumption(
+        self,
+    ) -> None:
+        """Scoped dry dust-bin stop also waits for typed telemetry."""
+        client = NarwalClient("127.0.0.1")
+        client.state.working_status = WorkingStatus.CHARGED
+        client.state.dock_presence = 6
+        client.state.dock_field11 = 2
+        client.state.assume_dock_task(DOCK_TASK_DRY_DUST_BIN)
+        client.state.update_from_working_status({"10": 0, "11": 180})
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+        refresh_count = 0
+
+        async def refresh_status(*args, **kwargs):
+            nonlocal refresh_count
+            refresh_count += 1
+            if refresh_count == 2:
+                client.state.set_dock_drying_task(
+                    DOCK_TASK_DRY_DUST_BIN,
+                    elapsed=2,
+                    target=180,
+                    fields=("10", "11"),
+                )
+            return self._docked_status_response()
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send, patch.object(
+            client, "_refresh_after_dock_stop", new_callable=AsyncMock
+        ) as mock_refresh, patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            mock_status.side_effect = refresh_status
+            mock_send.return_value = success
+            mock_refresh.return_value = True
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DUST_BIN)
+
+        assert result is success
+        assert mock_status.await_count == 2
+        mock_sleep.assert_any_await(1.5)
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_FORCE_END,
+            payload=b"\x08\x05",
+            timeout=15.0,
+        )
 
     @pytest.mark.asyncio
     async def test_stop_dry_station_bag_waits_after_idle_drying_snapshot(

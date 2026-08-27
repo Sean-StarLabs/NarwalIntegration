@@ -285,6 +285,31 @@ def test_task_completed_allows_typed_empty_dustbin_stop() -> None:
     assert can_stop_dock_task(state, DOCK_TASK_EMPTY_DUSTBIN)
 
 
+def test_task_completed_rejects_empty_dustbin_stop_without_dock_proof() -> None:
+    """Generic dock stop is unsafe without an explicit dock presence signal."""
+    state = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
+    state.station_activity = 1
+
+    assert not can_stop_dock_task(state)
+    assert not can_stop_dock_task(state, DOCK_TASK_EMPTY_DUSTBIN)
+
+
+def test_scoped_dry_stop_requires_telemetry_not_only_assumption() -> None:
+    """Scoped force-end is hidden until the dry task is typed by telemetry."""
+    state = _docked_state()
+    state.assume_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+    assert not can_stop_dock_task(state, DOCK_TASK_DRY_DOCK_BAG)
+
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DOCK_BAG,
+        elapsed=45,
+        target=180,
+        fields=("12", "13"),
+    )
+    assert can_stop_dock_task(state, DOCK_TASK_DRY_DOCK_BAG)
+
+
 def test_clean_session_context_allows_scoped_dock_bag_stop() -> None:
     """The scoped dock-bag payload remains safe during robot-side work."""
     state = _docked_state()

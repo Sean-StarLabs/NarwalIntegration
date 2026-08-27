@@ -33,7 +33,7 @@ Expose exactly five dock task entities:
 | Task | Domain | Stable unique ID suffix | Command | Active state |
 |---|---|---|---|---|
 | Empty dustbin | `switch` | `_empty_dustbin` | `empty_dustbin()` | `emptying_dustbin` |
-| Wash mop | `switch` | `_wash_mop` | `wash_mop()` | `washing_mop` |
+| Wash mop | `switch` | `_wash_mop` | `wash_mop_by_robot_status()` | `washing_mop` |
 | Dry mop | `switch` | `_dry_mop` | `dry_mop()` | `drying_mop` |
 | Dry dust bin | `switch` | `_dry_dust_bin` | `dry_dust_bag()` | `dry_dust_bin` |
 | Dry dock bag | `switch` | `_dry_dock_bag` | `dry_station_bag()` | `dry_dock_bag` |
