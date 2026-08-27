@@ -125,6 +125,17 @@ def _clean_session_context(state: NarwalState) -> bool:
     )
 
 
+def _robot_work_blocks_generic_dock_stop(state: NarwalState) -> bool:
+    """Return true when generic force-end could target robot work, not dock work."""
+    return (
+        state.is_cleaning
+        or state.has_assumed_robot_clean
+        or state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.has_recent_active_working_status
+        or state.is_returning
+    )
+
+
 def _robot_start_blocked(state: NarwalState) -> bool:
     """Return true when a private guard or dock task blocks a start."""
     return state.has_assumed_robot_clean or state.blocks_robot_start_for_dock_task
@@ -1535,7 +1546,7 @@ class NarwalClient:
             if active_task is None:
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             if (
-                _clean_session_context(self.state)
+                _robot_work_blocks_generic_dock_stop(self.state)
                 and active_task not in _DOCK_TASK_FORCE_END_PAYLOADS
             ):
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)

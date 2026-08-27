@@ -266,13 +266,23 @@ def test_multiple_tasks_only_allow_scoped_stop() -> None:
 
 
 def test_clean_session_context_rejects_unscoped_dock_stop() -> None:
-    """Generic force-end must not be exposed while a robot return is current."""
+    """Generic force-end must not be exposed while robot work is current."""
     state = _docked_state()
-    state.working_status = WorkingStatus.TASK_COMPLETED
+    state.working_status = WorkingStatus.CLEANING
     state.station_activity = 1
 
     assert not can_stop_dock_task(state)
     assert not can_stop_dock_task(state, DOCK_TASK_EMPTY_DUSTBIN)
+
+
+def test_task_completed_allows_typed_empty_dustbin_stop() -> None:
+    """Dock emptying reports TASK_COMPLETED while its generic stop is valid."""
+    state = _docked_state()
+    state.working_status = WorkingStatus.TASK_COMPLETED
+    state.station_activity = 1
+
+    assert can_stop_dock_task(state)
+    assert can_stop_dock_task(state, DOCK_TASK_EMPTY_DUSTBIN)
 
 
 def test_clean_session_context_allows_scoped_dock_bag_stop() -> None:

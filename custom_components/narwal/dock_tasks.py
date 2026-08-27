@@ -88,6 +88,19 @@ def is_clean_session_context(state: NarwalState | None) -> bool:
     )
 
 
+def is_robot_work_context(state: NarwalState | None) -> bool:
+    """Return True when generic force-end could affect robot-side work."""
+    if state is None:
+        return False
+    return (
+        state.is_cleaning
+        or state.has_assumed_robot_clean
+        or state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.has_recent_active_working_status
+        or state.is_returning
+    )
+
+
 def can_start_dock_task(state: NarwalState | None, task_key: str | None = None) -> bool:
     """Return True when a dock task can be started safely."""
     if has_blocking_error(state):
@@ -132,7 +145,7 @@ def can_stop_dock_task(state: NarwalState | None, task_key: str | None = None) -
         return False
     if state.has_unmapped_active_dock_task:
         return task_key in SCOPED_STOP_DOCK_TASKS and task_key in active_keys
-    if is_clean_session_context(state):
+    if is_robot_work_context(state):
         return task_key in SCOPED_STOP_DOCK_TASKS and task_key in active_keys
     active_key_set = set(active_keys)
     if task_key is None:

@@ -757,9 +757,9 @@ class TestDockTaskCommands:
 
     @pytest.mark.asyncio
     async def test_stop_dock_task_rejects_unscoped_clean_context(self) -> None:
-        """Direct dock stops cannot use generic force-end during robot return."""
+        """Direct dock stops cannot use generic force-end during robot work."""
         client = self._docked_client()
-        client.state.working_status = WorkingStatus.TASK_COMPLETED
+        client.state.working_status = WorkingStatus.CLEANING
         client.state.station_activity = 1
 
         with patch.object(
@@ -771,6 +771,32 @@ class TestDockTaskCommands:
         assert result.result_code == CommandResult.NOT_APPLICABLE
         mock_status.assert_awaited_once_with(full_update=True)
         mock_stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_empty_dustbin_allows_task_completed_dock_context(self) -> None:
+        """Dock emptying reports TASK_COMPLETED, but its generic stop is dock-scoped."""
+        client = self._docked_client()
+        client.state.working_status = WorkingStatus.TASK_COMPLETED
+        client.state.station_activity = 1
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "stop", new_callable=AsyncMock
+        ) as mock_stop, patch.object(
+            client, "_refresh_after_dock_stop", new_callable=AsyncMock
+        ) as mock_refresh, patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ):
+            mock_status.return_value = self._docked_status_response()
+            mock_stop.return_value = success
+            mock_refresh.return_value = True
+            result = await client.stop_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        assert result is success
+        mock_status.assert_awaited_once_with(full_update=True)
+        mock_stop.assert_awaited_once_with(timeout=15.0)
 
     @pytest.mark.asyncio
     async def test_stop_dry_station_bag_uses_scoped_force_end_payload(self) -> None:
