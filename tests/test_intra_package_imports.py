@@ -33,6 +33,8 @@ def _toplevel_names(path: pathlib.Path) -> set[str] | None:
                         names.add(target.id)
             elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
                 names.add(node.target.id)
+            elif isinstance(node, ast.TypeAlias) and isinstance(node.name, ast.Name):
+                names.add(node.name.id)
             elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 names.add(node.name)
             elif isinstance(node, ast.Import):

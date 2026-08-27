@@ -1,4 +1,4 @@
-"""Switch entities for Narwal dock tasks and map display options."""
+"""Switch entities for Narwal dock tasks, room selection, and map display options."""
 
 from __future__ import annotations
 
@@ -6,10 +6,12 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
-from homeassistant.const import EntityCategory
-from homeassistant.core import HomeAssistant
+from homeassistant.const import STATE_ON, EntityCategory
+from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
+from homeassistant.helpers.restore_state import RestoreEntity
+from homeassistant.util import slugify
 
 from . import NarwalConfigEntry
 from .const import (
@@ -18,7 +20,7 @@ from .const import (
     CONF_SHOW_ROOM_LABELS,
     MAP_OPTION_DEFAULTS,
 )
-from .coordinator import NarwalCoordinator
+from .coordinator import NarwalCoordinator, can_edit_pending_clean_settings
 from .dock_tasks import DOCK_TASKS, can_start_dock_task, can_stop_dock_task
 from .entity import NarwalDockEntity, NarwalEntity
 from .narwal_client import CommandResponse, CommandResult
@@ -76,6 +78,33 @@ async def async_setup_entry(
 ) -> None:
     """Set up Narwal switch entities."""
     coordinator = entry.runtime_data
+    known_room_selections: dict[tuple[str | None, int], NarwalRoomSelectionSwitch] = {}
+
+    @callback
+    def async_add_room_selection_entities() -> None:
+        map_data = coordinator.client.state.map_data
+        if map_data is None:
+            return
+        map_id = coordinator.room_settings_map_id(map_data)
+        entities: list[NarwalRoomSelectionSwitch] = []
+        for room in sorted(map_data.rooms, key=lambda item: item.display_name.lower()):
+            if room.room_id <= 0:
+                continue
+            key = (map_id, room.room_id)
+            if key in known_room_selections:
+                known_room_selections[key].async_update_room_name(room.display_name)
+                continue
+            entity = NarwalRoomSelectionSwitch(
+                coordinator,
+                room.room_id,
+                room.display_name,
+                map_id=map_id,
+            )
+            known_room_selections[key] = entity
+            entities.append(entity)
+        if entities:
+            async_add_entities(entities)
+
     async_add_entities(
         NarwalDockTaskSwitch(coordinator, description)
         for description in DOCK_TASK_SWITCHES
@@ -84,6 +113,8 @@ async def async_setup_entry(
         NarwalMapOptionSwitch(coordinator, description)
         for description in MAP_SWITCHES
     )
+    async_add_room_selection_entities()
+    entry.async_on_unload(coordinator.async_add_listener(async_add_room_selection_entities))
 
 
 def _format_duration(seconds: int) -> str:
@@ -215,6 +246,115 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         raise HomeAssistantError(
             f"Narwal {action} {self.entity_description.key} failed: {result_name}"
         )
+
+
+class NarwalRoomSelectionSwitch(NarwalEntity, RestoreEntity, SwitchEntity):
+    """Room inclusion switch for the next native vacuum start command."""
+
+    _attr_icon = "mdi:floor-plan"
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        room_id: int,
+        room_name: str,
+        *,
+        map_id: str | None = None,
+    ) -> None:
+        """Initialize a room selection switch."""
+        super().__init__(coordinator)
+        self._map_id = map_id
+        self._room_id = room_id
+        self._room_name = room_name
+        device_id = coordinator.config_entry.data["device_id"]
+        map_prefix = f"map_{slugify(map_id)}_" if map_id is not None else ""
+        self._attr_unique_id = f"{device_id}_{map_prefix}room_{room_id}_selected"
+        self._attr_suggested_object_id = (
+            f"{slugify(coordinator.config_entry.title)}_room_{slugify(room_name)}"
+        )
+        self._attr_name = f"{room_name} selected"
+
+    async def async_added_to_hass(self) -> None:
+        """Restore the previous room selection state."""
+        await super().async_added_to_hass()
+        last = await self.async_get_last_state()
+        if last is not None and last.state in (STATE_ON, "off"):
+            self.coordinator.set_room_selected_for_clean(
+                self._room_id,
+                last.state == STATE_ON,
+                map_id=self._map_id,
+            )
+
+    @callback
+    def async_update_room_name(self, room_name: str) -> None:
+        """Update display metadata when the map renames this room."""
+        if room_name == self._room_name:
+            return
+        self._room_name = room_name
+        self._attr_name = f"{room_name} selected"
+        self._attr_suggested_object_id = (
+            f"{slugify(self.coordinator.config_entry.title)}_room_{slugify(room_name)}"
+        )
+        if getattr(self, "hass", None) is not None:
+            self.async_write_ha_state()
+
+    @property
+    def is_on(self) -> bool:
+        """Return whether this room is selected for the next vacuum start."""
+        return self.coordinator.is_room_selected_for_clean(
+            self._room_id,
+            map_id=self._map_id,
+        )
+
+    @property
+    def available(self) -> bool:
+        """Return True when next-clean room selection can be changed."""
+        return (
+            super().available
+            and can_edit_pending_clean_settings(self.coordinator.data)
+            and self._room_exists
+        )
+
+    @property
+    def extra_state_attributes(self) -> dict[str, str | int]:
+        """Return room metadata for dashboards and automations."""
+        return {
+            "room_id": self._room_id,
+            "room_name": self._room_name,
+            "map_id": self._map_id or "",
+        }
+
+    @property
+    def _room_exists(self) -> bool:
+        """Return True when the room still exists in the current map."""
+        state = self.coordinator.data
+        map_data = getattr(state, "map_data", None) if state is not None else None
+        if self.coordinator.room_settings_map_id(map_data) != self._map_id:
+            return False
+        rooms = getattr(map_data, "rooms", None)
+        if not isinstance(rooms, (list, tuple)):
+            return True
+        return any(room.room_id == self._room_id for room in rooms)
+
+    async def async_turn_on(self, **kwargs) -> None:
+        """Select this room for the next native vacuum start."""
+        self.coordinator.set_room_selected_for_clean(
+            self._room_id,
+            True,
+            map_id=self._map_id,
+        )
+        self.async_write_ha_state()
+        self.coordinator.async_update_listeners()
+
+    async def async_turn_off(self, **kwargs) -> None:
+        """Remove this room from the next native vacuum start."""
+        self.coordinator.set_room_selected_for_clean(
+            self._room_id,
+            False,
+            map_id=self._map_id,
+        )
+        self.async_write_ha_state()
+        self.coordinator.async_update_listeners()
 
 
 class NarwalMapOptionSwitch(NarwalEntity, SwitchEntity):
