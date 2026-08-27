@@ -23,9 +23,15 @@ _LOGGER = logging.getLogger(__name__)
 _WARNED_WORKING_STATUS: set[Any] = set()
 
 _ACTIVE_WORKING_STATUS_TTL = 15.0
+_TERMINAL_WORKING_STATUS_TTL = 15.0
 _DOCK_DRYING_STATUS_TTL = 180.0
 _DOCK_TASK_ASSUME_TTL = 30.0
-_ROBOT_START_ASSUME_TTL = 30.0
+# clean/start_clean can be accepted long before working_status metrics arrive.
+_ROBOT_START_ASSUME_TTL = 180.0
+# Live hardware has taken about 50 seconds to leave a stale docked status after
+# accepting a room clean. After this handoff window, repeated idle dock
+# telemetry is stronger evidence than the accepted-command reservation.
+_ROBOT_START_DOCKED_HANDOFF_GRACE = 60.0
 _KNOWN_DOCK_ACTIVITY_VALUES = {0, 2, 3, 4, 6}
 
 DOCK_TASK_EMPTY_DUSTBIN = "empty_dustbin"
@@ -649,6 +655,15 @@ class NarwalState:
     cleaning_area: float = 0.0  # m² (coveredArea)
     cleaning_time: int = 0  # seconds
     last_active_working_status_time: float = 0.0
+    last_terminal_working_status_time: float = 0.0
+    pending_active_working_status: tuple[Any, ...] | None = field(
+        default=None, repr=False
+    )
+    pending_active_working_status_time: float = 0.0
+    task_progress_percent: int | None = None
+    task_elapsed_time: int = 0
+    task_remaining_time: int = 0
+    current_room_aux_name: str = ""
 
     # Consumables / station / fault (base_status; present on dock and during cleaning)
     dust_bag_health: float = 0.0  # field 35 stationBagHealthScore (%)
@@ -743,8 +758,6 @@ class NarwalState:
     @property
     def has_recent_active_working_status(self) -> bool:
         """True while live working_status task metrics are still fresh."""
-        if self.working_status not in ACTIVE_CLEANING_STATUSES:
-            return False
         if self.last_active_working_status_time <= 0:
             return False
         return (
@@ -753,13 +766,24 @@ class NarwalState:
         )
 
     @property
+    def has_recent_terminal_working_status(self) -> bool:
+        """True just after authoritative terminal base-status telemetry."""
+        if self.last_terminal_working_status_time <= 0:
+            return False
+        return (
+            time.monotonic() - self.last_terminal_working_status_time
+            <= _TERMINAL_WORKING_STATUS_TTL
+        )
+
+    @property
     def has_paused_clean_task_context(self) -> bool:
         """True when a paused overlay still has retained robot clean details."""
-        if not self.is_paused or self.is_docked:
+        if not self.is_paused:
             return False
         return (
             getattr(self, "task_progress_percent", None) is not None
-            or getattr(self, "task_elapsed_time", self.cleaning_time) > 0
+            or getattr(self, "task_elapsed_time", 0) > 0
+            or self.cleaning_time > 0
             or getattr(self, "task_remaining_time", 0) > 0
             or self.current_room_id is not None
             or bool(getattr(self, "current_room_aux_name", ""))
@@ -775,7 +799,7 @@ class NarwalState:
         return (
             self.working_status in ACTIVE_CLEANING_STATUSES
             and not self.is_paused
-            and not self.is_returning_to_dock
+            and not self.is_returning
         )
 
     @property
@@ -810,14 +834,14 @@ class NarwalState:
         cleaning is not active, since the robot can report unmapped states
         (e.g. self-test) while physically docked.
         """
+        if self.has_recent_active_working_status:
+            return False
         if self.has_explicit_off_dock_signal:
             return False
         if self.working_status in (
             WorkingStatus.DOCKED, WorkingStatus.CHARGED, WorkingStatus.DOCKED_V2,
         ):
             return True
-        if self.has_recent_active_working_status:
-            return False
         if self.working_status in ACTIVE_CLEANING_STATUSES:
             return False
         # For STANDBY, UNKNOWN, or any other status: check dock field signals.
@@ -871,6 +895,12 @@ class NarwalState:
     @property
     def is_station_active(self) -> bool:
         """True when the dock/base station is running a dock-side task."""
+        if self.has_recent_active_working_status:
+            return (
+                self.station_activity in (1, 2, 3)
+                or self.is_washing_mop
+                or bool(self.active_dock_drying_tasks)
+            )
         return (
             self.is_washing_mop
             or self.is_drying_mop
@@ -895,9 +925,9 @@ class NarwalState:
         if not telemetry_tasks:
             return False
         return not (
-            telemetry_tasks == {DOCK_TASK_DRY_DOCK_BAG}
+            telemetry_tasks.issubset(_DOCK_DRYING_TASK_ORDER)
             and self.has_recent_dock_drying_status
-            and self.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is not None
+            and all(self.dock_task_timer(task) is not None for task in telemetry_tasks)
         )
 
     @property
@@ -926,12 +956,17 @@ class NarwalState:
     def telemetry_dock_task_keys(self) -> tuple[str, ...]:
         """Return active dock task keys from robot telemetry only."""
         tasks: list[str] = []
-        if self.station_activity == 1:
-            tasks.append(DOCK_TASK_EMPTY_DUSTBIN)
-        if self.is_washing_mop:
-            tasks.append(DOCK_TASK_WASH_MOP)
+        if not self.has_recent_active_working_status:
+            if self.station_activity == 1:
+                tasks.append(DOCK_TASK_EMPTY_DUSTBIN)
+            if self.is_washing_mop:
+                tasks.append(DOCK_TASK_WASH_MOP)
         tasks.extend(self.telemetry_dock_drying_tasks)
-        if self.is_drying_mop and DOCK_TASK_DRY_MOP not in tasks:
+        if (
+            not self.has_recent_active_working_status
+            and self.is_drying_mop
+            and DOCK_TASK_DRY_MOP not in tasks
+        ):
             tasks.append(DOCK_TASK_DRY_MOP)
         active = set(tasks)
         return tuple(task for task in DOCK_TASK_KEYS if task in active)
@@ -1017,6 +1052,39 @@ class NarwalState:
         """Clear the local robot-clean command reservation."""
         self.assumed_robot_clean_until = 0.0
 
+    def _clear_assumed_robot_clean_on_terminal_base_status(
+        self,
+        *,
+        is_paused: bool,
+    ) -> None:
+        """Clear accepted-start context once base status proves it is terminal."""
+        if not self.has_assumed_robot_clean:
+            return
+        if self.has_error or self.working_status == WorkingStatus.ERROR:
+            self.clear_assumed_robot_clean()
+            return
+        if self.working_status == WorkingStatus.TASK_COMPLETED:
+            self.clear_assumed_robot_clean()
+            return
+        handoff_ends = (
+            self.assumed_robot_clean_until
+            - _ROBOT_START_ASSUME_TTL
+            + _ROBOT_START_DOCKED_HANDOFF_GRACE
+        )
+        if (
+            not is_paused
+            and time.monotonic() >= handoff_ends
+            and self.working_status
+            in (
+                WorkingStatus.STANDBY,
+                WorkingStatus.DOCKED,
+                WorkingStatus.CHARGED,
+                WorkingStatus.DOCKED_V2,
+            )
+            and self.is_docked
+        ):
+            self.clear_assumed_robot_clean()
+
     def dock_task_timer(self, task: str) -> DockTaskTimer | None:
         """Return timer details for one active dock task."""
         timer = self.dock_drying_tasks.get(task)
@@ -1074,11 +1142,68 @@ class NarwalState:
         if self.current_room_id is None:
             return None
         if self.map_data is None:
-            return None
+            return self.current_room_aux_name or None
         for room in self.map_data.rooms:
             if room.room_id == self.current_room_id:
                 return room.display_name
+        return self.current_room_aux_name or None
+
+    def clear_task_details(self) -> None:
+        """Clear active robot-task detail fields."""
+        self.is_paused = False
+        self.cleaning_area = 0.0
+        self.cleaning_time = 0
+        self.task_progress_percent = None
+        self.task_elapsed_time = 0
+        self.task_remaining_time = 0
+        self.current_room_id = None
+        self.current_room_aux_name = ""
+
+    @staticmethod
+    def _task_progress_percent(value: Any) -> int | None:
+        """Return a percent for task progress encoded as percent or 0..1 float."""
+        if isinstance(value, float):
+            if 0.0 <= value <= 1.0:
+                return round(value * 100)
+            if 0.0 <= value <= 100.0:
+                return round(value)
+        progress = _optional_int(value)
+        if progress is not None and 0 <= progress <= 100:
+            return progress
+        progress_float = _to_float32(value)
+        if progress_float is None:
+            return None
+        if 0.0 <= progress_float <= 1.0:
+            return round(progress_float * 100)
+        if 0.0 <= progress_float <= 100.0:
+            return round(progress_float)
         return None
+
+    def _update_current_room(self, payload: dict[str, Any]) -> None:
+        """Parse scalar and nested current-room working-status fields."""
+        room = payload.get("6")
+        if not isinstance(room, dict):
+            room = payload.get("8")
+        if isinstance(room, dict):
+            room_id = _optional_int(room.get("1"))
+            if room_id is not None:
+                self.current_room_id = room_id or None
+            name = room.get("3")
+            if isinstance(name, (bytes, bytearray)):
+                self.current_room_aux_name = bytes(name).decode(
+                    "utf-8", errors="replace"
+                )
+            else:
+                self.current_room_aux_name = str(name) if name else ""
+                if (
+                    self.current_room_aux_name.startswith("b'")
+                    and self.current_room_aux_name.endswith("'")
+                ):
+                    self.current_room_aux_name = self.current_room_aux_name[2:-1]
+        else:
+            room_id = _optional_int(payload.get("6"))
+            if room_id is not None:
+                self.current_room_id = room_id or None
 
     def update_from_working_status(self, decoded: dict[str, Any]) -> None:
         """Update state from a decoded working_status message.
@@ -1092,8 +1217,26 @@ class NarwalState:
         not area — reading it as area is why the sensor was stuck at 1.8 m².
         """
         self.raw_working_status = decoded
+        previous_task_details = (
+            self.task_progress_percent,
+            self.cleaning_area,
+            self.cleaning_time,
+            self.task_remaining_time,
+            self.current_room_id,
+            self.current_room_aux_name,
+        )
+        progress = self._task_progress_percent(decoded.get("1"))
+        if progress is not None:
+            self.task_progress_percent = max(0, min(100, progress))
+        remaining = _optional_int(decoded.get("4"))
+        if remaining is not None:
+            self.task_remaining_time = max(0, remaining)
+        has_robot_side_drying = False
         if _has_dock_drying_timer_fields(decoded):
             timers = _dock_drying_timers(decoded)
+            has_robot_side_drying = bool(
+                timers.keys() & {DOCK_TASK_DRY_MOP, DOCK_TASK_DRY_DUST_BIN}
+            )
             self.dock_drying_tasks = timers
             self.has_dock_drying_timer_snapshot = True
             self.has_unmapped_dock_drying_timer = _has_unmapped_dock_drying_timer(
@@ -1109,6 +1252,7 @@ class NarwalState:
         if "3" in decoded:
             try:
                 self.cleaning_time = int(decoded["3"])
+                self.task_elapsed_time = self.cleaning_time
                 active_payload = active_payload or self.cleaning_time > 0
             except (ValueError, TypeError):
                 pass
@@ -1117,28 +1261,82 @@ class NarwalState:
             if area is not None and area >= 0:
                 self.cleaning_area = area
                 active_payload = active_payload or area > 0
-        if "6" in decoded:
-            # Field 6 = current target room_id (confirmed 2026-04-24 from live capture:
-            # value changed 4→1 as robot moved from Corridor to Living Room).
-            try:
-                room_id = int(decoded["6"])
-                self.current_room_id = room_id if room_id != 0 else None
-            except (ValueError, TypeError):
-                pass
-        if active_payload:
-            if self.working_status != WorkingStatus.CUSTOM_CLEANING:
-                self.working_status = WorkingStatus.CLEANING
-            self.last_active_working_status_time = time.monotonic()
-            self.clear_assumed_robot_clean()
-            self.is_paused = False
-            self.is_returning_to_dock = False
-            self.dock_sub_state = 0
+        if "6" in decoded or isinstance(decoded.get("8"), dict):
+            # Field 6 is a scalar room id on Flow 2 and a nested room detail
+            # message on other firmware; field 8 is the alternate nested shape.
+            self._update_current_room(decoded)
+        current_task_details = (
+            self.task_progress_percent,
+            self.cleaning_area,
+            self.cleaning_time,
+            self.task_remaining_time,
+            self.current_room_id,
+            self.current_room_aux_name,
+        )
+        task_details_changed = previous_task_details != current_task_details
+        # Clean counters can arrive late from the previous session. Fresh
+        # empty/wash telemetry is authoritative because raw clean commands
+        # cannot start robot work during either task.
+        has_blocking_station_task = (
+            self.station_activity in (1, 2, 3)
+            or self.dock_activity == 3
+            or has_robot_side_drying
+            or self.assumed_active_dock_task
+            in (DOCK_TASK_EMPTY_DUSTBIN, DOCK_TASK_WASH_MOP)
+        )
+        explicit_terminal_status = self.working_status in {
+            WorkingStatus.TASK_COMPLETED,
+            WorkingStatus.ERROR,
+        }
+        confirmed_external_clean = (
+            active_payload
+            and not explicit_terminal_status
+            and self.has_recent_terminal_working_status
+            and self.pending_active_working_status is not None
+            and current_task_details != self.pending_active_working_status
+        )
+        has_terminal_robot_status = not self.has_assumed_robot_clean and (
+            explicit_terminal_status
+            or (
+                self.has_recent_terminal_working_status
+                and not confirmed_external_clean
+            )
+        )
+        if (
+            active_payload
+            and not has_blocking_station_task
+            and not has_terminal_robot_status
+        ):
+            if task_details_changed:
+                self.last_active_working_status_time = time.monotonic()
+                self.is_paused = False
+            self.last_terminal_working_status_time = 0.0
+            self.pending_active_working_status = None
+            self.pending_active_working_status_time = 0.0
             self.dock_activity = 0
             self.station_activity = 0
             self.clear_assumed_dock_task()
-            self.dock_presence = 2
-            self.dock_field11 = 1
-            self.dock_field47 = 2
+        elif has_terminal_robot_status:
+            if active_payload and not explicit_terminal_status:
+                now = time.monotonic()
+                if (
+                    self.pending_active_working_status is None
+                    or now - self.pending_active_working_status_time
+                    > _TERMINAL_WORKING_STATUS_TTL
+                ):
+                    self.pending_active_working_status = current_task_details
+                    self.pending_active_working_status_time = now
+            else:
+                self.pending_active_working_status = None
+                self.pending_active_working_status_time = 0.0
+            self.clear_task_details()
+
+    def _update_battery_level(self, raw_value: Any) -> None:
+        """Update battery level from base-status telemetry."""
+        bat = _to_float32(raw_value)
+        if bat is None:
+            return
+        self.battery_level = round(bat)
 
     def update_from_base_status(self, decoded: dict[str, Any]) -> None:
         """Update state from a decoded robot_base_status message.
@@ -1162,6 +1360,8 @@ class NarwalState:
         Note: field 32 mirrors field 3 exactly (redundant).
         """
         self.raw_base_status = decoded
+        if "2" in decoded:
+            self._update_battery_level(decoded["2"])
         # Field 11 = dock indicator (2=docked, 1=undocked)
         if "11" in decoded:
             try:
@@ -1190,10 +1390,40 @@ class NarwalState:
         field3 = decoded.get("3")
         if isinstance(field3, list):
             field3 = field3[0] if field3 else None
+        current_reports_docked = False
         if isinstance(field3, dict):
+            is_paused = bool(field3.get("2"))
+            current_presence = _optional_int(field3.get("3"))
+            current_sub_state = _optional_int(field3.get("10"))
+            current_field11 = _optional_int(decoded.get("11"))
+            current_field47 = _optional_int(decoded.get("47"))
+            if current_presence is not None:
+                self.dock_presence = current_presence
+            if current_sub_state is not None:
+                self.dock_sub_state = current_sub_state
+            current_reports_docked = (
+                current_presence in (1, 6)
+                or current_sub_state == 1
+                or (current_field11 is not None and current_field11 >= 2)
+                or current_field47 in (1, 3)
+            )
+            current_reports_off_dock = (
+                current_presence == 2
+                or current_sub_state == 2
+                or (current_field11 == 1 and current_field47 == 2)
+            )
+            if current_reports_docked or current_reports_off_dock:
+                if current_presence is None:
+                    self.dock_presence = 0
+                if current_sub_state is None:
+                    self.dock_sub_state = 0
+                if current_field11 is None:
+                    self.dock_field11 = 0
+                if current_field47 is None:
+                    self.dock_field47 = 0
             if "1" in field3:
                 try:
-                    self.working_status = WorkingStatus(int(field3["1"]))
+                    next_working_status = WorkingStatus(int(field3["1"]))
                 except (ValueError, TypeError):
                     raw_val = field3["1"]
                     if raw_val not in _WARNED_WORKING_STATUS:
@@ -1203,19 +1433,41 @@ class NarwalState:
                             "Please report this value at the GitHub repo. "
                             "(further occurrences of this value are suppressed)",
                             raw_val,
-                        )
-                    self.working_status = WorkingStatus.UNKNOWN
-                if self.working_status not in ACTIVE_CLEANING_STATUSES:
+                    )
+                    next_working_status = WorkingStatus.UNKNOWN
+                self.working_status = next_working_status
+                terminal_robot = self.working_status in {
+                    WorkingStatus.TASK_COMPLETED,
+                    WorkingStatus.ERROR,
+                }
+                terminal_dock = self.working_status in {
+                    WorkingStatus.DOCKED,
+                    WorkingStatus.CHARGED,
+                    WorkingStatus.DOCKED_V2,
+                }
+                if terminal_robot or (
+                    terminal_dock and not self.has_explicit_off_dock_signal
+                ):
+                    self.last_terminal_working_status_time = time.monotonic()
+                elif (
+                    terminal_dock
+                    or current_reports_off_dock
+                    or self.working_status in ACTIVE_CLEANING_STATUSES
+                ):
+                    self.last_terminal_working_status_time = 0.0
+                if (
+                    self.working_status not in ACTIVE_CLEANING_STATUSES
+                    and not is_paused
+                    and not self.has_assumed_robot_clean
+                ):
                     self.last_active_working_status_time = 0.0
+                    self.clear_task_details()
             # Sub-field 2: paused overlay (0 or absent = not paused, 1 = paused)
-            self.is_paused = bool(field3.get("2"))
+            self.is_paused = is_paused
             # Sub-field 7: returning to dock on old FW (value 1 = returning).
             # On newer FW, field 7 is repurposed (e.g. value 7 during cleaning).
             # Only treat value 1 as returning — other values are not the flag.
             self.is_returning_to_dock = field3.get("7") == 1
-            if "10" in field3:
-                with contextlib.suppress(ValueError, TypeError):
-                    self.dock_sub_state = int(field3["10"])
             if "12" in field3:
                 with contextlib.suppress(ValueError, TypeError):
                     self.dock_activity = int(field3["12"])
@@ -1225,9 +1477,6 @@ class NarwalState:
             if "18" in field3:
                 with contextlib.suppress(ValueError, TypeError):
                     self.station_activity = int(field3["18"])
-            if "3" in field3:
-                with contextlib.suppress(ValueError, TypeError):
-                    self.dock_presence = int(field3["3"])
             if self.working_status in ACTIVE_CLEANING_STATUSES:
                 self.clear_assumed_robot_clean()
                 if "10" not in field3:
@@ -1294,12 +1543,41 @@ class NarwalState:
                 "Please report this at the GitHub repo.",
                 type(field3).__name__, field3,
             )
-        if "2" in decoded:
-            # Field 2 = real-time battery SOC as float32 (batteryPercentage)
-            # (e.g. 1118175232 → 83.0%; bbp may return int or float)
-            bat = _to_float32(decoded["2"])
-            if bat is not None:
-                self.battery_level = round(bat)
+        if isinstance(field3, dict) and "1" in field3:
+            self._clear_assumed_robot_clean_on_terminal_base_status(
+                is_paused=bool(field3.get("2"))
+            )
+        standby_docked = (
+            isinstance(field3, dict)
+            and self.working_status == WorkingStatus.STANDBY
+            and not self.is_paused
+            and not self.has_assumed_robot_clean
+            and current_reports_docked
+        )
+        has_current_working_status = isinstance(field3, dict) and "1" in field3
+        terminal_docked = standby_docked or (
+            has_current_working_status
+            and self.working_status
+            in (
+                WorkingStatus.DOCKED,
+                WorkingStatus.CHARGED,
+                WorkingStatus.DOCKED_V2,
+            )
+        )
+        terminal_robot = has_current_working_status and self.working_status in (
+            WorkingStatus.TASK_COMPLETED,
+            WorkingStatus.ERROR,
+        )
+        if standby_docked:
+            self.last_terminal_working_status_time = time.monotonic()
+        if (
+            (terminal_robot or (terminal_docked and not self.has_explicit_off_dock_signal))
+            and not self.has_assumed_robot_clean
+        ):
+            # The paused overlay can remain set after docking. A terminal
+            # base-status packet is authoritative over retained task context.
+            self.last_active_working_status_time = 0.0
+            self.clear_task_details()
         self._update_consumables(decoded)
         if "13" in decoded:
             raw = decoded["13"]
@@ -1376,9 +1654,7 @@ class NarwalState:
         """
         self.raw_base_status = decoded
         if "2" in decoded:
-            bat = _to_float32(decoded["2"])
-            if bat is not None:
-                self.battery_level = round(bat)
+            self._update_battery_level(decoded["2"])
         self._update_consumables(decoded)
 
     def update_from_upgrade_status(self, decoded: dict[str, Any]) -> None:

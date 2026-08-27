@@ -290,11 +290,17 @@ class NarwalMapCamera(NarwalEntity, Camera):
         # Detect cleaning session transitions — clear trail on new session
         current_status = state.working_status
         was_cleaning = self._last_cleaning_status in _CLEANING_TRAIL_STATUSES
-        is_cleaning = current_status in _CLEANING_TRAIL_STATUSES
+        is_cleaning = (
+            state.is_cleaning and current_status != WorkingStatus.REMAPPING
+        )
         if is_cleaning and not was_cleaning:
             _LOGGER.info("New cleaning session — clearing trail and vision obstacles")
             self._reset_trail()
-        if current_status != WorkingStatus.UNKNOWN:
+        if is_cleaning:
+            self._last_cleaning_status = WorkingStatus.CLEANING
+        elif state.has_paused_clean_task_context:
+            self._last_cleaning_status = WorkingStatus.CLEANING
+        elif current_status != WorkingStatus.UNKNOWN:
             self._last_cleaning_status = current_status
 
         if _DEBUG_VIEW:

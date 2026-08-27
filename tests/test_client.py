@@ -100,18 +100,24 @@ class TestNarwalClientInit:
             {"3": {"1": 1}, "11": 1, "47": 2, "2": 87.0}
         )
 
-        assert client.state.working_status == WorkingStatus.CLEANING
+        assert client.state.working_status == WorkingStatus.UNKNOWN
         assert client.state.battery_level == 87
         assert client.state.is_cleaning
 
-    def test_confirmed_dock_base_status_ends_active_metrics(self) -> None:
-        """Fresh dock indicators are trusted even after active task metrics."""
+    def test_confirmed_dock_base_status_waits_for_active_metrics_to_expire(self) -> None:
+        """Dock indicators win after fresh task-metric activity expires."""
         client = NarwalClient("10.0.0.1")
-        client._update_from_working_status_broadcast({"3": 120})
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            client._update_from_working_status_broadcast({"3": 120})
 
-        client._update_from_base_status_broadcast(
-            {"3": {"1": 10}, "11": 2, "47": 3}
-        )
+        docked = {"3": {"1": 10}, "11": 2, "47": 3}
+        with patch("narwal_client.models.time.monotonic", return_value=101.0):
+            client._update_from_base_status_broadcast(docked)
+            assert client.state.working_status == WorkingStatus.UNKNOWN
+            assert client.state.is_cleaning
+
+        with patch("narwal_client.models.time.monotonic", return_value=116.0):
+            client._update_from_base_status_broadcast(docked)
 
         assert client.state.working_status == WorkingStatus.DOCKED
         assert not client.state.has_recent_active_working_status
@@ -290,6 +296,9 @@ class TestWholeHouseStart:
         client = NarwalClient("127.0.0.1")
         client._ws = AsyncMock()
         client._connected.set()
+        client.state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.DOCKED), "10": 1}, "11": 2}
+        )
         return client
 
     @pytest.mark.asyncio
@@ -499,16 +508,28 @@ class TestWholeHouseStart:
         assert client.state.has_assumed_robot_clean
         mock_send.assert_awaited_once()
 
+    @pytest.mark.parametrize(
+        ("task", "fields"),
+        (
+            (DOCK_TASK_DRY_MOP, ("8", "9")),
+            (DOCK_TASK_DRY_DUST_BIN, ("10", "11")),
+            (DOCK_TASK_DRY_DOCK_BAG, ("12", "13")),
+        ),
+    )
     @pytest.mark.asyncio
-    async def test_start_rooms_allows_typed_dock_bag_drying(self) -> None:
-        """Dock-bag drying is the one known dock task compatible with robot start."""
+    async def test_start_rooms_allows_typed_drying(
+        self,
+        task: str,
+        fields: tuple[str, str],
+    ) -> None:
+        """Each typed drying task is compatible with robot start."""
         client = self._connected_client()
         client.state.map_data = MapData(map_id=1, rooms=[RoomInfo(room_id=2)])
         client.state.set_dock_drying_task(
-            DOCK_TASK_DRY_DOCK_BAG,
+            task,
             elapsed=60,
             target=180,
-            fields=("12", "13"),
+            fields=fields,
         )
         success = CommandResponse(result_code=CommandResult.SUCCESS)
 
@@ -818,6 +839,26 @@ class TestDockTaskCommands:
 
         assert result.result_code == CommandResult.NOT_APPLICABLE
         mock_status.assert_awaited_once_with(full_update=True)
+        mock_send.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_direct_dock_command_rejects_retained_paused_clean(self) -> None:
+        """Expired metric freshness does not make a paused clean dock-idle."""
+        client = self._docked_client()
+        client.state.working_status = WorkingStatus.STANDBY
+        client.state.is_paused = True
+        client.state.cleaning_time = 120
+        client.state.task_elapsed_time = 120
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send:
+            result = await client.empty_dustbin()
+
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+        mock_status.assert_not_awaited()
         mock_send.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1484,6 +1525,116 @@ class TestDockTaskCommands:
             await client._refresh_before_dock_stop(None)
 
         mock_status.assert_awaited_once_with(full_update=False)
+
+    def test_statusless_base_broadcast_preserves_fresh_clean_metrics(self) -> None:
+        """Battery-only telemetry cannot apply a cached terminal status."""
+        client = NarwalClient("127.0.0.1")
+        client.state.working_status = WorkingStatus.DOCKED
+        client.state.last_terminal_working_status_time = 0.0
+        client.state.update_from_working_status({"3": 120, "4": 600})
+
+        client._update_from_base_status_broadcast({"2": 75.0})
+
+        assert client.state.battery_level == 75
+        assert client.state.is_cleaning
+        assert client.state.task_elapsed_time == 120
+        assert client.state.task_remaining_time == 600
+
+    def test_external_start_survives_delayed_docked_base_broadcast(self) -> None:
+        """Fresh native task metrics outrank delayed dock confirmation."""
+        client = NarwalClient("127.0.0.1")
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            client.state.update_from_base_status(
+                {"3": {"1": int(WorkingStatus.DOCKED)}, "11": 2, "47": 3}
+            )
+        with patch("narwal_client.models.time.monotonic", return_value=101.0):
+            client.state.update_from_working_status({"1": 25, "3": 120, "6": 4})
+            assert not client.state.is_cleaning
+        with patch("narwal_client.models.time.monotonic", return_value=102.0):
+            client._update_from_base_status_broadcast(
+                {
+                    "3": {"1": int(WorkingStatus.DOCKED), "10": 1},
+                    "11": 2,
+                    "47": 3,
+                }
+            )
+            assert client.state.working_status == WorkingStatus.DOCKED
+            assert not client.state.is_cleaning
+        with patch("narwal_client.models.time.monotonic", return_value=102.5):
+            client.state.update_from_working_status({"1": 25, "3": 120, "6": 4})
+            assert not client.state.is_cleaning
+        with patch("narwal_client.models.time.monotonic", return_value=103.0):
+            client.state.update_from_working_status({"1": 26, "3": 121, "6": 4})
+            assert client.state.is_cleaning
+        with patch("narwal_client.models.time.monotonic", return_value=104.0):
+            client._update_from_base_status_broadcast(
+                {
+                    "3": {"1": int(WorkingStatus.DOCKED), "10": 1},
+                    "11": 2,
+                    "47": 3,
+                }
+            )
+            assert client.state.is_cleaning
+        assert client.state.task_progress_percent == 26
+        assert client.state.task_elapsed_time == 121
+        assert client.state.current_room_id == 4
+
+    def test_repeated_final_metrics_cannot_mask_confirmed_docking(self) -> None:
+        """Unchanged final counters expire so repeated dock evidence can win."""
+        client = NarwalClient("127.0.0.1")
+        with patch("narwal_client.models.time.monotonic", return_value=100.0):
+            client.state.update_from_base_status(
+                {"3": {"1": int(WorkingStatus.CLEANING)}, "11": 1, "47": 2}
+            )
+            client.state.update_from_working_status({"1": 75, "3": 900, "6": 4})
+
+        docked = {
+            "3": {"1": int(WorkingStatus.DOCKED), "10": 1},
+            "11": 2,
+            "47": 3,
+        }
+        with patch("narwal_client.models.time.monotonic", return_value=101.0):
+            client._update_from_base_status_broadcast(docked)
+        assert client.state.is_cleaning
+
+        with patch("narwal_client.models.time.monotonic", return_value=105.0):
+            client.state.update_from_working_status({"1": 75, "3": 900, "6": 4})
+        with patch("narwal_client.models.time.monotonic", return_value=116.0):
+            client.state.update_from_working_status({"1": 75, "3": 900, "6": 4})
+            client._update_from_base_status_broadcast(docked)
+
+        assert client.state.working_status == WorkingStatus.DOCKED
+        assert client.state.is_docked
+        assert not client.state.is_cleaning
+
+    def test_statusless_pause_broadcast_applies_during_fresh_clean(self) -> None:
+        """A pause overlay remains authoritative without a coarse status enum."""
+        client = NarwalClient("127.0.0.1")
+        client.state.working_status = WorkingStatus.DOCKED
+        client.state.last_terminal_working_status_time = 0.0
+        client.state.update_from_working_status({"3": 120, "4": 600})
+
+        client._update_from_base_status_broadcast({"3": {"2": 1}})
+
+        assert client.state.is_paused
+        assert client.state.task_elapsed_time == 120
+        assert client.state.task_remaining_time == 600
+
+    def test_statusless_packet_does_not_reuse_standby_dock_evidence(self) -> None:
+        """Cached dock fields cannot make a status-less packet terminal."""
+        client = NarwalClient("127.0.0.1")
+        client.state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.STANDBY), "3": 6}}
+        )
+        client.state.last_terminal_working_status_time = 0.0
+        client.state.update_from_working_status({"3": 120, "4": 600})
+
+        client._update_from_base_status_broadcast({"3": {"7": 0}, "2": 80.0})
+
+        assert client.state.is_cleaning
+        assert client.state.task_elapsed_time == 120
+        assert client.state.task_remaining_time == 600
+        assert not client.state.has_recent_terminal_working_status
 
     @pytest.mark.asyncio
     async def test_stop_dock_task_rejects_ambiguous_generic_stop(self) -> None:
