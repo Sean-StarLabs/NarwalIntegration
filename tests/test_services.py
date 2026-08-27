@@ -69,6 +69,7 @@ def _coordinator(
     coordinator.active_clean_work_mode = None
     coordinator.data = state
     coordinator.async_set_updated_data = MagicMock()
+    coordinator.async_clear_map_display_cache = AsyncMock()
     return coordinator
 
 
