@@ -155,6 +155,21 @@
       }
     },
     "switch": {
+      "empty_dustbin": {
+        "name": "Vider le bac a poussiere"
+      },
+      "wash_mop": {
+        "name": "Laver la serpilliere"
+      },
+      "dry_mop": {
+        "name": "Secher la serpilliere"
+      },
+      "dry_dust_bin": {
+        "name": "Secher et desinfecter le bac a poussiere"
+      },
+      "dry_dock_bag": {
+        "name": "Secher et desinfecter le sac de station"
+      },
       "show_room_labels": {
         "name": "Afficher les noms des pièces"
       },

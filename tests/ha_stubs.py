@@ -43,6 +43,10 @@ def install() -> None:
     # homeassistant.const
     ha_const = _mod("homeassistant.const", ha)
     ha_const.Platform = MagicMock()  # type: ignore[attr-defined]
+    ha_const.PERCENTAGE = "%"  # type: ignore[attr-defined]
+    ha_const.STATE_ON = "on"  # type: ignore[attr-defined]
+    ha_const.UnitOfArea = MagicMock()  # type: ignore[attr-defined]
+    ha_const.UnitOfTime = MagicMock()  # type: ignore[attr-defined]
 
     class _EntityCategory:
         CONFIG = "config"
@@ -99,7 +103,7 @@ def install() -> None:
     # homeassistant.helpers.entity.EntityCategory; it lives in homeassistant.const.
     # Stubbing both paths hid a real ImportError that only surfaced when the
     # integration was loaded in Home Assistant (switch.py, from PR #62).
-    ha_entity = _mod("homeassistant.helpers.entity", ha_helpers)
+    _mod("homeassistant.helpers.entity", ha_helpers)
 
     ha_uc = _mod("homeassistant.helpers.update_coordinator", ha_helpers)
 
@@ -287,9 +291,41 @@ def install() -> None:
     ha_number.RestoreNumber = _RestoreNumber  # type: ignore[attr-defined]
 
     ha_sensor = _mod("homeassistant.components.sensor", ha_comp)
-    ha_sensor.SensorEntity = MagicMock  # type: ignore[attr-defined]
-    ha_sensor.SensorDeviceClass = MagicMock  # type: ignore[attr-defined]
-    ha_sensor.SensorStateClass = MagicMock  # type: ignore[attr-defined]
+
+    class _SensorEntity:
+        """Stub for SensorEntity base class."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+    ha_sensor.SensorEntity = _SensorEntity  # type: ignore[attr-defined]
+
+    class _SensorDeviceClass:
+        BATTERY = "battery"
+        DURATION = "duration"
+        ENUM = "enum"
+
+    class _SensorStateClass:
+        MEASUREMENT = "measurement"
+
+    ha_sensor.SensorDeviceClass = _SensorDeviceClass  # type: ignore[attr-defined]
+    ha_sensor.SensorStateClass = _SensorStateClass  # type: ignore[attr-defined]
+
+    @dataclass(frozen=True, kw_only=True)
+    class _SensorEntityDescription:
+        """Stub for SensorEntityDescription (fields our code sets)."""
+
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        entity_category: object | None = None
+        device_class: object | None = None
+        icon: str | None = None
+        native_unit_of_measurement: object | None = None
+        state_class: object | None = None
+        options: object | None = None
+
+    ha_sensor.SensorEntityDescription = _SensorEntityDescription  # type: ignore[attr-defined]
 
     ha_bs = _mod("homeassistant.components.binary_sensor", ha_comp)
 
