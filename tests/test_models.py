@@ -406,6 +406,26 @@ class TestNarwalState:
         assert not state.has_assumed_robot_clean
         assert state.is_cleaning
 
+    def test_paused_context_handles_missing_task_metrics(self) -> None:
+        """Paused context is safe before richer task metric fields exist."""
+        state = NarwalState()
+        state.is_paused = True
+
+        assert not state.has_paused_clean_task_context
+
+        state.cleaning_time = 120
+
+        assert state.has_paused_clean_task_context
+
+    def test_paused_context_ignores_stale_metrics_after_docking(self) -> None:
+        """Docked API state ends stale paused overlays from the previous task."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "2": 1, "10": 1}, "11": 2})
+        state.cleaning_time = 120
+        state.current_room_id = 4
+
+        assert not state.has_paused_clean_task_context
+
     def test_dock_task_assumption_is_only_a_short_command_guard(self) -> None:
         """Dock task assumptions must not fabricate long-running device state."""
         state = NarwalState()

@@ -6,7 +6,8 @@ import asyncio
 import contextlib
 import logging
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, fields
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -15,6 +16,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import DOMAIN, NO_BROADCAST_PRODUCT_KEYS
 from .narwal_client import (
+    CleaningRoute,
     CommandResponse,
     FanLevel,
     MopHumidity,
@@ -22,6 +24,7 @@ from .narwal_client import (
     NarwalClient,
     NarwalConnectionError,
     NarwalState,
+    RoomCleanSettings,
     WorkMode,
 )
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
@@ -44,6 +47,13 @@ CONSUMABLE_POLL_EVERY = 30
 # base_status-derived value, and the live map stops updating (#73).
 TOPIC_SUBSCRIPTION_TTL = 600.0
 TOPIC_RESUBSCRIBE_AFTER = 240.0
+ROOM_CLEAN_SETTING_ATTRS = frozenset(field.name for field in fields(RoomCleanSettings))
+MOP_WORK_MODES = frozenset(
+    {WorkMode.MOP, WorkMode.VACUUM_THEN_MOP, WorkMode.VACUUM_AND_MOP}
+)
+VACUUM_WORK_MODES = frozenset(
+    {WorkMode.VACUUM, WorkMode.VACUUM_THEN_MOP, WorkMode.VACUUM_AND_MOP}
+)
 
 
 def _status_payload(response: CommandResponse) -> dict[str, object] | None:
@@ -70,12 +80,13 @@ def _has_dock_status_payload(response: CommandResponse) -> bool:
 
 
 @dataclass
-class CleanSettings:
-    """User-selected clean parameters, applied at the next room clean start.
+class CleanSettings(RoomCleanSettings):
+    """User-selected clean parameters for the next clean or live controls.
 
-    Single source of truth the select/number entities mutate and the
-    clean-start path reads; each entity persists its value via RestoreEntity.
-    Only fan and water also have live setters.
+    Select/number entities mutate this, and clean-start paths read it. Each
+    entity persists its value via RestoreEntity, so settings survive restarts.
+    Only fan and water have live setters; the other parameters take effect at
+    the next start.
     """
 
     work_mode: WorkMode = WorkMode.VACUUM_AND_MOP
@@ -83,6 +94,109 @@ class CleanSettings:
     water: MopHumidity = MopHumidity.NORMAL
     mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL
     passes: int = 1
+    route: CleaningRoute = CleaningRoute.METICULOUS
+
+
+def _state_attr_is_true(state: NarwalState, attr: str) -> bool:
+    """Return True only for explicit boolean state properties."""
+    return getattr(state, attr, False) is True
+
+
+def has_blocking_error(state: NarwalState | None) -> bool:
+    """Return True when the robot reports a command-blocking error."""
+    return (
+        state is None
+        or state.working_status == WorkingStatus.ERROR
+        or _state_attr_is_true(state, "has_error")
+    )
+
+
+def is_active_clean_session(state: NarwalState | None) -> bool:
+    """Return True while clean parameters are locked to the current task."""
+    if state is None:
+        return False
+    return (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or _state_attr_is_true(state, "has_assumed_robot_clean")
+        or _state_attr_is_true(state, "has_recent_active_working_status")
+        or _state_attr_is_true(state, "has_paused_clean_task_context")
+    ) and not _state_attr_is_true(state, "is_returning")
+
+
+def is_clean_session_context(state: NarwalState | None) -> bool:
+    """Return True while robot-side clean task context is still current."""
+    if state is None:
+        return False
+    return (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.working_status == WorkingStatus.REMAPPING
+        or _state_attr_is_true(state, "has_assumed_robot_clean")
+        or _state_attr_is_true(state, "has_recent_active_working_status")
+        or _state_attr_is_true(state, "has_paused_clean_task_context")
+        or _state_attr_is_true(state, "is_returning")
+        or _state_attr_is_true(state, "is_charging_to_resume")
+    )
+
+
+def is_live_clean_setting_available(state: NarwalState | None) -> bool:
+    """Return True when live clean settings can be changed during a task."""
+    if state is None:
+        return False
+    return (
+        (_state_attr_is_true(state, "is_cleaning") or is_active_clean_session(state))
+        and not _state_attr_is_true(state, "is_charging_to_resume")
+        and not _state_attr_is_true(state, "is_station_active")
+    )
+
+
+def clean_setting_applies_to_mode(attr: str, work_mode: WorkMode | None) -> bool:
+    """Return True when a clean setting is meaningful for the selected mode."""
+    if work_mode is None:
+        return True
+    if attr in {"water", "mop_strength"}:
+        return work_mode in MOP_WORK_MODES
+    if attr == "fan":
+        return work_mode in VACUUM_WORK_MODES
+    return True
+
+
+def is_narwal_task_busy(state: NarwalState | None) -> bool:
+    """Return True while the robot or dock is busy with a task phase."""
+    if state is None:
+        return False
+    return (
+        state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.working_status == WorkingStatus.REMAPPING
+        or _state_attr_is_true(state, "has_assumed_robot_clean")
+        or _state_attr_is_true(state, "has_recent_active_working_status")
+        or _state_attr_is_true(state, "has_paused_clean_task_context")
+        or _state_attr_is_true(state, "is_returning")
+        or _state_attr_is_true(state, "is_charging_to_resume")
+        or (
+            _state_attr_is_true(state, "is_station_active")
+            and _state_attr_is_true(state, "blocks_robot_start_for_dock_task")
+        )
+    )
+
+
+def can_edit_pending_clean_settings(state: NarwalState | None) -> bool:
+    """Return True when pending next-clean settings can be edited locally."""
+    if state is None:
+        return True
+    if has_blocking_error(state):
+        return False
+    return not is_narwal_task_busy(state)
+
+
+def can_start_cleaning(state: NarwalState | None) -> bool:
+    """Return True when a new robot clean command can be sent now."""
+    if has_blocking_error(state):
+        return False
+    return (
+        state.is_docked
+        and not is_clean_session_context(state)
+        and not state.blocks_robot_start_for_dock_task
+    )
 
 
 class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
@@ -117,6 +231,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             supports_broadcasts=supports_broadcasts,
         )
         self.clean_settings = CleanSettings()
+        self.room_clean_settings: dict[tuple[str | None, int], RoomCleanSettings] = {}
+        self.room_clean_settings_customized: dict[tuple[str | None, int], set[str]] = {}
+        self.active_clean_work_mode: WorkMode | None = None
         self._listen_task: asyncio.Task[None] | None = None
         self._fast_poll_remaining = 0
         self._prev_working_status = WorkingStatus.UNKNOWN
@@ -141,6 +258,170 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     def _mark_dock_status_refresh_succeeded(self) -> None:
         """Record that dock-control state came from a current base-status payload."""
         self._dock_status_refresh_failed = False
+
+    def default_room_clean_settings(self) -> RoomCleanSettings:
+        """Return a room-clean profile copied from the current global defaults."""
+        return RoomCleanSettings(
+            work_mode=self.clean_settings.work_mode,
+            fan=self.clean_settings.fan,
+            water=self.clean_settings.water,
+            mop_strength=self.clean_settings.mop_strength,
+            passes=self.clean_settings.passes,
+            route=self.clean_settings.route,
+        )
+
+    @staticmethod
+    def compatible_room_clean_work_mode(
+        room_settings: Mapping[int, RoomCleanSettings],
+    ) -> WorkMode:
+        """Return the shared work mode, rejecting mixed-mode room profiles."""
+        modes = {settings.work_mode for settings in room_settings.values()}
+        if len(modes) == 1:
+            return next(iter(modes))
+        raise ValueError("Mixed Narwal room clean modes are not supported")
+
+    def record_accepted_clean_start(
+        self,
+        room_settings: Mapping[int, RoomCleanSettings],
+    ) -> None:
+        """Record the effective mode for the accepted robot task."""
+        self.active_clean_work_mode = self.compatible_room_clean_work_mode(
+            room_settings
+        )
+
+    def clean_setting_applicability_mode(
+        self, *, live: bool = False
+    ) -> WorkMode | None:
+        """Return the mode used to decide whether fan/water controls apply."""
+        if live:
+            state = self.data or self.client.state
+            if is_clean_session_context(state):
+                return self.active_clean_work_mode
+        return self.clean_settings.work_mode
+
+    def _sync_active_clean_context(self, state: NarwalState) -> None:
+        """Clear accepted-task metadata once the robot is no longer in a clean context."""
+        if not is_clean_session_context(state):
+            self.active_clean_work_mode = None
+
+    @staticmethod
+    def _normalise_room_settings_map_id(map_id: object) -> str | None:
+        """Return a stable map id for room profiles."""
+        if map_id in (None, "", 0, "0"):
+            return None
+        return str(map_id)
+
+    def room_settings_map_id(self, map_data: object | None = None) -> str | None:
+        """Return the active map id used to scope room profiles."""
+        if map_data is None:
+            state = self.data or self.client.state
+            map_data = getattr(state, "map_data", None) if state is not None else None
+        return self._normalise_room_settings_map_id(getattr(map_data, "map_id", None))
+
+    def _room_clean_settings_key(
+        self,
+        room_id: int,
+        map_id: str | None = None,
+    ) -> tuple[str | None, int]:
+        """Return the storage key for a room profile."""
+        return (map_id if map_id is not None else self.room_settings_map_id(), room_id)
+
+    def room_clean_settings_for(
+        self,
+        room_id: int,
+        *,
+        map_id: str | None = None,
+    ) -> RoomCleanSettings:
+        """Return the configured room-clean profile for a room."""
+        key = self._room_clean_settings_key(room_id, map_id)
+        if key not in self.room_clean_settings:
+            self.room_clean_settings[key] = self.default_room_clean_settings()
+        return self.room_clean_settings[key]
+
+    def effective_room_clean_settings_for(
+        self,
+        room_id: int,
+        *,
+        map_id: str | None = None,
+    ) -> RoomCleanSettings:
+        """Return the room profile after applying current global fallbacks."""
+        return self.room_clean_settings_for_rooms([room_id], map_id=map_id)[room_id]
+
+    def room_clean_settings_for_rooms(
+        self,
+        room_ids: list[int],
+        *,
+        default: RoomCleanSettings | None = None,
+        map_id: str | None = None,
+        use_room_profiles: bool = True,
+    ) -> dict[int, RoomCleanSettings]:
+        """Return stored room-clean profiles for a set of rooms.
+
+        Missing rooms use the supplied default without creating profile entries.
+        """
+        map_key = map_id if map_id is not None else self.room_settings_map_id()
+        fallback = default or self.default_room_clean_settings()
+        if not use_room_profiles:
+            return {room_id: fallback for room_id in room_ids}
+        customized = getattr(self, "room_clean_settings_customized", {})
+        settings: dict[int, RoomCleanSettings] = {}
+        for room_id in room_ids:
+            key = (map_key, room_id)
+            profile = self.room_clean_settings.get(key)
+            custom_fields = customized.get(key, set())
+            if profile is None or not custom_fields:
+                settings[room_id] = fallback
+                continue
+            merged = RoomCleanSettings(
+                work_mode=fallback.work_mode,
+                fan=fallback.fan,
+                water=fallback.water,
+                mop_strength=fallback.mop_strength,
+                passes=fallback.passes,
+                route=fallback.route,
+            )
+            for attr in custom_fields:
+                if attr in ROOM_CLEAN_SETTING_ATTRS:
+                    setattr(merged, attr, getattr(profile, attr))
+            settings[room_id] = merged
+        return settings
+
+    def set_room_clean_setting(
+        self,
+        room_id: int,
+        attr: str,
+        value,
+        *,
+        map_id: str | None = None,
+    ) -> None:
+        """Store one room-clean profile value."""
+        if attr not in ROOM_CLEAN_SETTING_ATTRS:
+            raise AttributeError(f"Unsupported room clean setting: {attr}")
+        key = self._room_clean_settings_key(room_id, map_id)
+        setattr(self.room_clean_settings_for(room_id, map_id=map_id), attr, value)
+        if not hasattr(self, "room_clean_settings_customized"):
+            self.room_clean_settings_customized = {}
+        self.room_clean_settings_customized.setdefault(key, set()).add(attr)
+
+    def clear_room_clean_setting(
+        self,
+        room_id: int,
+        attr: str,
+        *,
+        map_id: str | None = None,
+    ) -> None:
+        """Clear one room-clean override so the room inherits the global value."""
+        if attr not in ROOM_CLEAN_SETTING_ATTRS:
+            raise AttributeError(f"Unsupported room clean setting: {attr}")
+        key = self._room_clean_settings_key(room_id, map_id)
+        customized = self.room_clean_settings_customized.get(key)
+        if not customized:
+            return
+        customized.discard(attr)
+        if customized:
+            return
+        self.room_clean_settings_customized.pop(key, None)
+        self.room_clean_settings.pop(key, None)
 
     async def async_setup(self) -> None:
         """Connect to the vacuum and start the WebSocket listener.
@@ -279,6 +560,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     f"{DOMAIN}_resub",
                 )
 
+        self._sync_active_clean_context(state)
         self.async_set_updated_data(state)
 
         # Broadcast arrived — switch back to normal polling if in fast mode
@@ -332,10 +614,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     "Status refresh returned no dock-status payload"
                 )
             self._mark_dock_status_refresh_succeeded()
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
         except Exception:
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Failed to refresh dock status after transition")
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
 
     async def async_refresh_dock_status(self) -> bool:
@@ -346,6 +630,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         except Exception:
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Failed to refresh dock status")
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
             return False
         if not response.accepted:
@@ -354,15 +639,18 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 "Dock status refresh was rejected with code %s",
                 response.result_code,
             )
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
             return False
         if full_update and not _has_dock_status_payload(response):
             self._mark_dock_status_refresh_failed()
             _LOGGER.debug("Dock status refresh returned no dock-status payload")
+            self._sync_active_clean_context(self.client.state)
             self.async_set_updated_data(self.client.state)
             return False
         if full_update:
             self._mark_dock_status_refresh_succeeded()
+        self._sync_active_clean_context(self.client.state)
         self.async_set_updated_data(self.client.state)
         return True
 
@@ -447,6 +735,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 if self._fast_poll_remaining <= 0:
                     self.update_interval = POLL_INTERVAL
 
+        self._sync_active_clean_context(self.client.state)
         return self.client.state
 
     async def async_shutdown(self) -> None:

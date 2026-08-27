@@ -79,6 +79,7 @@ MAP_ROTATION_DEFAULT = 0  # degrees clockwise; renderer accepts 0/90/180/270
 MAP_ZOOM_DEFAULT = 1.0  # renderer clamps to 1.0–2.0
 
 CONF_DOCK_LIGHT_SUPPORTED = "dock_light_supported"
+SERVICE_CLEAN_ROOMS = "clean_rooms"
 
 DOCK_LIGHT_PRODUCT_KEYS = {"QxMSPG6VSO", "iSuVlI1If2"}
 
@@ -100,7 +101,10 @@ DOCK_LIGHT_MODE_NAMES: dict[int, str] = {
     int(value): key for key, value in DOCK_LIGHT_MODES.items()
 }
 
-# HA fan_speed labels → FanLevel, from the app's user-visible suction names (sentence case, as HA shows fan_speed values directly). The enum members keep the app's internal identifiers, so DEEP surfaces as "Super" and SUPER as "Ultra".
+# HA fan_speed labels -> FanLevel, from the app's user-visible suction names
+# (sentence case, as HA shows fan_speed values directly). The enum members keep
+# the app's internal identifiers, so DEEP surfaces as "Super" and SUPER as
+# "Ultra".
 _FAN_SPEED_CANONICAL: dict[str, FanLevel] = {
     "Quiet": FanLevel.MUTE,
     "Standard": FanLevel.NORMAL,
@@ -185,7 +189,8 @@ ERROR_HELP_URL_TEMPLATE = (
     "https://help.narwal.com/helpcenter/vall/#/p2/question/all?eType=1&code={code}&lang=en-US"
 )
 
-# Select option id → robot enum. Option ids are rendered to the app's user-visible labels via translations.
+# Select option id -> robot enum. Option ids are rendered to the app's
+# user-visible labels via translations.
 WORK_MODE_MAP: dict[str, WorkMode] = {
     "vacuum": WorkMode.VACUUM,
     "mop": WorkMode.MOP,
