@@ -1476,6 +1476,16 @@ class NarwalClient:
             return False
         return _has_dock_status_payload(response)
 
+    def _should_wait_for_scoped_dock_task(self, task: str | None) -> bool:
+        """Return true when a typed scoped-stop target may still be settling."""
+        if task not in _DOCK_TASK_FORCE_END_PAYLOADS:
+            return False
+        if task in self.state.active_dock_task_keys:
+            return False
+        if self.state.has_unmapped_active_dock_task:
+            return True
+        return self.state.station_activity == 4 and not self.state.active_dock_drying_tasks
+
     async def _refresh_before_dock_stop(
         self,
         task: str | None,
@@ -1484,11 +1494,7 @@ class NarwalClient:
         response = await self.get_status(full_update=True)
         if not response.accepted or not _has_dock_status_payload(response):
             return response
-        if task not in _DOCK_TASK_FORCE_END_PAYLOADS:
-            return response
-        if task in self.state.active_dock_task_keys:
-            return response
-        if not self.state.has_unmapped_active_dock_task:
+        if not self._should_wait_for_scoped_dock_task(task):
             return response
 
         for _ in range(_DOCK_TASK_IDENTIFY_ATTEMPTS):
@@ -1496,9 +1502,7 @@ class NarwalClient:
             response = await self.get_status(full_update=True)
             if not response.accepted or not _has_dock_status_payload(response):
                 return response
-            if task in self.state.active_dock_task_keys:
-                return response
-            if not self.state.has_unmapped_active_dock_task:
+            if not self._should_wait_for_scoped_dock_task(task):
                 return response
         return response
 
