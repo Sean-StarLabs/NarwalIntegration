@@ -18,12 +18,18 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from custom_components.narwal.const import NO_BROADCAST_PRODUCT_KEYS  # noqa: E402
-from custom_components.narwal.coordinator import (
+from custom_components.narwal.coordinator import (  # noqa: E402
     TOPIC_RESUBSCRIBE_AFTER,
     TOPIC_SUBSCRIPTION_TTL,
     NarwalCoordinator,
-)  # noqa: E402
-from custom_components.narwal.narwal_client import NarwalConnectionError, NarwalState  # noqa: E402
+)
+from custom_components.narwal.narwal_client import (  # noqa: E402
+    CommandResponse,
+    CommandResult,
+    NarwalConnectionError,
+    NarwalState,
+    WorkingStatus,
+)
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
 
@@ -72,7 +78,9 @@ class TestCoordinatorResilience:
         coordinator.config_entry = mock_entry
         coordinator.client = MagicMock()
         coordinator.client.state = NarwalState()
+        coordinator.last_update_success = True
         coordinator._consecutive_failures = 0
+        coordinator._dock_status_refresh_failed = False
         coordinator._max_failures = 5
         coordinator._consumable_poll_countdown = 99  # don't fire consumable poll in unit tests
         coordinator._fast_poll_remaining = 0
@@ -134,7 +142,9 @@ class TestCoordinatorResilience:
 
         # Now succeed
         type(coordinator.client).connected = PropertyMock(return_value=True)
-        coordinator.client.get_status = AsyncMock()
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"3": {"1": 10}}})
+        )
 
         result = await coordinator._async_update_data()
 
@@ -157,6 +167,7 @@ class TestCoordinatorResilience:
         """_on_state_update resets _consecutive_failures to 0."""
         coordinator = self._make_coordinator()
         coordinator._consecutive_failures = 3
+        coordinator._dock_status_refresh_failed = True
 
         # Mock methods called by _on_state_update
         coordinator.async_set_updated_data = MagicMock()
@@ -166,6 +177,7 @@ class TestCoordinatorResilience:
         coordinator._on_state_update(state)
 
         assert coordinator._consecutive_failures == 0
+        assert not coordinator.has_fresh_state
 
     async def test_poll_does_not_call_connect(self) -> None:
         """_async_update_data does NOT call client.connect() when disconnected."""
@@ -191,6 +203,132 @@ class TestCoordinatorResilience:
 
         assert result is coordinator.client.state
         assert coordinator._consecutive_failures == 1
+        assert not coordinator.has_fresh_state
+
+    async def test_payloadless_status_poll_counts_as_failed_refresh(self) -> None:
+        """A status ack without base-status data must not mark stale data fresh."""
+        coordinator = self._make_coordinator()
+        type(coordinator.client).connected = PropertyMock(return_value=True)
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(
+                result_code=CommandResult.NOT_READY,
+                data={"1": 1},
+            )
+        )
+
+        result = await coordinator._async_update_data()
+
+        assert result is coordinator.client.state
+        assert coordinator._consecutive_failures == 1
+
+    async def test_partial_status_poll_counts_as_failed_refresh(self) -> None:
+        """A battery-only base-status response is not fresh dock-state data."""
+        coordinator = self._make_coordinator()
+        type(coordinator.client).connected = PropertyMock(return_value=True)
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"2": 85.0}})
+        )
+
+        result = await coordinator._async_update_data()
+
+        assert result is coordinator.client.state
+        assert coordinator._consecutive_failures == 1
+
+    async def test_refresh_dock_status_rejects_missing_base_status_payload(self) -> None:
+        """Dock command gates require fresh base-status data, not only an ack."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_status = AsyncMock(return_value=CommandResponse(data={}))
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert not await coordinator.async_refresh_dock_status()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=True)
+        coordinator.async_set_updated_data.assert_called_once_with(
+            coordinator.client.state
+        )
+
+    async def test_refresh_dock_status_rejects_rejected_status_response(self) -> None:
+        """Rejected status responses must not unlock dock controls."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(
+                result_code=CommandResult.NOT_APPLICABLE,
+                data={"2": {"3": {"1": 10}}},
+            )
+        )
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert not await coordinator.async_refresh_dock_status()
+
+    async def test_refresh_dock_status_rejects_partial_base_status_payload(self) -> None:
+        """Dock command gates require field 3, not just any base-status field."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"2": 85.0}})
+        )
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert not await coordinator.async_refresh_dock_status()
+
+    async def test_refresh_dock_status_rejects_empty_dock_status_payload(self) -> None:
+        """Dock command gates require real status subfields inside field 3."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"3": {}}})
+        )
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert not await coordinator.async_refresh_dock_status()
+
+    async def test_refresh_dock_status_marks_fresh_before_notifying(self) -> None:
+        """Listeners see fresh dock availability on the successful refresh update."""
+        coordinator = self._make_coordinator()
+        coordinator._dock_status_refresh_failed = True
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(
+                data={"2": {"3": {"1": int(WorkingStatus.DOCKED)}, "11": 2}}
+            )
+        )
+        seen: list[bool] = []
+
+        def capture_update(_state):
+            seen.append(coordinator.has_fresh_state)
+
+        coordinator.async_set_updated_data = MagicMock(side_effect=capture_update)
+
+        assert await coordinator.async_refresh_dock_status()
+        assert seen == [True]
+
+    async def test_refresh_dock_status_preserves_live_working_status(self) -> None:
+        """Action preflight must not clobber fresh working_status task telemetry."""
+        coordinator = self._make_coordinator()
+        coordinator.client.state.update_from_working_status({"3": 42})
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"2": 85.0}})
+        )
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert await coordinator.async_refresh_dock_status()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=False)
+        assert not coordinator._dock_status_refresh_failed
+
+    async def test_refresh_dock_status_marks_stale_before_notifying(self) -> None:
+        """Listeners see stale dock availability on the failed refresh update."""
+        coordinator = self._make_coordinator()
+        coordinator._dock_status_refresh_failed = False
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"2": 85.0}})
+        )
+        seen: list[bool] = []
+
+        def capture_update(_state):
+            seen.append(coordinator.has_fresh_state)
+
+        coordinator.async_set_updated_data = MagicMock(side_effect=capture_update)
+
+        assert not await coordinator.async_refresh_dock_status()
+        assert seen == [False]
 
 
 class TestTopicSubscriptionRenewal:
@@ -215,7 +353,9 @@ class TestTopicSubscriptionRenewal:
         c.client = MagicMock()
         c.client.state = NarwalState()
         c.client.connected = True
-        c.client.get_status = AsyncMock()
+        c.client.get_status = AsyncMock(
+            return_value=CommandResponse(data={"2": {"3": {"1": 10}}})
+        )
         c.client.get_map = AsyncMock()
         c.client.get_consumable_info = AsyncMock()
         c.client.subscribe_to_topics = AsyncMock()
