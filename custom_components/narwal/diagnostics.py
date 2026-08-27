@@ -23,6 +23,8 @@ from homeassistant.core import HomeAssistant
 
 from . import NarwalConfigEntry
 from .const import (
+    CONF_CLOUD_EMAIL,
+    CONF_CLOUD_PASSWORD,
     CONF_DEVICE_ID,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
@@ -41,6 +43,8 @@ TO_REDACT = {
     CONF_DEVICE_ID,
     "device_id",
     "binded_uuid",
+    CONF_CLOUD_EMAIL,
+    CONF_CLOUD_PASSWORD,
 }
 
 # Feature-list query is a live round trip. A docked robot can be slow to answer
