@@ -7,11 +7,14 @@ import tests.ha_stubs
 tests.ha_stubs.install()
 
 from custom_components.narwal.const import (  # noqa: E402
+    CONF_CLOUD_PRODUCT_ID,
     CONF_DOCK_LIGHT_SUPPORTED,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
     NARWAL_MODELS,
     NO_BROADCAST_PRODUCT_KEYS,
+    cloud_product_id_for_product_key,
+    configured_cloud_product_id,
     configured_model_name,
     is_dock_light_supported,
 )
@@ -54,6 +57,18 @@ def test_cx7_uses_j5_product_key_and_requires_addressed_setup() -> None:
     product_key = NARWAL_MODELS["Narwal Freo Z Ultra (CX7)"]
     assert product_key == "hEA7OEshlx"
     assert product_key in NO_BROADCAST_PRODUCT_KEYS
+
+
+def test_cx7_cloud_product_id_differs_from_local_product_key() -> None:
+    """Accessory cloud APIs use the app product identity, not the local topic key."""
+    assert cloud_product_id_for_product_key("hEA7OEshlx") == "J5"
+    assert configured_cloud_product_id({CONF_PRODUCT_KEY: "hEA7OEshlx"}) == "J5"
+    assert configured_cloud_product_id(
+        {
+            CONF_PRODUCT_KEY: "hEA7OEshlx",
+            CONF_CLOUD_PRODUCT_ID: "custom",
+        }
+    ) == "custom"
 
 
 def test_configured_model_name_uses_selected_cx7_model() -> None:

@@ -1,6 +1,6 @@
 # Narwal Robot Vacuum — Home Assistant Integration
 
-A fully **local, cloud-independent** [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Communicates directly with your vacuum over your local network via WebSocket — no cloud account or internet connection required.
+By default this is a fully **local, cloud-independent** [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Local control communicates directly with your vacuum over your local network via WebSocket — no cloud account or internet connection required. If you optionally configure Narwal cloud credentials, the integration uses them only for cloud-provided accessory consumable lifetime data and reset buttons.
 
 > **Latest release: [v1.0.4](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.4)** (HACS) — **consumable alerts never worked before this release** and always reported "no problem"; check those two entities after upgrading ([notes](docs/RELEASE-NOTES-v1.0.4.md)). Adds Freo Z Ultra (CX7) support and renames the fan tiers to Quiet/Standard/Strong/Super/Ultra. **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first.**
 
@@ -332,7 +332,7 @@ Corrections and captures are welcome; the doc explains how to take them.
 This is an **unofficial**, community-developed integration — not affiliated with or endorsed by Narwal. The local protocol was reverse-engineered from network traffic and the Narwal mobile application.
 
 - **Use at your own risk.** No warranty.
-- **No cloud dependency.** No external data transmission.
+- **No cloud dependency for local control.** No external data is transmitted unless optional Narwal cloud credentials are configured. With cloud consumables enabled, the integration sends the configured Narwal email/password to Narwal for login and sends the configured device/product identifiers to Narwal consumable endpoints for lifetime data and resets.
 - **Firmware updates** from Narwal may break this integration at any time.
 
 ## Contributing
