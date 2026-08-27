@@ -1502,6 +1502,8 @@ class NarwalClient:
             return True
         if self.state.has_unmapped_active_dock_task:
             return True
+        if task == DOCK_TASK_DRY_DUST_BIN and self.state.dock_activity == 6:
+            return True
         return self.state.station_activity == 4 and not self.state.active_dock_drying_tasks
 
     async def _refresh_before_dock_stop(
