@@ -118,7 +118,7 @@ def install() -> None:
     # homeassistant.data_entry_flow
     ha_def = _mod("homeassistant.data_entry_flow", ha)
 
-    class _AbortFlow(Exception):
+    class _AbortFlow(Exception):  # noqa: N818
         def __init__(self, reason: str) -> None:
             self.reason = reason
             super().__init__(reason)
@@ -174,6 +174,7 @@ def install() -> None:
 
     ha_er = _mod("homeassistant.helpers.entity_registry", ha_helpers)
     ha_er.async_get = MagicMock()  # type: ignore[attr-defined]
+    ha_er.async_entries_for_config_entry = MagicMock(return_value=())  # type: ignore[attr-defined]
 
     ha_service = _mod("homeassistant.helpers.service", ha_helpers)
     ha_service.async_extract_entity_ids = MagicMock()  # type: ignore[attr-defined]
@@ -231,7 +232,7 @@ def install() -> None:
     class _Segment:
         """Stub for homeassistant.components.vacuum.Segment."""
 
-        def __init__(self, *, id: str, name: str, group: str | None = None) -> None:
+        def __init__(self, *, id: str, name: str, group: str | None = None) -> None:  # noqa: A002
             self.id = id
             self.name = name
             self.group = group

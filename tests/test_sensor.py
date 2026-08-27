@@ -32,8 +32,12 @@ def _sensor(key: str, state: NarwalState) -> NarwalSensor:
 
 
 def test_current_room_is_not_a_standalone_sensor() -> None:
-    """Current room is live vacuum context, not a separate stale sensor."""
-    assert "current_room" not in {description.key for description in SENSOR_DESCRIPTIONS}
+    """Live task context is carried by the vacuum entity, not stale sensors."""
+    sensor_keys = {description.key for description in SENSOR_DESCRIPTIONS}
+    assert "current_room" not in sensor_keys
+    assert "map_metadata" not in sensor_keys
+    assert "status" not in sensor_keys
+    assert "task_progress" not in sensor_keys
 
 
 def test_cleaning_metrics_are_unavailable_when_idle() -> None:
