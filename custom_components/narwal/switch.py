@@ -6,11 +6,10 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from homeassistant.components.switch import SwitchEntity, SwitchEntityDescription
-from homeassistant.const import STATE_ON, EntityCategory
+from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 
 from . import NarwalConfigEntry
 from .const import (
@@ -42,7 +41,6 @@ DOCK_TASK_SWITCHES: tuple[NarwalDockTaskSwitchEntityDescription, ...] = tuple(
     )
     for task in DOCK_TASKS
 )
-RESTORED_DOCK_TASK_ASSUME_TTL = 6 * 60 * 60
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -111,7 +109,7 @@ def _accepted_response(response: CommandResponse) -> bool:
     return response.accepted
 
 
-class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
+class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
     """Stateful start/stop control for one Narwal dock task."""
 
     entity_description: NarwalDockTaskSwitchEntityDescription
@@ -127,16 +125,6 @@ class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
         device_id = coordinator.config_entry.data["device_id"]
         self._attr_unique_id = f"{device_id}_{description.key}"
         self._attr_icon = description.icon
-
-    async def async_added_to_hass(self) -> None:
-        """Restore a running dock task reservation until fresh status corrects it."""
-        await super().async_added_to_hass()
-        last = await self.async_get_last_state()
-        if last is not None and last.state == STATE_ON:
-            self.coordinator.client.state.assume_dock_task(
-                self.entity_description.key,
-                ttl=RESTORED_DOCK_TASK_ASSUME_TTL,
-            )
 
     @property
     def is_on(self) -> bool | None:
