@@ -1216,17 +1216,21 @@ class NarwalClient:
             "start(): no map rooms available; falling back to clean/plan/start, "
             "which re-runs the robot's saved plan rather than cleaning every room"
         )
-        if self.state.blocks_robot_start_for_dock_task:
-            _LOGGER.warning(
-                "start(): dock task active (%s); not starting saved plan",
-                self.state.active_dock_task_keys or "unmapped",
+        async with self._robot_start_lock:
+            if _robot_start_blocked(self.state):
+                _LOGGER.warning(
+                    "start(): robot or dock guard active (%s); not starting saved plan",
+                    self.state.active_dock_task_keys or "private",
+                )
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            response = await self.send_command(
+                TOPIC_CMD_PLAN_START,
+                payload=self._DEFAULT_CLEAN_PAYLOAD,
+                timeout=10.0,
             )
-            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
-        return await self.send_command(
-            TOPIC_CMD_PLAN_START,
-            payload=self._DEFAULT_CLEAN_PAYLOAD,
-            timeout=10.0,
-        )
+            if _accepted_response(response):
+                self.state.assume_robot_clean()
+            return response
 
     async def start(
         self,

@@ -438,6 +438,22 @@ class TestWholeHouseStart:
         mock_send.assert_awaited_once()
 
     @pytest.mark.asyncio
+    async def test_saved_plan_start_reserves_private_guard_on_acceptance(self) -> None:
+        """Saved-plan fallback shares the direct-start action reservation."""
+        client = self._connected_client()
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = success
+            first = await client.start_rooms([])
+            second = await client.start_rooms([])
+
+        assert first is success
+        assert second.result_code == CommandResult.NOT_APPLICABLE
+        assert client.state.has_assumed_robot_clean
+        mock_send.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_concurrent_direct_start_rooms_serialize_preflight(self) -> None:
         """Only one direct room start validates before the accepted-command guard."""
         client = self._connected_client()

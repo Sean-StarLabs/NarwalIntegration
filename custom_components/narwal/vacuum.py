@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-
 from typing import Any
 
 from homeassistant.components.vacuum import (
@@ -11,6 +10,7 @@ from homeassistant.components.vacuum import (
     VacuumActivity,
     VacuumEntityFeature,
 )
+from homeassistant.exceptions import HomeAssistantError
 
 try:
     from homeassistant.components.vacuum import Segment
@@ -20,19 +20,23 @@ from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.helpers.restore_state import RestoreEntity
 
-from .narwal_client import CommandResult, WorkingStatus
-from .narwal_client.const import ACTIVE_CLEANING_STATUSES
-
 from . import NarwalConfigEntry
 from .const import FAN_SPEED_LIST, FAN_SPEED_MAP, fan_speed_list_for
 from .coordinator import NarwalCoordinator
+from .dock_tasks import (
+    can_start_robot_clean,
+    can_stop_dock_task,
+    has_active_dock_work,
+    is_clean_session_context,
+)
 from .entity import NarwalEntity
+from .narwal_client import CommandResult, WorkingStatus
+from .narwal_client.const import ACTIVE_CLEANING_STATUSES
 
 _LOGGER = logging.getLogger(__name__)
 
 # working_status values already reported as unmapped. Activity is recomputed on
-# every state broadcast (~1.5s), so an unmapped value otherwise floods the log
-# with thousands of identical lines (#46). Warn once per distinct value.
+# every state broadcast, so warn once per distinct value instead of flooding.
 _WARNED_UNMAPPED_ACTIVITY: set[int] = set()
 
 WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
@@ -43,12 +47,24 @@ WORKING_STATUS_TO_ACTIVITY: dict[WorkingStatus, VacuumActivity] = {
     WorkingStatus.CLEANING_V2: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING: VacuumActivity.CLEANING,
     WorkingStatus.CLEANING_ALT: VacuumActivity.CLEANING,
-    WorkingStatus.REMAPPING: VacuumActivity.CLEANING,  # mapping/exploration — robot is actively busy
+    # Mapping/exploration is active robot work.
+    WorkingStatus.REMAPPING: VacuumActivity.CLEANING,
     WorkingStatus.TASK_COMPLETED: VacuumActivity.RETURNING,
     WorkingStatus.ERROR: VacuumActivity.ERROR,
 }
 
-# FanLevel value -> fan_speed label (canonical labels only; FAN_SPEED_MAP also holds back-compat aliases).
+
+def _result_name(result_code: int | CommandResult) -> str:
+    """Return a readable Narwal command result name."""
+    if result_code == 0:
+        return "ACCEPTED"
+    try:
+        return CommandResult(result_code).name
+    except ValueError:
+        return f"UNKNOWN({result_code})"
+
+
+# FanLevel value -> fan_speed label. FAN_SPEED_MAP also holds back-compat aliases.
 _FAN_LABELS: dict[int, str] = {int(FAN_SPEED_MAP[label]): label for label in FAN_SPEED_LIST}
 
 
@@ -66,7 +82,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
     """Representation of a Narwal robot vacuum."""
 
     _attr_translation_key = "vacuum"
-    _attr_supported_features = (
+    _BASE_SUPPORTED_FEATURES = (
         VacuumEntityFeature.STATE
         | VacuumEntityFeature.START
         | VacuumEntityFeature.STOP
@@ -75,6 +91,24 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         | VacuumEntityFeature.FAN_SPEED
         | VacuumEntityFeature.LOCATE
     ) | (VacuumEntityFeature.CLEAN_AREA if Segment is not None else VacuumEntityFeature(0))
+
+    @property
+    def supported_features(self) -> VacuumEntityFeature:
+        """Hide robot actions while dock work makes them unsafe or ambiguous."""
+        features = self._BASE_SUPPORTED_FEATURES
+        state = self.coordinator.data
+        if not has_active_dock_work(state):
+            return features
+        features &= ~(
+            VacuumEntityFeature.START
+            | VacuumEntityFeature.PAUSE
+            | VacuumEntityFeature.RETURN_HOME
+            | VacuumEntityFeature.LOCATE
+            | VacuumEntityFeature.CLEAN_AREA
+        )
+        if not is_clean_session_context(state):
+            features &= ~VacuumEntityFeature.STOP
+        return features
 
     def __init__(self, coordinator: NarwalCoordinator) -> None:
         """Initialize the vacuum entity."""
@@ -116,16 +150,17 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         activity = WORKING_STATUS_TO_ACTIVITY.get(state.working_status)
         if activity is not None:
             return activity
-        # Unknown working_status value — infer from dock signals so we
-        # don't report IDLE while the robot is clearly active off-dock.
-        # New firmware versions may introduce values we haven't mapped yet.
+        # Unknown working_status value: infer from dock signals so we don't
+        # report IDLE while the robot is clearly active off-dock. New firmware
+        # versions may introduce values we haven't mapped yet.
         if not state.is_docked:
             if state.working_status.value not in _WARNED_UNMAPPED_ACTIVITY:
                 _WARNED_UNMAPPED_ACTIVITY.add(state.working_status.value)
                 _LOGGER.warning(
-                    "Unmapped working_status %s (%d) while off-dock — reporting "
-                    "CLEANING (further occurrences of this value are suppressed)",
-                    state.working_status.name, state.working_status.value,
+                    "Unmapped working_status %s (%d) while off-dock; reporting "
+                    "CLEANING (further occurrences are suppressed)",
+                    state.working_status.name,
+                    state.working_status.value,
                 )
             return VacuumActivity.CLEANING
         return VacuumActivity.IDLE
@@ -156,6 +191,13 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             _LOGGER.debug("Robot not awake — sending wake burst")
             await client.wake(timeout=10.0)
 
+    async def _validate_clean_start(self) -> None:
+        """Refresh dock state and reject starts that conflict with dock work."""
+        if not await self.coordinator.async_refresh_dock_status():
+            raise HomeAssistantError("Narwal status could not be refreshed")
+        if not can_start_robot_clean(self.coordinator.client.state):
+            raise HomeAssistantError("Narwal dock task is active")
+
     async def async_start(self) -> None:
         """Start or resume cleaning."""
         await self._ensure_awake()
@@ -165,32 +207,42 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if is_cleaning and state.is_paused:
             await self.coordinator.client.resume(timeout=self._ACTION_TIMEOUT)
             return
+        room_ids: list[int] = []
+        async with self.coordinator.dock_action_lock:
+            await self._validate_clean_start()
 
-        # Whole-house clean enumerates every room via clean/start_clean, matching the
-        # app's allRoomIds() path. clean/plan/start (StartWithPlan) would instead re-run
-        # the saved current plan — i.e. the last room selection — not the whole house.
-        room_ids = await self._all_room_ids()
-        if room_ids:
-            settings = self.coordinator.clean_settings
-            resp = await self.coordinator.client.start_rooms(
-                room_ids,
-                work_mode=settings.work_mode,
-                fan=settings.fan,
-                water=settings.water,
-                mop_strength=settings.mop_strength,
-                passes=settings.passes,
-            )
-        else:
-            # No map rooms known — best-effort fall back to the saved-plan start.
-            resp = await self.coordinator.client.start()
+            # Whole-house clean enumerates every room via clean/start_clean, matching the
+            # app's allRoomIds() path. clean/plan/start (StartWithPlan) would instead re-run
+            # the saved current plan — i.e. the last room selection — not the whole house.
+            room_ids = await self._all_room_ids()
+            if room_ids:
+                settings = self.coordinator.clean_settings
+                resp = await self.coordinator.client.start_rooms(
+                    room_ids,
+                    work_mode=settings.work_mode,
+                    fan=settings.fan,
+                    water=settings.water,
+                    mop_strength=settings.mop_strength,
+                    passes=settings.passes,
+                )
+            else:
+                # No map rooms known — best-effort fall back to the saved-plan start.
+                resp = await self.coordinator.client.start()
+            if resp.accepted:
+                self.coordinator.client.state.assume_robot_clean()
+                self.coordinator.async_set_updated_data(self.coordinator.client.state)
         _LOGGER.info(
             "Whole-house start: code=%s, success=%s, rooms=%s",
             resp.result_code, resp.success, room_ids or "(saved plan)",
         )
-        if not resp.success:
+        if not resp.accepted:
             _LOGGER.warning(
-                "Start command did not succeed (code=%s) — robot may not have started",
+                "Start command was rejected: %s (code=%s)",
+                _result_name(resp.result_code),
                 resp.result_code,
+            )
+            raise HomeAssistantError(
+                f"Narwal start command failed: {_result_name(resp.result_code)}"
             )
 
     async def _all_room_ids(self) -> list[int]:
@@ -217,31 +269,71 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
     async def async_stop(self, **kwargs) -> None:
         """Stop cleaning."""
         await self._ensure_awake()
-        resp = await self.coordinator.client.stop()
+        async with self.coordinator.dock_action_lock:
+            refreshed = await self.coordinator.async_refresh_dock_status()
+            state = self.coordinator.client.state
+            clean_context = is_clean_session_context(state)
+            if state.has_unmapped_active_dock_task and not clean_context:
+                raise HomeAssistantError(
+                    "Narwal dock task cannot be stopped safely right now"
+                )
+            if state.is_station_active and not clean_context:
+                if not can_stop_dock_task(state):
+                    raise HomeAssistantError(
+                        "Narwal dock task cannot be stopped safely right now"
+                    )
+                resp = await self.coordinator.client.stop_dock_task()
+            elif not clean_context:
+                if not refreshed:
+                    raise HomeAssistantError("Narwal status could not be refreshed")
+                raise HomeAssistantError("Narwal has no active task to stop")
+            else:
+                resp = await self.coordinator.client.stop()
         _LOGGER.info("Stop response: code=%s, success=%s", resp.result_code, resp.success)
+        if not resp.accepted:
+            raise HomeAssistantError(
+                f"Narwal stop command failed: {_result_name(resp.result_code)}"
+            )
 
     async def async_pause(self) -> None:
         """Pause cleaning."""
-        resp = await self.coordinator.client.pause()
+        async with self.coordinator.dock_action_lock:
+            if not await self.coordinator.async_refresh_dock_status():
+                raise HomeAssistantError("Narwal status could not be refreshed")
+            if has_active_dock_work(self.coordinator.client.state):
+                raise HomeAssistantError("Narwal dock task is active")
+            resp = await self.coordinator.client.pause()
         _LOGGER.info("Pause response: code=%s, success=%s", resp.result_code, resp.success)
 
     async def async_return_to_base(self, **kwargs) -> None:
         """Return to the dock."""
         await self._ensure_awake()
-        resp = await self.coordinator.client.return_to_base(timeout=self._ACTION_TIMEOUT)
+        async with self.coordinator.dock_action_lock:
+            if not await self.coordinator.async_refresh_dock_status():
+                raise HomeAssistantError("Narwal status could not be refreshed")
+            if has_active_dock_work(self.coordinator.client.state):
+                raise HomeAssistantError("Narwal dock task is active")
+            resp = await self.coordinator.client.return_to_base(timeout=self._ACTION_TIMEOUT)
         _LOGGER.info(
             "Return-to-base response: code=%s, success=%s",
             resp.result_code, resp.success,
         )
-        if not resp.success:
+        if not resp.accepted:
             _LOGGER.warning(
-                "Return-to-base did not succeed (code=%s)", resp.result_code,
+                "Return-to-base did not succeed: %s (code=%s)",
+                _result_name(resp.result_code),
+                resp.result_code,
             )
 
     async def async_locate(self, **kwargs) -> None:
         """Locate the vacuum — robot says 'Robot is here'."""
         await self._ensure_awake()
-        await self.coordinator.client.locate()
+        async with self.coordinator.dock_action_lock:
+            if not await self.coordinator.async_refresh_dock_status():
+                raise HomeAssistantError("Narwal status could not be refreshed")
+            if has_active_dock_work(self.coordinator.client.state):
+                raise HomeAssistantError("Narwal dock task is active")
+            await self.coordinator.client.locate()
 
     async def async_set_fan_speed(self, fan_speed: str, **kwargs) -> None:
         """Set the fan speed.
@@ -296,37 +388,64 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         a room-specific clean command to the robot.
         """
         await self._ensure_awake()
-        room_ids = [int(sid) for sid in segment_ids]
-        settings = self.coordinator.clean_settings
-        _LOGGER.info(
-            "Starting room-specific clean: rooms=%s mode=%s fan=%s water=%s "
-            "mop_strength=%s passes=%s",
-            room_ids, settings.work_mode.name, settings.fan.name,
-            settings.water.name, settings.mop_strength.name, settings.passes,
-        )
-        resp = await self.coordinator.client.start_rooms(
-            room_ids,
-            work_mode=settings.work_mode,
-            fan=settings.fan,
-            water=settings.water,
-            mop_strength=settings.mop_strength,
-            passes=settings.passes,
-        )
         try:
-            result_name = CommandResult(resp.result_code).name
-        except ValueError:
-            result_name = f"UNKNOWN({resp.result_code})"
+            room_ids = [int(sid) for sid in segment_ids]
+        except (TypeError, ValueError) as err:
+            raise HomeAssistantError("Narwal segment IDs must be numeric") from err
+
+        async with self.coordinator.dock_action_lock:
+            await self._validate_clean_start()
+            try:
+                await self.coordinator.client.get_map()
+            except Exception:
+                _LOGGER.debug("Could not refresh Narwal map before segment clean")
+            state = self.coordinator.client.state
+            known_room_ids = {
+                room.room_id
+                for room in getattr(getattr(state, "map_data", None), "rooms", ())
+                if room.room_id > 0
+            }
+            if known_room_ids:
+                unknown_room_ids = [
+                    room_id for room_id in room_ids if room_id not in known_room_ids
+                ]
+                if unknown_room_ids:
+                    raise HomeAssistantError(
+                        f"Unknown Narwal room ID: {', '.join(map(str, unknown_room_ids))}"
+                    )
+            settings = self.coordinator.clean_settings
+            _LOGGER.info(
+                "Starting room-specific clean: rooms=%s mode=%s fan=%s water=%s "
+                "mop_strength=%s passes=%s",
+                room_ids, settings.work_mode.name, settings.fan.name,
+                settings.water.name, settings.mop_strength.name, settings.passes,
+            )
+            resp = await self.coordinator.client.start_rooms(
+                room_ids,
+                work_mode=settings.work_mode,
+                fan=settings.fan,
+                water=settings.water,
+                mop_strength=settings.mop_strength,
+                passes=settings.passes,
+            )
+            if resp.accepted:
+                self.coordinator.client.state.assume_robot_clean()
+                self.coordinator.async_set_updated_data(self.coordinator.client.state)
+        result_name = _result_name(resp.result_code)
         _LOGGER.info(
             "Room clean response: %s (code=%s), rooms=%s",
             result_name, resp.result_code, room_ids,
         )
-        if not resp.success:
+        if not resp.accepted:
             _LOGGER.warning(
                 "Room clean failed: %s (code=%s), rooms=%s. "
                 "CONFLICT means robot is busy (cleaning, returning, or docked cycle in progress). "
                 "NOT_APPLICABLE means robot cannot clean right now. "
                 "Try again after the robot is idle on the dock.",
                 result_name, resp.result_code, room_ids,
+            )
+            raise HomeAssistantError(
+                f"Narwal room clean failed: {result_name}"
             )
 
     @callback

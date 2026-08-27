@@ -101,6 +101,17 @@ def is_robot_work_context(state: NarwalState | None) -> bool:
     )
 
 
+def has_active_dock_work(state: NarwalState | None) -> bool:
+    """Return True when station work makes robot commands ambiguous."""
+    if state is None:
+        return False
+    return (
+        state.is_station_active
+        or state.has_unmapped_active_dock_task
+        or bool(state.active_dock_task_keys)
+    )
+
+
 def can_start_dock_task(state: NarwalState | None, task_key: str | None = None) -> bool:
     """Return True when a dock task can be started safely."""
     if has_blocking_error(state):
