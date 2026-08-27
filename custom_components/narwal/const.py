@@ -34,6 +34,44 @@ NARWAL_MODELS: dict[str, str] = {
 CONF_DEVICE_ID = "device_id"
 CONF_MODEL = "model"
 CONF_PRODUCT_KEY = "product_key"
+CONF_CLOUD_PRODUCT_ID = "cloud_product_id"
+CONF_CLOUD_EMAIL = "cloud_email"
+CONF_CLOUD_PASSWORD = "cloud_password"
+CONF_CLOUD_REGION = "cloud_region"
+
+DEFAULT_CLOUD_REGION = "eu"
+CLOUD_REGIONS = ("eu", "de", "us", "cn", "au", "jp", "kr", "sg")
+CLOUD_CONSUMABLES_POLL_HOURS = 6
+
+CLOUD_PRODUCT_IDS_BY_PRODUCT_KEY: dict[str, str] = {
+    # CX7 uses this key for the local WebSocket topic but J5 in Narwal app APIs.
+    "hEA7OEshlx": "J5",
+}
+
+
+def narwal_cloud_hosts(region: str) -> tuple[str, str]:
+    """Return Narwal authentication and app hosts for a cloud region."""
+    if region not in CLOUD_REGIONS:
+        raise ValueError(f"Unsupported Narwal cloud region: {region}")
+    return (
+        f"https://{region}-idass.narwaltech.com",
+        f"https://{region}-app.narwaltech.com",
+    )
+
+
+def cloud_product_id_for_product_key(product_key: str) -> str:
+    """Return the Narwal app product id for a local WebSocket product key."""
+    return CLOUD_PRODUCT_IDS_BY_PRODUCT_KEY.get(product_key, product_key)
+
+
+def configured_cloud_product_id(data: dict) -> str:
+    """Return the stored cloud product id, falling back for migrated entries."""
+    product_key = str(data.get(CONF_PRODUCT_KEY, ""))
+    return str(
+        data.get(CONF_CLOUD_PRODUCT_ID)
+        or cloud_product_id_for_product_key(product_key)
+    )
+
 
 NO_BROADCAST_PRODUCT_KEYS = {"hEA7OEshlx"}
 
@@ -52,6 +90,7 @@ PLATFORMS: list[Platform] = [
     Platform.VACUUM,
     Platform.SENSOR,
     Platform.BINARY_SENSOR,
+    Platform.BUTTON,
     Platform.CAMERA,
     Platform.SELECT,
     Platform.NUMBER,
