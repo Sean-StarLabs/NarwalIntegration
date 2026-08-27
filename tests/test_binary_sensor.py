@@ -2,16 +2,37 @@
 
 from __future__ import annotations
 
+from unittest.mock import MagicMock
+
 import tests.ha_stubs
 
 tests.ha_stubs.install()
 
-from narwal_client.models import NarwalState  # noqa: E402
 from custom_components.narwal.binary_sensor import (  # noqa: E402
     BINARY_SENSOR_DESCRIPTIONS,
+    NarwalBinarySensor,
+    NarwalDockBinarySensor,
 )
+from custom_components.narwal.sensor import (  # noqa: E402
+    SENSOR_DESCRIPTIONS,
+    NarwalDockSensor,
+    NarwalSensor,
+)
+from narwal_client.models import NarwalState  # noqa: E402
 
 _DESCS = {d.key: d for d in BINARY_SENSOR_DESCRIPTIONS}
+_SENSOR_DESCS = {d.key: d for d in SENSOR_DESCRIPTIONS}
+
+
+def _coordinator() -> MagicMock:
+    """Return a minimal coordinator stub for entity device tests."""
+    coordinator = MagicMock()
+    coordinator.config_entry.data = {"device_id": "test_device", "model": "flow"}
+    coordinator.config_entry.title = "Narwal Test"
+    coordinator.client.state.firmware_version = "test"
+    coordinator.data = NarwalState()
+    coordinator.last_update_success = True
+    return coordinator
 
 
 def test_error_gated_on_base_status_seen() -> None:
@@ -70,6 +91,36 @@ def test_consumable_alert_sensors() -> None:
     s.update_from_consumable_info({"1": {}})
     assert maint.value_fn(s) is False
     assert repl.value_fn(s) is False
+
+
+def test_station_problem_sensors_belong_to_dock_device() -> None:
+    """Station hardware problem sensors are grouped under the dock device."""
+    dock_sensor = NarwalDockBinarySensor(_coordinator(), _DESCS["clean_water_tank"])
+    robot_sensor = NarwalBinarySensor(_coordinator(), _DESCS["maintenance_required"])
+
+    assert _DESCS["clean_water_tank"].dock_device
+    assert dock_sensor._attr_unique_id == "test_device_clean_water_tank"
+    assert dock_sensor._attr_device_info["identifiers"] == {
+        ("narwal", "test_device_dock")
+    }
+    assert dock_sensor._attr_device_info["via_device"] == ("narwal", "test_device")
+    assert not _DESCS["maintenance_required"].dock_device
+    assert robot_sensor._attr_device_info["identifiers"] == {("narwal", "test_device")}
+
+
+def test_station_value_sensors_belong_to_dock_device() -> None:
+    """Station consumable value sensors are grouped under the dock device."""
+    dock_sensor = NarwalDockSensor(_coordinator(), _SENSOR_DESCS["detergent_remaining"])
+    robot_sensor = NarwalSensor(_coordinator(), _SENSOR_DESCS["battery"])
+
+    assert _SENSOR_DESCS["detergent_remaining"].dock_device
+    assert dock_sensor._attr_unique_id == "test_device_detergent_remaining"
+    assert dock_sensor._attr_device_info["identifiers"] == {
+        ("narwal", "test_device_dock")
+    }
+    assert dock_sensor._attr_device_info["via_device"] == ("narwal", "test_device")
+    assert not _SENSOR_DESCS["battery"].dock_device
+    assert robot_sensor._attr_device_info["identifiers"] == {("narwal", "test_device")}
 
 
 def test_tank_problem_states() -> None:
