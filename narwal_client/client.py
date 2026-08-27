@@ -96,6 +96,8 @@ _STALE_DOCK_BASE_STATUSES = {
 }
 
 _DOCK_TASK_REFRESH_DELAY = 6.0
+_DOCK_TASK_IDENTIFY_ATTEMPTS = 4
+_DOCK_TASK_IDENTIFY_DELAY = 1.5
 _DOCK_TASK_FORCE_END_PAYLOADS = {
     # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
     # with ParallelTaskType.DRY_STATION_BAG to stop dock-bag drying.
@@ -1474,14 +1476,42 @@ class NarwalClient:
             return False
         return _has_dock_status_payload(response)
 
+    async def _refresh_before_dock_stop(
+        self,
+        task: str | None,
+    ) -> CommandResponse:
+        """Refresh dock state, allowing typed scoped-stop telemetry to settle."""
+        response = await self.get_status(full_update=True)
+        if not response.accepted or not _has_dock_status_payload(response):
+            return response
+        if task not in _DOCK_TASK_FORCE_END_PAYLOADS:
+            return response
+        if task in self.state.active_dock_task_keys:
+            return response
+        if not self.state.has_unmapped_active_dock_task:
+            return response
+
+        for _ in range(_DOCK_TASK_IDENTIFY_ATTEMPTS):
+            await asyncio.sleep(_DOCK_TASK_IDENTIFY_DELAY)
+            response = await self.get_status(full_update=True)
+            if not response.accepted or not _has_dock_status_payload(response):
+                return response
+            if task in self.state.active_dock_task_keys:
+                return response
+            if not self.state.has_unmapped_active_dock_task:
+                return response
+        return response
+
     async def stop_dock_task(self, task: str | None = None) -> CommandResponse:
         """Stop the active dock task without targeting a different task."""
         async with self._dock_task_lock:
-            if self.state.has_unmapped_active_dock_task and not (
-                _can_force_end_scoped_dock_task(self.state, task)
+            if (
+                self.state.has_unmapped_active_dock_task
+                and task not in _DOCK_TASK_FORCE_END_PAYLOADS
+                and not _can_force_end_scoped_dock_task(self.state, task)
             ):
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
-            refresh = await self.get_status(full_update=True)
+            refresh = await self._refresh_before_dock_stop(task)
             if not refresh.accepted:
                 return refresh
             if not _has_dock_status_payload(refresh):

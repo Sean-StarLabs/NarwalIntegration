@@ -842,6 +842,55 @@ class TestDockTaskCommands:
         mock_status.assert_awaited_once_with(full_update=True)
 
     @pytest.mark.asyncio
+    async def test_stop_dry_station_bag_waits_for_typed_task_after_unmapped_snapshot(
+        self,
+    ) -> None:
+        """Scoped dry stop waits for typed telemetry after a coarse active snapshot."""
+        client = NarwalClient("127.0.0.1")
+        client.state.working_status = WorkingStatus.TASK_COMPLETED
+        client.state.station_activity = 4
+        client.state.dock_presence = 6
+        client.state.dock_field11 = 2
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+        refresh_count = 0
+
+        async def refresh_status(*args, **kwargs):
+            nonlocal refresh_count
+            refresh_count += 1
+            client.state.station_activity = 4
+            if refresh_count == 2:
+                client.state.set_dock_drying_task(
+                    DOCK_TASK_DRY_DOCK_BAG,
+                    elapsed=60,
+                    target=180,
+                    fields=("12", "13"),
+                )
+            return self._docked_status_response()
+
+        with patch.object(
+            client, "get_status", new_callable=AsyncMock
+        ) as mock_status, patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send, patch.object(
+            client, "_refresh_after_dock_stop", new_callable=AsyncMock
+        ) as mock_refresh, patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ) as mock_sleep:
+            mock_status.side_effect = refresh_status
+            mock_send.return_value = success
+            mock_refresh.return_value = True
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+        assert result is success
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_FORCE_END,
+            payload=b"\x08\x01",
+            timeout=15.0,
+        )
+        assert mock_status.await_count == 2
+        mock_sleep.assert_any_await(1.5)
+
+    @pytest.mark.asyncio
     async def test_stop_dry_dust_bag_uses_scoped_force_end_payload(self) -> None:
         """Dry dust-bin drying uses the live-validated scoped force-end payload."""
         client = NarwalClient("127.0.0.1")
