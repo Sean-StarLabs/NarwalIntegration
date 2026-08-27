@@ -31,6 +31,7 @@ from narwal_client.const import (  # noqa: E402
 )
 from narwal_client.models import (  # noqa: E402
     DOCK_TASK_DRY_DOCK_BAG,
+    DOCK_TASK_DRY_DUST_BIN,
     DOCK_TASK_DRY_MOP,
     CommandResponse,
     MapData,
@@ -39,6 +40,8 @@ from narwal_client.models import (  # noqa: E402
 )
 
 Segment = sys.modules["homeassistant.components.vacuum"].Segment
+VacuumActivity = sys.modules["homeassistant.components.vacuum"].VacuumActivity
+VacuumEntityFeature = sys.modules["homeassistant.components.vacuum"].VacuumEntityFeature
 
 
 def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
@@ -56,6 +59,7 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     coordinator.clean_settings = CleanSettings()
     coordinator.active_clean_work_mode = None
     coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+    coordinator.async_refresh_action_status = AsyncMock(return_value=True)
     coordinator.dock_action_lock = asyncio.Lock()
     coordinator.room_clean_settings_for_rooms = MagicMock(
         side_effect=lambda room_ids: {
@@ -89,6 +93,7 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
 
     # Stub StateVacuumEntity attributes
     vac.last_seen_segments = None
+    vac._last_reported_segment_signature = None
     vac.async_create_segments_issue = MagicMock()
     vac.async_write_ha_state = MagicMock()
 
@@ -108,6 +113,188 @@ def _docked_state() -> NarwalState:
     state.dock_presence = 6
     state.dock_field11 = 2
     return state
+
+
+class TestVacuumActivity:
+    """Tests for mapping Narwal task context to HA vacuum activity."""
+
+    def test_active_clean_details_remain_visible(self) -> None:
+        state = _active_clean_state()
+        state.task_progress_percent = 72
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+        state.task_remaining_time = 300
+        state.cleaning_area = 12.5
+        state.cleaning_time = 900
+        vac = _make_vacuum(state=state)
+
+        attrs = vac.extra_state_attributes
+
+        assert attrs["progress"] == 72
+        assert attrs["status_summary"] == "Kitchen - 72%"
+        assert "charging_to_resume" not in attrs
+        assert "progress_display" not in attrs
+        assert "remaining_time" not in attrs
+        assert "current_room_id" not in attrs
+        assert attrs["current_room"] == "Kitchen"
+        assert "active_room_ids" not in attrs
+        assert "cleaning_area" not in attrs
+        assert "cleaning_time" not in attrs
+
+    def test_stale_clean_details_hidden_after_clean_ends(self) -> None:
+        state = NarwalState(working_status=WorkingStatus.CHARGED)
+        state.task_progress_percent = 72
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+        state.cleaning_area = 12.5
+        state.cleaning_time = 900
+        vac = _make_vacuum(state=state)
+
+        attrs = vac.extra_state_attributes
+
+        assert attrs["task_status"] == "docked"
+        assert "progress" not in attrs
+        assert "remaining_time" not in attrs
+        assert "current_room_id" not in attrs
+        assert "current_room" not in attrs
+        assert "active_room_ids" not in attrs
+        assert "cleaning_area" not in attrs
+        assert "cleaning_time" not in attrs
+
+    def test_unknown_off_dock_status_reports_idle_without_task_fields(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
+        vac = _make_vacuum(state=state)
+
+        assert state.working_status == WorkingStatus.UNKNOWN
+        assert not state.is_cleaning
+        assert vac.activity == VacuumActivity.IDLE
+        assert vac.extra_state_attributes["task_status"] == "unknown"
+
+    def test_station_activity_alone_does_not_report_robot_docked(self) -> None:
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.dock_presence = 2
+        state.dock_field11 = 1
+        state.dock_field47 = 2
+        state.station_activity = 4
+        vac = _make_vacuum(state=state)
+
+        assert not state.is_docked
+        assert state.is_station_active
+        assert vac.activity == VacuumActivity.IDLE
+        assert vac.extra_state_attributes["task_status"] == "station_active"
+
+
+class TestVacuumSupportedFeatures:
+    """Tests for dynamically exposed native HA vacuum features."""
+
+    def test_idle_docked_exposes_start_features(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "10": 1}, "11": 2})
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert features & VacuumEntityFeature.STATE
+        assert features & VacuumEntityFeature.START
+        assert features & VacuumEntityFeature.FAN_SPEED
+        assert features & VacuumEntityFeature.CLEAN_AREA
+        assert not features & VacuumEntityFeature.STOP
+        assert not features & VacuumEntityFeature.PAUSE
+
+    def test_docked_v2_with_off_dock_fields_exposes_return_home_not_start(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}, "11": 1, "47": 2})
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert vac.activity == VacuumActivity.IDLE
+        assert features & VacuumEntityFeature.RETURN_HOME
+        assert not features & VacuumEntityFeature.START
+        assert not features & VacuumEntityFeature.CLEAN_AREA
+
+    def test_active_clean_exposes_active_native_features(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert features & VacuumEntityFeature.STATE
+        assert features & VacuumEntityFeature.PAUSE
+        assert features & VacuumEntityFeature.STOP
+        assert features & VacuumEntityFeature.RETURN_HOME
+        assert features & VacuumEntityFeature.FAN_SPEED
+        assert not features & VacuumEntityFeature.START
+        assert not features & VacuumEntityFeature.CLEAN_AREA
+
+    def test_off_dock_dock_bag_drying_exposes_return_home(self) -> None:
+        """Dock-bag drying can continue while an off-dock robot returns home."""
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert features & VacuumEntityFeature.RETURN_HOME
+        assert not features & VacuumEntityFeature.STOP
+
+    def test_active_clean_with_dock_bag_drying_keeps_robot_controls(self) -> None:
+        """A compatible dock task must not hide controls for an active off-dock clean."""
+        state = _active_clean_state()
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert features & VacuumEntityFeature.PAUSE
+        assert features & VacuumEntityFeature.STOP
+        assert features & VacuumEntityFeature.RETURN_HOME
+        assert features & VacuumEntityFeature.LOCATE
+        assert features & VacuumEntityFeature.FAN_SPEED
+
+    def test_off_dock_mop_drying_hides_return_home(self) -> None:
+        """Mop drying still blocks return-home until hardware proves otherwise."""
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.dock_presence = 6
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert not features & VacuumEntityFeature.RETURN_HOME
+
+    def test_recent_clean_with_unstoppable_dock_task_hides_stop(self) -> None:
+        """Retained clean metrics must not expose generic stop over dry dust-bin."""
+        state = NarwalState(working_status=WorkingStatus.CHARGED)
+        state.update_from_working_status({"3": 120})
+        state.dock_presence = 1
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert not features & VacuumEntityFeature.STOP
 
 
 class TestAsyncGetSegments:
@@ -460,6 +647,17 @@ class TestVacuumFanSpeed:
 
         vac.coordinator.client.set_fan_speed.assert_not_awaited()
 
+    async def test_unknown_fan_speed_raises(self) -> None:
+        """Unsupported suction labels must not silently no-op."""
+        state = NarwalState(working_status=WorkingStatus.CHARGED)
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.set_fan_speed = AsyncMock()
+
+        with pytest.raises(Exception, match="Unsupported Narwal fan speed"):
+            await vac.async_set_fan_speed("Turbo")
+
+        vac.coordinator.client.set_fan_speed.assert_not_awaited()
+
     async def test_fan_change_rejected_in_mop_only_mode(self) -> None:
         state = _active_clean_state()
         vac = _make_vacuum(state=state)
@@ -515,6 +713,53 @@ class TestCheckSegmentChanges:
         vac._check_segment_changes()
 
         vac.async_create_segments_issue.assert_called_once()
+
+    def test_segment_change_reports_once_per_signature(self) -> None:
+        """Repeated coordinator updates for one mismatch do not spam repairs/logs."""
+        rooms_old = [
+            Segment(id="1", name="Kitchen"),
+            Segment(id="2", name="Bathroom"),
+        ]
+        rooms_new = [
+            RoomInfo(room_id=1, name="Kitchen", room_sub_type=4, category=1),
+            RoomInfo(room_id=3, name="Study", room_sub_type=5, category=1),
+        ]
+        state = NarwalState()
+        state.map_data = MapData(rooms=rooms_new)
+        vac = _make_vacuum(state=state)
+        vac.last_seen_segments = rooms_old
+
+        vac._check_segment_changes()
+        vac._check_segment_changes()
+
+        vac.async_create_segments_issue.assert_called_once()
+
+    def test_segment_change_reports_again_after_matching_snapshot(self) -> None:
+        """A resolved mismatch clears the debounce for future room changes."""
+        rooms_old = [
+            Segment(id="1", name="Kitchen"),
+            Segment(id="2", name="Bathroom"),
+        ]
+        changed = [
+            RoomInfo(room_id=1, name="Kitchen", room_sub_type=4, category=1),
+            RoomInfo(room_id=3, name="Study", room_sub_type=5, category=1),
+        ]
+        matching = [
+            RoomInfo(room_id=1, name="Kitchen", room_sub_type=4, category=1),
+            RoomInfo(room_id=2, name="Bathroom", room_sub_type=6, category=1),
+        ]
+        state = NarwalState()
+        state.map_data = MapData(rooms=changed)
+        vac = _make_vacuum(state=state)
+        vac.last_seen_segments = rooms_old
+
+        vac._check_segment_changes()
+        state.map_data = MapData(rooms=matching)
+        vac._check_segment_changes()
+        state.map_data = MapData(rooms=changed)
+        vac._check_segment_changes()
+
+        assert vac.async_create_segments_issue.call_count == 2
 
     def test_no_change_when_same_rooms(self) -> None:
         """Does NOT call async_create_segments_issue when rooms match."""
@@ -594,6 +839,24 @@ class TestAsyncStartWholeHouse:
         kwargs = vac.coordinator.client.start_rooms.await_args.kwargs
         assert kwargs["room_settings"] == {1: profile, 2: RoomCleanSettings()}
 
+    async def test_start_refreshes_action_status_before_resume(self) -> None:
+        """Resume uses the action refresh path before deciding the command."""
+        state = NarwalState(working_status=WorkingStatus.CLEANING)
+        state.is_paused = True
+        state.task_progress_percent = 40
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.resume = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        await vac.async_start()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.resume.assert_awaited_once()
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+
     async def test_whole_house_without_map_raises(self) -> None:
         """With no map rooms available, no ambiguous start command is sent."""
         state = _docked_state()  # no map_data
@@ -646,8 +909,31 @@ class TestAsyncStop:
 
         await vac.async_stop()
 
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
         vac.coordinator.client.stop.assert_not_awaited()
         vac.coordinator.client.stop_dock_task.assert_awaited_once_with()
+
+    async def test_stop_routes_active_clean_with_dock_bag_to_robot_stop(self) -> None:
+        """Drying the dock bag does not make robot STOP ambiguous while cleaning."""
+        state = _active_clean_state()
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        await vac.async_stop()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_awaited_once()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()
 
     async def test_stop_rejects_ambiguous_dock_only_task(self) -> None:
         state = NarwalState(working_status=WorkingStatus.DOCKED)
@@ -672,12 +958,14 @@ class TestAsyncStop:
         with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
             await vac.async_stop()
 
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
         vac.coordinator.client.stop.assert_not_awaited()
         vac.coordinator.client.stop_dock_task.assert_not_awaited()
 
     async def test_stop_rejects_unmapped_dock_activity_during_clean_context(self) -> None:
         """Unknown dock activity must not fall through to generic robot force-end."""
         state = NarwalState(working_status=WorkingStatus.CLEANING)
+
         state.dock_activity = 99
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
@@ -687,5 +975,109 @@ class TestAsyncStop:
         with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
             await vac.async_stop()
 
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
         vac.coordinator.client.stop.assert_not_awaited()
         vac.coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_stop_routes_dry_dust_task_through_dock_policy(self) -> None:
+        state = NarwalState(working_status=WorkingStatus.DOCKED)
+        state.dock_presence = 6
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        await vac.async_stop()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_awaited_once_with()
+
+    async def test_stop_rejects_recent_clean_with_unstoppable_dry_dust(self) -> None:
+        """Recent clean metrics must not route dry dust-bin through generic stop."""
+        state = NarwalState(working_status=WorkingStatus.CHARGED)
+        state.update_from_working_status({"3": 120})
+        state.dock_presence = 1
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
+            await vac.async_stop()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_stop_rejects_unmapped_dock_only_task(self) -> None:
+        state = NarwalState(working_status=WorkingStatus.DOCKED)
+        state.dock_presence = 6
+        state.dock_activity = 99
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
+            await vac.async_stop()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_robot_stop_refreshes_action_status_before_stop(self) -> None:
+        """Robot stop revalidates active task status under the action lock."""
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        await vac.async_stop()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_awaited_once()
+
+    async def test_pause_refreshes_action_status_before_pause(self) -> None:
+        """Pause revalidates active task status under the action lock."""
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.pause = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        await vac.async_pause()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.pause.assert_awaited_once()
+
+    async def test_return_home_refreshes_action_status_before_return(self) -> None:
+        """Return-to-base revalidates dock and robot status under the action lock."""
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.return_to_base = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        await vac.async_return_to_base()
+
+        vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.return_to_base.assert_awaited_once()
