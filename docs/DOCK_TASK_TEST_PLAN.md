@@ -178,6 +178,13 @@ after the contradictory post-wash state. Their start/stop baseline remains the
 2026-08-26 Downstairs evidence above until a fresh accepted drying run is
 captured.
 
+Follow-up after redeploying Home Assistant on the cleaned branch: HA reported
+`switch.upstairs_narwal_dock_dry_and_disinfect_dust_bin` as active with live
+`time_left` and `progress` attributes after restart, and the Narwal app
+confirmed the same dust-bin drying task was active. Treat that as real device
+telemetry, not a restored HA switch assumption. Dock task switches should only
+come from robot telemetry or a short accepted-command guard.
+
 ## Per-Task Evidence
 
 ### Empty dustbin
