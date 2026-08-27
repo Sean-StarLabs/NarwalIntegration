@@ -179,6 +179,42 @@ def install() -> None:
     ha_service = _mod("homeassistant.helpers.service", ha_helpers)
     ha_service.async_extract_entity_ids = MagicMock()  # type: ignore[attr-defined]
 
+    ha_storage = _mod("homeassistant.helpers.storage", ha_helpers)
+
+    class _Store:
+        """Stub for Home Assistant Store helper."""
+
+        def __init__(self, hass: object, version: int, key: str) -> None:
+            self.hass = hass
+            self.version = version
+            self.key = key
+            self.data: object | None = None
+
+        async def async_load(self) -> object | None:
+            return self.data
+
+        async def async_save(self, data: object) -> None:
+            self.data = data
+
+    ha_storage.Store = _Store  # type: ignore[attr-defined]
+
+    ha_selector = _mod("homeassistant.helpers.selector", ha_helpers)
+
+    class _TextSelectorType:
+        PASSWORD = "password"
+
+    class _TextSelectorConfig:
+        def __init__(self, **kw: object) -> None:
+            self.kw = kw
+
+    class _TextSelector:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+    ha_selector.TextSelector = _TextSelector  # type: ignore[attr-defined]
+    ha_selector.TextSelectorConfig = _TextSelectorConfig  # type: ignore[attr-defined]
+    ha_selector.TextSelectorType = _TextSelectorType  # type: ignore[attr-defined]
+
     ha_aiohttp = _mod("homeassistant.helpers.aiohttp_client", ha_helpers)
     ha_aiohttp.async_get_clientsession = MagicMock()  # type: ignore[attr-defined]
 
@@ -232,7 +268,13 @@ def install() -> None:
     class _Segment:
         """Stub for homeassistant.components.vacuum.Segment."""
 
-        def __init__(self, *, id: str, name: str, group: str | None = None) -> None:  # noqa: A002
+        def __init__(  # noqa: A002
+            self,
+            *,
+            id: str,  # noqa: A002
+            name: str,
+            group: str | None = None,
+        ) -> None:
             self.id = id
             self.name = name
             self.group = group

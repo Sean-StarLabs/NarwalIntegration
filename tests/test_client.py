@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import struct
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -37,6 +38,11 @@ from narwal_client.models import (
     RoomInfo,
 )
 from narwal_client.protocol import PROTOBUF_FIELD5_TAG, build_frame
+
+
+def _float_stream(*values: float) -> bytes:
+    """Encode a packed float32 stream as display_map field 2 uses it."""
+    return b"".join(struct.pack("<f", value) for value in values)
 
 
 class TestNarwalClientInit:
@@ -90,6 +96,80 @@ class TestNarwalClientInit:
         assert result.data == {"1": 1}
         assert result.raw_payload == b"raw"
         mock_send.assert_awaited_once_with(TOPIC_CMD_GET_BASE_STATUS)
+
+    def test_topic_subscription_excludes_planned_route_trails(self) -> None:
+        """Map trails come only from map/display_map's accumulated trajectory."""
+        client = NarwalClient("10.0.0.1")
+        payload = client._build_topic_subscription()
+
+        assert b"map/display_map" in payload
+        assert b"status/point_navi_plan_traj" not in payload
+        assert b"developer/planning_debug_info" not in payload
+
+    @pytest.mark.asyncio
+    async def test_display_map_trajectory_updates_visual_data_only(self) -> None:
+        """display_map field 2 must not infer robot task state."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        frame = build_frame(client._full_topic("map/display_map"), b"payload")
+        client.state.working_status = WorkingStatus.CHARGED
+        client.state.station_activity = 2
+        client.state.dock_field11 = 3
+        client.state.dock_field47 = 1
+        client.state.task_progress_percent = 48
+
+        with patch.object(
+            client,
+            "_decode_protobuf",
+            return_value={
+                "1": {"1": {"1": 1.25, "2": 1.0}},
+                "2": {
+                    "1": _float_stream(1.0, 1.25),
+                    "2": _float_stream(2.0, 2.25),
+                },
+            },
+        ):
+            await client._handle_message(frame)
+
+        assert client.state.map_display_data is not None
+        assert client.state.map_display_data.trajectory_points() == [
+            (1.0, 2.0),
+            (1.25, 2.25),
+        ]
+        assert not client.state.is_cleaning
+        assert client.state.is_docked
+        assert client.state.is_station_active
+        assert not hasattr(client.state, "last_map_robot_movement")
+
+    @pytest.mark.asyncio
+    async def test_wait_for_response_marks_display_map_fresh(self) -> None:
+        """display_map packets consumed while waiting for an ack are fresh."""
+        client = NarwalClient("10.0.0.1", device_id="device")
+        display_frame = build_frame(client._full_topic("map/display_map"), b"display")
+        response_frame = bytearray(build_frame(client._full_topic("cmd/test"), b"ack"))
+        response_frame[2] = PROTOBUF_FIELD5_TAG
+        client._ws = AsyncMock()
+        client._ws.recv = AsyncMock(side_effect=[display_frame, bytes(response_frame)])
+
+        with patch.object(
+            client,
+            "_decode_protobuf",
+            return_value={
+                "1": {"1": {"1": 1.25, "2": 1.0}},
+                "2": {
+                    "1": _float_stream(1.0, 1.25),
+                    "2": _float_stream(2.0, 2.25),
+                },
+            },
+        ):
+            msg = await client._wait_for_field5_response(1.0)
+
+        assert msg.payload == b"ack"
+        assert client.state.map_display_data is not None
+        assert client.state.map_display_data.trajectory_points() == [
+            (1.0, 2.0),
+            (1.25, 2.25),
+        ]
+        assert client.last_display_map_age < 1.0
 
     def test_unconfirmed_idle_base_status_preserves_active_metrics(self) -> None:
         """Stale idle base_status must not hide a fresh working_status task."""

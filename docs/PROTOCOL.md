@@ -388,7 +388,6 @@ it is the signature of a job about to abort, not a robot at the origin.
 | `upgrade/upgrade_status` | 2 status, 3 progress, 4 stage, 7 current firmware, 8 target firmware |
 | `status/download_status` | OTA download state |
 | `status/time_line_status` | Session timeline |
-| `status/point_navi_plan_traj` | Navigation trajectory points |
 | `report/clean_report` | End-of-session summary: 3 elapsed, 6 start, 7 end, 12 detail, 33 end-reason string (localized) |
 | `developer/planning_debug_info` | Bumper/cliff/mop-collision sensor debug |
 
@@ -573,14 +572,13 @@ rest are known-to-exist and unexplored — good starting points for anyone probi
 | 63 | `/status/download_status` | R→C | Status | ✓ |
 | 64 | `/status/time_line_status` | R→C | Status | ✓ |
 | 65 | `/status/app_status_heartbeat` | R→C | Status | ✓ |
-| 66 | `/status/point_navi_plan_traj` | R→C | Status | |
 | 67 | `/report/clean_report` | C→R | Report | |
 | 68 | `/clean/report` | C→R | Report | |
 | 69 | `/developer/ping` | C→R | Developer | ✓ |
 | 70 | `/developer/take_picture` | C→R | Developer | ✓ |
 | 71 | `/developer/take_picture/response` | R→C | Developer | ✓ |
 | 72 | `/developer/led_control` | C→R | Developer | ✓ |
-| 73 | `/developer/planning_debug_info` | R→C | Developer | ✓ |
+| 73 | `/developer/planning_debug_info` | R→C | Developer | |
 | 74 | `/info/get_clean_time_line` | C→R | Status | |
 | 75 | `/info/get_clean_time_line/response` | R→C | Status | |
 
