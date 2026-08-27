@@ -67,6 +67,7 @@ GENERIC_STOP_DOCK_TASKS = frozenset(
 )
 SCOPED_STOP_DOCK_TASKS = frozenset({DOCK_TASK_DRY_DOCK_BAG, DOCK_TASK_DRY_DUST_BIN})
 STOPPABLE_DOCK_TASKS = GENERIC_STOP_DOCK_TASKS | SCOPED_STOP_DOCK_TASKS
+ROBOT_RETURN_COMPATIBLE_DOCK_TASKS = frozenset({DOCK_TASK_DRY_DOCK_BAG})
 
 
 def has_blocking_error(state: NarwalState | None) -> bool:
@@ -132,6 +133,18 @@ def can_start_robot_clean(state: NarwalState | None) -> bool:
     if state.has_assumed_robot_clean:
         return False
     return not state.blocks_robot_start_for_dock_task
+
+
+def dock_task_blocks_robot_return(state: NarwalState | None) -> bool:
+    """Return True when dock work should block recalling an off-dock robot."""
+    if state is None or not state.is_station_active:
+        return False
+    if state.has_unmapped_active_dock_task:
+        return True
+    active_tasks = set(state.active_dock_task_keys)
+    if not active_tasks:
+        return True
+    return not active_tasks <= ROBOT_RETURN_COMPATIBLE_DOCK_TASKS
 
 
 def can_stop_dock_task(state: NarwalState | None, task_key: str | None = None) -> bool:

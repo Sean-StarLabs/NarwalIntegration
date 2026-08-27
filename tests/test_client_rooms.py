@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import blackboxprotobuf
 import pytest
 
-from narwal_client.client import NarwalClient, RoomCleanSettings
+from narwal_client.client import NarwalClient, NarwalCommandError, RoomCleanSettings
 from narwal_client.const import (
     CleaningRoute,
     CommandResult,
@@ -247,6 +247,19 @@ class TestStartRooms:
              patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
             mock_get_map.return_value = MagicMock(map_id=0)
             result = await client.start_rooms([5])
+        mock_send.assert_not_awaited()
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+
+    @pytest.mark.asyncio
+    async def test_map_fetch_error_returns_not_applicable(self) -> None:
+        """A failed map refresh bails out without sending a room-clean command."""
+        client = self._client()
+        client.state.map_data = None
+        with patch.object(client, "get_map", new_callable=AsyncMock) as mock_get_map, \
+             patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_get_map.side_effect = NarwalCommandError("no active map")
+            result = await client.start_rooms([5])
+        mock_get_map.assert_awaited_once()
         mock_send.assert_not_awaited()
         assert result.result_code == CommandResult.NOT_APPLICABLE
 
