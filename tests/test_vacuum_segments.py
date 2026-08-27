@@ -202,6 +202,17 @@ class TestVacuumSupportedFeatures:
         assert not features & VacuumEntityFeature.STOP
         assert not features & VacuumEntityFeature.PAUSE
 
+    def test_docked_v2_with_off_dock_fields_exposes_return_home_not_start(self) -> None:
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}, "11": 1, "47": 2})
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert features & VacuumEntityFeature.RETURN_HOME
+        assert not features & VacuumEntityFeature.START
+        assert not features & VacuumEntityFeature.CLEAN_AREA
+
     def test_active_clean_exposes_active_native_features(self) -> None:
         state = _active_clean_state()
         vac = _make_vacuum(state=state)
@@ -967,7 +978,7 @@ class TestAsyncStop:
         vac.coordinator.client.stop.assert_not_awaited()
         vac.coordinator.client.stop_dock_task.assert_not_awaited()
 
-    async def test_stop_rejects_unstoppable_dry_dust_task(self) -> None:
+    async def test_stop_routes_dry_dust_task_through_dock_policy(self) -> None:
         state = NarwalState(working_status=WorkingStatus.DOCKED)
         state.dock_presence = 6
         state.set_dock_drying_task(
@@ -979,14 +990,15 @@ class TestAsyncStop:
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.stop = AsyncMock()
-        vac.coordinator.client.stop_dock_task = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
 
-        with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
-            await vac.async_stop()
+        await vac.async_stop()
 
         vac.coordinator.async_refresh_action_status.assert_awaited_once()
         vac.coordinator.client.stop.assert_not_awaited()
-        vac.coordinator.client.stop_dock_task.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_awaited_once_with()
 
     async def test_stop_rejects_recent_clean_with_unstoppable_dry_dust(self) -> None:
         """Recent clean metrics must not route dry dust-bin through generic stop."""

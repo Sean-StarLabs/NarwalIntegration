@@ -812,14 +812,14 @@ class NarwalState:
         cleaning is not active, since the robot can report unmapped states
         (e.g. self-test) while physically docked.
         """
+        if self.has_recent_active_working_status:
+            return False
         if self.has_explicit_off_dock_signal:
             return False
         if self.working_status in (
             WorkingStatus.DOCKED, WorkingStatus.CHARGED, WorkingStatus.DOCKED_V2,
         ):
             return True
-        if self.has_recent_active_working_status:
-            return False
         if self.working_status in ACTIVE_CLEANING_STATUSES:
             return False
         # For STANDBY, UNKNOWN, or any other status: check dock field signals.
