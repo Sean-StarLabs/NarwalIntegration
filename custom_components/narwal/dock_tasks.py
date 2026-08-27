@@ -35,7 +35,7 @@ DOCK_TASKS: tuple[DockTaskDefinition, ...] = (
     DockTaskDefinition(
         key=DOCK_TASK_WASH_MOP,
         translation_key=DOCK_TASK_WASH_MOP,
-        action="wash_mop",
+        action="wash_mop_by_robot_status",
         icon="mdi:waves-arrow-up",
     ),
     DockTaskDefinition(

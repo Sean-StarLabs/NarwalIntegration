@@ -321,11 +321,11 @@ def test_robot_clean_start_allows_only_typed_dock_bag() -> None:
     assert can_start_robot_clean(state)
 
 
-async def test_wash_mop_switch_falls_back_to_status_gated_command() -> None:
-    """The alternate wash-mop topic is tried when the primary topic rejects."""
+async def test_wash_mop_switch_uses_status_gated_command() -> None:
+    """Wash mop uses the app-style status-gated dock command directly."""
     coordinator = _coordinator()
     coordinator.client.wash_mop = AsyncMock(
-        return_value=CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
     )
     coordinator.client.wash_mop_by_robot_status = AsyncMock(
         return_value=CommandResponse(result_code=CommandResult.SUCCESS)
@@ -334,7 +334,7 @@ async def test_wash_mop_switch_falls_back_to_status_gated_command() -> None:
 
     await switch.async_turn_on()
 
-    coordinator.client.wash_mop.assert_awaited_once()
+    coordinator.client.wash_mop.assert_not_awaited()
     coordinator.client.wash_mop_by_robot_status.assert_awaited_once()
 
 

@@ -191,8 +191,6 @@ class NarwalDockTaskSwitch(NarwalDockEntity, RestoreEntity, SwitchEntity):
                 self.entity_description.action,
             )
             response = await command()
-            if self.entity_description.action == "wash_mop" and response.not_applicable:
-                response = await client.wash_mop_by_robot_status()
             self._raise_if_command_failed(response, "start")
             self.coordinator.async_set_updated_data(client.state)
             await self.coordinator.async_refresh_dock_status()
