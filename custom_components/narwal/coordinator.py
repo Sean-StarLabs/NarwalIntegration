@@ -866,6 +866,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             " while keeping fresh display_map data" if keep_fresh_display else "",
         )
 
+    def _handle_working_status_transition(self, state: NarwalState) -> None:
+        """Apply transition side effects and record the latest working status."""
+        if self._is_new_clean_transition(state):
+            self._clear_map_display_cache_for_new_clean(state)
+        self._prev_working_status = state.working_status
+
     async def async_setup(self) -> None:
         """Connect to the vacuum and start the WebSocket listener.
 
@@ -980,9 +986,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         ):
             _LOGGER.info("Return-to-dock detected, refreshing dock status")
             self.hass.async_create_task(self._refresh_dock_status())
-        if self._is_new_clean_transition(state):
-            self._clear_map_display_cache_for_new_clean(state)
-        self._prev_working_status = state.working_status
+        self._handle_working_status_transition(state)
         self._schedule_map_display_cache_save(state)
 
         # display_map dropout recovery: if cleaning but no display_map for
@@ -1182,6 +1186,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self._consecutive_failures = 0
             if full_update:
                 self._mark_dock_status_refresh_succeeded()
+
+        self._handle_working_status_transition(self.client.state)
 
         # Retry map fetch if it failed during setup
         if self.client.state.map_data is None:

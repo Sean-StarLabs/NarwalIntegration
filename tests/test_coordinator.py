@@ -653,6 +653,37 @@ class TestCoordinatorResilience:
         coordinator.client.get_status.assert_awaited_once_with(full_update=False)
         assert result is coordinator.client.state
 
+    async def test_poll_clean_transition_clears_stale_restored_trail(self) -> None:
+        """Polling must clear a previous clean's trail when push updates are absent."""
+        coordinator = self._make_coordinator()
+        type(coordinator.client).connected = PropertyMock(return_value=True)
+        coordinator.client.state = _trajectory_state()
+        coordinator.client.state.working_status = WorkingStatus.STANDBY
+        coordinator.client.last_display_map_age = float("inf")
+        coordinator._prev_working_status = WorkingStatus.STANDBY
+        coordinator._map_display_cache_signature = (4, 4, 99)
+        coordinator._map_display_cache_restored = True
+        coordinator._map_display_cache_restored_from_active = False
+
+        async def get_status(*, full_update: bool) -> CommandResponse:
+            coordinator.client.state.update_from_base_status(
+                {"3": {"1": int(WorkingStatus.CLEANING)}}
+            )
+            return CommandResponse(
+                data={"2": {"3": {"1": int(WorkingStatus.CLEANING)}}}
+            )
+
+        coordinator.client.get_status = AsyncMock(side_effect=get_status)
+
+        result = await coordinator._async_update_data()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=True)
+        assert result is coordinator.client.state
+        assert result.map_display_data is None
+        assert coordinator._map_display_cache_signature == ()
+        assert coordinator._prev_working_status == WorkingStatus.CLEANING
+        coordinator.config_entry.async_create_background_task.assert_called_once()
+
     async def test_push_update_resets_failure_counter(self) -> None:
         """_on_state_update resets _consecutive_failures to 0."""
         coordinator = self._make_coordinator()
