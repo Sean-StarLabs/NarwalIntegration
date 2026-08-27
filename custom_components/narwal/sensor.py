@@ -26,8 +26,18 @@ from .narwal_client import NarwalState
 class NarwalSensorEntityDescription(SensorEntityDescription):
     """Describes a Narwal sensor entity."""
 
-    value_fn: Callable[[NarwalState], float | str | None]
+    value_fn: Callable[[NarwalState], float | int | str | None]
+    available_fn: Callable[[NarwalState], bool] | None = None
     dock_device: bool = False
+
+
+def _has_active_cleaning_metrics(state: NarwalState) -> bool:
+    """Return true while live clean-progress metrics describe the current task."""
+    return (
+        state.is_cleaning
+        or state.has_recent_active_working_status
+        or state.has_paused_clean_task_context
+    )
 
 
 SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
@@ -48,6 +58,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         value_fn=lambda state: round(state.cleaning_area, 2)
         if state.cleaning_area > 0
         else None,
+        available_fn=_has_active_cleaning_metrics,
     ),
     NarwalSensorEntityDescription(
         key="cleaning_time",
@@ -60,6 +71,19 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         value_fn=lambda state: state.cleaning_time
         if state.cleaning_time > 0
         else None,
+        available_fn=_has_active_cleaning_metrics,
+    ),
+    NarwalSensorEntityDescription(
+        key="remaining_time",
+        translation_key="remaining_time",
+        device_class=SensorDeviceClass.DURATION,
+        native_unit_of_measurement=UnitOfTime.SECONDS,
+        state_class=SensorStateClass.MEASUREMENT,
+        # base_status task ETA, populated while the robot keeps an active clean task.
+        value_fn=lambda state: state.task_remaining_time
+        if state.task_remaining_time > 0
+        else None,
+        available_fn=_has_active_cleaning_metrics,
     ),
     NarwalSensorEntityDescription(
         key="dust_bag_health",
@@ -100,14 +124,6 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         # base_status field 15 terminateReason (TaskResult) — why the last task ended.
         value_fn=lambda state: TASK_RESULT_OPTIONS.get(state.terminate_reason),
     ),
-    NarwalSensorEntityDescription(
-        key="current_room",
-        translation_key="current_room",
-        icon="mdi:map-marker",
-        # working_status field 6: room_id of the room currently being cleaned.
-        # Resolved to a display name via the cached room map from get_map.
-        value_fn=lambda state: state.current_room_name,
-    ),
 )
 
 
@@ -147,12 +163,22 @@ class NarwalSensor(NarwalEntity, SensorEntity):
         self._attr_unique_id = f"{device_id}_{description.key}"
 
     @property
-    def native_value(self) -> float | str | None:
+    def native_value(self) -> float | int | str | None:
         """Return the sensor value."""
         state = self.coordinator.data
         if state is None:
             return None
         return self.entity_description.value_fn(state)
+
+    @property
+    def available(self) -> bool:
+        """Return True when this sensor has meaningful current data."""
+        if not super().available:
+            return False
+        if self.entity_description.available_fn is None:
+            return True
+        state = self.coordinator.data
+        return state is not None and self.entity_description.available_fn(state)
 
 
 class NarwalDockSensor(NarwalDockEntity, SensorEntity):
@@ -172,12 +198,22 @@ class NarwalDockSensor(NarwalDockEntity, SensorEntity):
         self._attr_unique_id = f"{device_id}_{description.key}"
 
     @property
-    def native_value(self) -> float | str | None:
+    def native_value(self) -> float | int | str | None:
         """Return the sensor value."""
         state = self.coordinator.data
         if state is None:
             return None
         return self.entity_description.value_fn(state)
+
+    @property
+    def available(self) -> bool:
+        """Return True when this sensor has meaningful current data."""
+        if not super().available:
+            return False
+        if self.entity_description.available_fn is None:
+            return True
+        state = self.coordinator.data
+        return state is not None and self.entity_description.available_fn(state)
 
 
 class NarwalChargingStateSensor(NarwalEntity, SensorEntity):

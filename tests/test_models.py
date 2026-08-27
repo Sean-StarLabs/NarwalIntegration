@@ -35,7 +35,7 @@ class TestNarwalState:
         assert not state.is_returning
 
     def test_update_from_working_status(self) -> None:
-        """working_status topic sets cleaning metrics and marks active cleaning."""
+        """working_status topic sets cleaning metrics without rewriting status."""
         state = NarwalState()
         # Field 2 = coveredArea (float32, m²); field 13 = totalDryStationBagTime, ignored.
         state.update_from_working_status(
@@ -43,7 +43,7 @@ class TestNarwalState:
         )
         assert state.cleaning_time == 120
         assert state.cleaning_area == 12.5
-        assert state.working_status == WorkingStatus.CLEANING
+        assert state.working_status == WorkingStatus.UNKNOWN
         assert state.has_recent_active_working_status
 
     def test_working_status_station_timers_do_not_mark_cleaning(self) -> None:
@@ -186,6 +186,36 @@ class TestNarwalState:
         assert state.is_docked
         assert state.working_status == WorkingStatus.DOCKED
 
+    def test_working_status_decodes_progress_and_remaining_time(self) -> None:
+        """working_status reports progress and remaining time for vacuum attrs."""
+        state = NarwalState()
+
+        state.update_from_working_status(
+            {"1": _float_to_uint32(0.64), "3": 120, "4": 600}
+        )
+
+        assert state.task_progress_percent == 64
+        assert state.cleaning_time == 120
+        assert state.task_elapsed_time == 120
+        assert state.task_remaining_time == 600
+
+    def test_non_cleaning_base_status_clears_stale_task_details(self) -> None:
+        """Progress/current-room fields from the prior clean should not leak."""
+        state = NarwalState()
+        state.task_progress_percent = 72
+        state.task_elapsed_time = 900
+        state.task_remaining_time = 300
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+
+        state.update_from_base_status({"3": {"1": 10, "10": 1}})
+
+        assert state.task_progress_percent is None
+        assert state.task_elapsed_time == 0
+        assert state.task_remaining_time == 0
+        assert state.current_room_id is None
+        assert state.current_room_aux_name == ""
+
     def test_working_status_clears_stale_dock_fields(self) -> None:
         """Fresh task metrics override stale dock indicators."""
         state = NarwalState(working_status=WorkingStatus.DOCKED)
@@ -198,10 +228,7 @@ class TestNarwalState:
 
         assert state.is_cleaning
         assert not state.is_docked
-        assert state.dock_sub_state == 0
-        assert state.dock_activity == 0
-        assert state.dock_field11 == 1
-        assert state.dock_field47 == 2
+        assert state.working_status == WorkingStatus.DOCKED
 
     def test_update_from_base_status_cleaning(self) -> None:
         state = NarwalState()

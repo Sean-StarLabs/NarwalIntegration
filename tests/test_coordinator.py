@@ -492,6 +492,32 @@ class TestCoordinatorResilience:
         assert not await coordinator.async_refresh_dock_status()
         assert seen == [False]
 
+    async def test_action_refresh_preserves_recent_active_working_status(self) -> None:
+        """Robot action gates avoid full base-status refresh while task data is fresh."""
+        coordinator = self._make_coordinator()
+        coordinator.client.state.update_from_working_status({"3": 120})
+        coordinator.client.get_status = AsyncMock(return_value=CommandResponse(data={}))
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert await coordinator.async_refresh_action_status()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=False)
+        coordinator.async_set_updated_data.assert_called_once_with(
+            coordinator.client.state
+        )
+        assert not coordinator._dock_status_refresh_failed
+
+    async def test_action_refresh_requires_dock_payload_when_full_update_needed(self) -> None:
+        """Without active task telemetry, action refresh needs real dock/base status."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_status = AsyncMock(return_value=CommandResponse(data={}))
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert not await coordinator.async_refresh_action_status()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=True)
+        assert coordinator._dock_status_refresh_failed
+
 
 class TestTopicSubscriptionRenewal:
     """The broadcast subscription must be renewed before it lapses (#73).

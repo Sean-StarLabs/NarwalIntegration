@@ -69,7 +69,7 @@ Shipped in v1.0.2 ([#50](https://github.com/sjmotew/NarwalIntegration/pull/50)) 
 - Battery level, cleaning time, firmware version
 - Docked status (binary sensor), charging state (Charging / Fully Charged / Not Charging)
 - Cleaning area — reports real covered area as of v1.0.1 ([#51](https://github.com/sjmotew/NarwalIntegration/pull/51))
-- Current room being cleaned ([#24](https://github.com/sjmotew/NarwalIntegration/pull/24), v1.0.2)
+- Current room and task progress on the vacuum entity during active cleans
 - Last clean result — why the previous task ended ([#53](https://github.com/sjmotew/NarwalIntegration/pull/53), v1.0.2)
 - Dust bag health and detergent remaining ([#52](https://github.com/sjmotew/NarwalIntegration/pull/52), v1.0.2)
 - Station and consumable binary sensors — clean water tank, sewage tank, dust box, dust bag, station bag, error ([#52](https://github.com/sjmotew/NarwalIntegration/pull/52), v1.0.2)
@@ -226,7 +226,7 @@ Home Assistant shows the option when the entity's domain is `vacuum` and it adve
 - **Check the entity is not `unavailable`.** The row is gated on a live state object, so it will not render while the robot is unreachable.
 - Requires **Home Assistant 2026.3+**, when area mapping was introduced.
 
-Room names come from the robot's map — rooms you named in the Narwal app keep those names, and the rest use the shared room-type table corrected in [#48](https://github.com/sjmotew/NarwalIntegration/pull/48). **Name your rooms in the Narwal app before mapping**: the mapping keys on segment *id*, so renaming later is safe, but naming first means your HA areas, the robot's map and `sensor.current_room` all read the same words.
+Room names come from the robot's map — rooms you named in the Narwal app keep those names, and the rest use the shared room-type table corrected in [#48](https://github.com/sjmotew/NarwalIntegration/pull/48). **Name your rooms in the Narwal app before mapping**: the mapping keys on segment *id*, so renaming later is safe, but naming first means your HA areas, the robot's map and the vacuum entity's current-room attribute all read the same words.
 
 `cleaning_area_id` accepts an **ordered list**, so you can clean several rooms in one job and the robot follows the order you picked.
 
@@ -296,7 +296,7 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 | [#73](https://github.com/sjmotew/NarwalIntegration/issues/73) | **v1.0.3** — renews the broadcast subscription before it lapses, so `working_status` and `display_map` keep arriving and the entity stops freezing at `docked` |
 | [#62](https://github.com/sjmotew/NarwalIntegration/pull/62) | Map rendering options as switches — room labels, furniture, furniture labels |
 | [#61](https://github.com/sjmotew/NarwalIntegration/pull/61) | Dock ambient light entity, on models that have one |
-| [#24](https://github.com/sjmotew/NarwalIntegration/pull/24) | `sensor.current_room` — the room being cleaned right now |
+| [#24](https://github.com/sjmotew/NarwalIntegration/pull/24) | Current-room telemetry for the room being cleaned right now |
 | [#53](https://github.com/sjmotew/NarwalIntegration/pull/53) / [#54](https://github.com/sjmotew/NarwalIntegration/pull/54) | Last-clean-result sensor; consumable maintenance and replacement alerts |
 | [#52](https://github.com/sjmotew/NarwalIntegration/pull/52) | `base_status` field audit; station and consumable diagnostics |
 | [#67](https://github.com/sjmotew/NarwalIntegration/pull/67) | Carpet-map camera image; `working_status 7` mapped to remapping |
