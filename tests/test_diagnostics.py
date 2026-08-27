@@ -15,6 +15,8 @@ import tests.ha_stubs
 tests.ha_stubs.install()
 
 from custom_components.narwal.const import (  # noqa: E402
+    CONF_CLOUD_EMAIL,
+    CONF_CLOUD_PASSWORD,
     CONF_DEVICE_ID,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
@@ -118,6 +120,32 @@ class TestRedaction:
         assert result["entry"]["data"][CONF_PRODUCT_KEY] == "QoEsI5qYXO"
         assert result["device"]["product_key"] == "QoEsI5qYXO"
         assert "product_key" not in TO_REDACT
+
+    async def test_cloud_credentials_are_redacted_from_data_and_options(self) -> None:
+        """Opt-in cloud credentials must never appear in downloaded diagnostics."""
+        entry = _make_entry()
+        entry.data.update(
+            {
+                CONF_CLOUD_EMAIL: "data@example.com",
+                CONF_CLOUD_PASSWORD: "data-secret",
+            }
+        )
+        entry.options.update(
+            {
+                CONF_CLOUD_EMAIL: "options@example.com",
+                CONF_CLOUD_PASSWORD: "options-secret",
+            }
+        )
+        _make_entry_with_runtime(entry, _make_state())
+
+        result = await async_get_config_entry_diagnostics(MagicMock(), entry)
+
+        assert result["entry"]["data"][CONF_CLOUD_EMAIL] == REDACTED
+        assert result["entry"]["data"][CONF_CLOUD_PASSWORD] == REDACTED
+        assert result["entry"]["options"][CONF_CLOUD_EMAIL] == REDACTED
+        assert result["entry"]["options"][CONF_CLOUD_PASSWORD] == REDACTED
+        assert "data@example.com" not in repr(result)
+        assert "options-secret" not in repr(result)
 
     def test_device_id_suffix_keeps_only_the_mdns_tail(self) -> None:
         """Enough to match a reporter's logs, not enough to be the identifier."""

@@ -47,7 +47,7 @@ def test_error_gated_on_base_status_seen() -> None:
 
 
 def test_error_clears_when_field_absent() -> None:
-    """A recovered robot omits field 1 entirely (empty repeated) — the fault must clear, not stick."""
+    """A recovered robot omits field 1 entirely; the fault must clear, not stick."""
     fn = _DESCS["error"].value_fn
     s = NarwalState()
     s.update_from_base_status({"1": {"1": 7}})  # fault
