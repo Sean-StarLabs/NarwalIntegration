@@ -444,6 +444,14 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
     return True
 
 
+async def _async_entry_updated(
+    _hass: HomeAssistant,
+    entry: NarwalConfigEntry,
+) -> None:
+    """Apply changed integration options to the loaded coordinator."""
+    entry.runtime_data.apply_configured_clean_defaults()
+
+
 async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bool:
     """Set up Narwal from a config entry."""
     coordinator = NarwalCoordinator(hass, entry)
@@ -458,6 +466,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bo
     _domain_data(hass)[entry.entry_id] = coordinator
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    entry.async_on_unload(entry.add_update_listener(_async_entry_updated))
 
     device_registry = dr.async_get(hass)
     device = device_registry.async_get_device(

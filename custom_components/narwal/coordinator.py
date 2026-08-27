@@ -14,7 +14,27 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, NO_BROADCAST_PRODUCT_KEYS
+from .const import (
+    CONF_DEFAULT_MOP_STRENGTH,
+    CONF_DEFAULT_PASSES,
+    CONF_DEFAULT_ROUTE,
+    CONF_DEFAULT_SUCTION,
+    CONF_DEFAULT_WATER,
+    CONF_DEFAULT_WORK_MODE,
+    DEFAULT_CLEAN_MOP_STRENGTH,
+    DEFAULT_CLEAN_PASSES,
+    DEFAULT_CLEAN_ROUTE,
+    DEFAULT_CLEAN_SUCTION,
+    DEFAULT_CLEAN_WATER,
+    DEFAULT_CLEAN_WORK_MODE,
+    DOMAIN,
+    FAN_SPEED_MAP,
+    MOP_STRENGTH_MAP,
+    NO_BROADCAST_PRODUCT_KEYS,
+    WATER_MAP,
+    WORK_MODE_MAP,
+    fan_speed_list_for,
+)
 from .narwal_client import (
     CleaningRoute,
     CommandResponse,
@@ -95,6 +115,51 @@ class CleanSettings(RoomCleanSettings):
     mop_strength: MopStrengthLevel = MopStrengthLevel.NORMAL
     passes: int = 1
     route: CleaningRoute = CleaningRoute.METICULOUS
+
+
+ROUTE_MAP: dict[str, CleaningRoute] = {
+    "standard": CleaningRoute.STANDARD,
+    "meticulous": CleaningRoute.METICULOUS,
+}
+
+
+def clean_settings_from_config_entry(entry: ConfigEntry) -> CleanSettings:
+    """Return configured default clean settings for a config entry."""
+    raw_options = getattr(entry, "options", {}) or {}
+    options = raw_options if isinstance(raw_options, Mapping) else {}
+    fan_map = {label: FAN_SPEED_MAP[label] for label in fan_speed_list_for(entry.data)}
+    fan = fan_map.get(str(options.get(CONF_DEFAULT_SUCTION, DEFAULT_CLEAN_SUCTION)))
+    if fan is None:
+        fan = fan_map.get(DEFAULT_CLEAN_SUCTION, FanLevel.NORMAL)
+    try:
+        passes = int(options.get(CONF_DEFAULT_PASSES, DEFAULT_CLEAN_PASSES))
+    except (TypeError, ValueError):
+        passes = DEFAULT_CLEAN_PASSES
+    return CleanSettings(
+        work_mode=WORK_MODE_MAP.get(
+            str(options.get(CONF_DEFAULT_WORK_MODE, DEFAULT_CLEAN_WORK_MODE)),
+            WorkMode.VACUUM_AND_MOP,
+        ),
+        fan=fan,
+        water=WATER_MAP.get(
+            str(options.get(CONF_DEFAULT_WATER, DEFAULT_CLEAN_WATER)),
+            MopHumidity.NORMAL,
+        ),
+        mop_strength=MOP_STRENGTH_MAP.get(
+            str(
+                options.get(
+                    CONF_DEFAULT_MOP_STRENGTH,
+                    DEFAULT_CLEAN_MOP_STRENGTH,
+                )
+            ),
+            MopStrengthLevel.NORMAL,
+        ),
+        passes=min(max(passes, 1), 3),
+        route=ROUTE_MAP.get(
+            str(options.get(CONF_DEFAULT_ROUTE, DEFAULT_CLEAN_ROUTE)),
+            CleaningRoute.METICULOUS,
+        ),
+    )
 
 
 def _state_attr_is_true(state: NarwalState, attr: str) -> bool:
@@ -220,6 +285,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             name=DOMAIN,
             update_interval=POLL_INTERVAL,
         )
+        self.config_entry = entry
         product_key = entry.data.get("product_key")
         topic_prefix = f"/{product_key}" if product_key else None
         supports_broadcasts = product_key not in NO_BROADCAST_PRODUCT_KEYS
@@ -230,7 +296,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             topic_prefix=topic_prefix,
             supports_broadcasts=supports_broadcasts,
         )
-        self.clean_settings = CleanSettings()
+        self.clean_settings = clean_settings_from_config_entry(entry)
         self.room_clean_settings: dict[tuple[str | None, int], RoomCleanSettings] = {}
         self.room_clean_settings_customized: dict[tuple[str | None, int], set[str]] = {}
         self.active_clean_work_mode: WorkMode | None = None
@@ -250,6 +316,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     def has_fresh_state(self) -> bool:
         """Return true when the coordinator has not returned stale poll data."""
         return self.last_update_success and not self._dock_status_refresh_failed
+
+    def apply_configured_clean_defaults(self) -> None:
+        """Apply configured clean defaults to pending whole-house settings."""
+        self.clean_settings = clean_settings_from_config_entry(self.config_entry)
+        self.async_update_listeners()
 
     def _mark_dock_status_refresh_failed(self) -> None:
         """Record that dock-control state may be stale."""

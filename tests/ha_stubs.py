@@ -100,6 +100,15 @@ def install() -> None:
 
     ha_ce.ConfigFlow = _ConfigFlow  # type: ignore[attr-defined]
     ha_ce.ConfigFlowResult = dict  # type: ignore[attr-defined]
+
+    class _OptionsFlow:
+        """Stub for OptionsFlow."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+    ha_ce.OptionsFlow = _OptionsFlow  # type: ignore[attr-defined]
+
     class _ConfigEntry:
         """Subscriptable ConfigEntry stub for TypeAlias usage."""
 
@@ -111,7 +120,7 @@ def install() -> None:
     # homeassistant.data_entry_flow
     ha_def = _mod("homeassistant.data_entry_flow", ha)
 
-    class _AbortFlow(Exception):
+    class _AbortFlow(Exception):  # noqa: N818 - mirrors Home Assistant's class name.
         def __init__(self, reason: str) -> None:
             self.reason = reason
             super().__init__(reason)
@@ -224,7 +233,7 @@ def install() -> None:
     class _Segment:
         """Stub for homeassistant.components.vacuum.Segment."""
 
-        def __init__(self, *, id: str, name: str, group: str | None = None) -> None:
+        def __init__(self, *, id: str, name: str, group: str | None = None) -> None:  # noqa: A002 - HA uses id here.
             self.id = id
             self.name = name
             self.group = group

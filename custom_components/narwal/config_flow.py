@@ -7,18 +7,37 @@ import re
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
+from homeassistant.config_entries import ConfigFlow, ConfigFlowResult, OptionsFlow
+from homeassistant.core import callback
 from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
 from homeassistant.helpers.service_info.zeroconf import ZeroconfServiceInfo
 
 from .const import (
+    CONF_DEFAULT_MOP_STRENGTH,
+    CONF_DEFAULT_PASSES,
+    CONF_DEFAULT_ROUTE,
+    CONF_DEFAULT_SUCTION,
+    CONF_DEFAULT_WATER,
+    CONF_DEFAULT_WORK_MODE,
     CONF_DEVICE_ID,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
+    DEFAULT_CLEAN_MOP_STRENGTH,
+    DEFAULT_CLEAN_PASSES,
+    DEFAULT_CLEAN_ROUTE,
+    DEFAULT_CLEAN_SUCTION,
+    DEFAULT_CLEAN_WATER,
+    DEFAULT_CLEAN_WORK_MODE,
     DEFAULT_PORT,
     DOMAIN,
+    MOP_STRENGTH_MAP,
     NARWAL_MODELS,
     NO_BROADCAST_PRODUCT_KEYS,
+    PASSES_MAX,
+    PASSES_MIN,
+    WATER_MAP,
+    WORK_MODE_MAP,
+    fan_speed_list_for,
 )
 from .narwal_client import NarwalClient
 
@@ -40,6 +59,8 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
 )
 
 STEP_DEVICE_ID_DATA_SCHEMA = vol.Schema({vol.Required(CONF_DEVICE_ID): str})
+
+ROUTE_OPTIONS = ("standard", "meticulous")
 
 
 class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -244,4 +265,86 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
                 CONF_PRODUCT_KEY: resolved_key,
                 CONF_MODEL: model_label,
             },
+        )
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        """Return the options flow."""
+        return NarwalOptionsFlow()
+
+
+class NarwalOptionsFlow(OptionsFlow):
+    """Handle Narwal options."""
+
+    async def async_step_init(
+        self,
+        user_input: dict[str, Any] | None = None,
+    ) -> ConfigFlowResult:
+        """Manage Narwal default clean options."""
+        if user_input is not None:
+            options = dict(self.config_entry.options or {})
+            options[CONF_DEFAULT_WORK_MODE] = user_input[CONF_DEFAULT_WORK_MODE]
+            options[CONF_DEFAULT_SUCTION] = user_input[CONF_DEFAULT_SUCTION]
+            options[CONF_DEFAULT_WATER] = user_input[CONF_DEFAULT_WATER]
+            options[CONF_DEFAULT_MOP_STRENGTH] = user_input[
+                CONF_DEFAULT_MOP_STRENGTH
+            ]
+            options[CONF_DEFAULT_PASSES] = user_input[CONF_DEFAULT_PASSES]
+            options[CONF_DEFAULT_ROUTE] = user_input[CONF_DEFAULT_ROUTE]
+            return self.async_create_entry(title="", data=options)
+
+        return self.async_show_form(
+            step_id="init",
+            data_schema=self._options_schema(
+                self.config_entry.data,
+                self.config_entry.options or {},
+            ),
+        )
+
+    @staticmethod
+    def _options_schema(entry_data: dict, options: dict) -> vol.Schema:
+        """Return the options schema."""
+        suction_options = fan_speed_list_for(entry_data)
+        suction_default = options.get(CONF_DEFAULT_SUCTION, DEFAULT_CLEAN_SUCTION)
+        if suction_default not in suction_options:
+            suction_default = DEFAULT_CLEAN_SUCTION
+        if suction_default not in suction_options:
+            suction_default = suction_options[0]
+        return vol.Schema(
+            {
+                vol.Required(
+                    CONF_DEFAULT_WORK_MODE,
+                    default=options.get(
+                        CONF_DEFAULT_WORK_MODE,
+                        DEFAULT_CLEAN_WORK_MODE,
+                    ),
+                ): vol.In(tuple(WORK_MODE_MAP)),
+                vol.Required(
+                    CONF_DEFAULT_SUCTION,
+                    default=suction_default,
+                ): vol.In(tuple(suction_options)),
+                vol.Required(
+                    CONF_DEFAULT_WATER,
+                    default=options.get(CONF_DEFAULT_WATER, DEFAULT_CLEAN_WATER),
+                ): vol.In(tuple(WATER_MAP)),
+                vol.Required(
+                    CONF_DEFAULT_MOP_STRENGTH,
+                    default=options.get(
+                        CONF_DEFAULT_MOP_STRENGTH,
+                        DEFAULT_CLEAN_MOP_STRENGTH,
+                    ),
+                ): vol.In(tuple(MOP_STRENGTH_MAP)),
+                vol.Required(
+                    CONF_DEFAULT_PASSES,
+                    default=options.get(CONF_DEFAULT_PASSES, DEFAULT_CLEAN_PASSES),
+                ): vol.All(
+                    vol.Coerce(int),
+                    vol.Range(min=PASSES_MIN, max=PASSES_MAX),
+                ),
+                vol.Required(
+                    CONF_DEFAULT_ROUTE,
+                    default=options.get(CONF_DEFAULT_ROUTE, DEFAULT_CLEAN_ROUTE),
+                ): vol.In(ROUTE_OPTIONS),
+            }
         )

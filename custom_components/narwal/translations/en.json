@@ -27,6 +27,22 @@
       "already_configured": "This vacuum is already configured."
     }
   },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Narwal options",
+        "description": "Choose the default cleaning profile used for new or reset room settings.",
+        "data": {
+          "default_work_mode": "Default clean mode",
+          "default_suction": "Default suction",
+          "default_water": "Default mopping humidity",
+          "default_mop_strength": "Default mop strength",
+          "default_passes": "Default passes",
+          "default_route": "Default route"
+        }
+      }
+    }
+  },
   "entity": {
     "vacuum": {
       "vacuum": {

@@ -17,7 +17,15 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.const import NO_BROADCAST_PRODUCT_KEYS  # noqa: E402
+from custom_components.narwal.const import (  # noqa: E402
+    CONF_DEFAULT_MOP_STRENGTH,
+    CONF_DEFAULT_PASSES,
+    CONF_DEFAULT_ROUTE,
+    CONF_DEFAULT_SUCTION,
+    CONF_DEFAULT_WATER,
+    CONF_DEFAULT_WORK_MODE,
+    NO_BROADCAST_PRODUCT_KEYS,
+)
 from custom_components.narwal.coordinator import (  # noqa: E402
     TOPIC_RESUBSCRIBE_AFTER,
     TOPIC_SUBSCRIPTION_TTL,
@@ -25,13 +33,16 @@ from custom_components.narwal.coordinator import (  # noqa: E402
     NarwalCoordinator,
     can_edit_pending_clean_settings,
     can_start_cleaning,
+    clean_settings_from_config_entry,
     is_live_clean_setting_available,
 )  # noqa: E402
 from custom_components.narwal.narwal_client import (  # noqa: E402
+    CleaningRoute,
     CommandResponse,
     CommandResult,
     FanLevel,
     MopHumidity,
+    MopStrengthLevel,
     NarwalConnectionError,
     NarwalState,
     RoomCleanSettings,
@@ -89,6 +100,82 @@ def test_room_profiles_only_override_customized_fields() -> None:
 
     assert merged.fan == FanLevel.STRONG
     assert merged.water == MopHumidity.DRY
+
+
+def test_clean_settings_use_configured_defaults() -> None:
+    """Coordinator defaults come from config-entry options before entity restore."""
+    entry = MagicMock()
+    entry.data = {"product_key": "QoEsI5qYXO"}
+    entry.options = {
+        CONF_DEFAULT_WORK_MODE: "mop",
+        CONF_DEFAULT_SUCTION: "Strong",
+        CONF_DEFAULT_WATER: "wet",
+        CONF_DEFAULT_MOP_STRENGTH: "high",
+        CONF_DEFAULT_PASSES: 3,
+        CONF_DEFAULT_ROUTE: "standard",
+    }
+
+    settings = clean_settings_from_config_entry(entry)
+
+    assert settings.work_mode == WorkMode.MOP
+    assert settings.fan == FanLevel.STRONG
+    assert settings.water == MopHumidity.WET
+    assert settings.mop_strength == MopStrengthLevel.HIGH
+    assert settings.passes == 3
+    assert settings.route == CleaningRoute.STANDARD
+
+
+def test_apply_configured_clean_defaults_updates_pending_settings() -> None:
+    """Changed options update the pending whole-house settings."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.async_update_listeners = MagicMock()
+    coordinator.clean_settings = CleanSettings()
+    coordinator.config_entry = MagicMock()
+    coordinator.config_entry.data = {"product_key": "QoEsI5qYXO"}
+    coordinator.config_entry.options = {
+        CONF_DEFAULT_WORK_MODE: "mop",
+        CONF_DEFAULT_SUCTION: "Strong",
+        CONF_DEFAULT_WATER: "wet",
+        CONF_DEFAULT_MOP_STRENGTH: "high",
+        CONF_DEFAULT_PASSES: 3,
+        CONF_DEFAULT_ROUTE: "standard",
+    }
+
+    coordinator.apply_configured_clean_defaults()
+
+    assert coordinator.clean_settings.work_mode == WorkMode.MOP
+    assert coordinator.clean_settings.fan == FanLevel.STRONG
+    assert coordinator.clean_settings.water == MopHumidity.WET
+    assert coordinator.clean_settings.mop_strength == MopStrengthLevel.HIGH
+    assert coordinator.clean_settings.passes == 3
+    assert coordinator.clean_settings.route == CleaningRoute.STANDARD
+    coordinator.async_update_listeners.assert_called_once()
+
+
+def test_room_profile_reset_falls_back_to_configured_defaults() -> None:
+    """Clearing a room override returns it to the configured robot defaults."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.clean_settings = CleanSettings(
+        work_mode=WorkMode.MOP,
+        fan=FanLevel.DEEP,
+        water=MopHumidity.WET,
+        mop_strength=MopStrengthLevel.HIGH,
+        passes=3,
+        route=CleaningRoute.STANDARD,
+    )
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+
+    coordinator.set_room_clean_setting(4, "water", MopHumidity.DRY)
+    coordinator.clear_room_clean_setting(4, "water")
+
+    settings = coordinator.room_clean_settings_for_rooms([4])[4]
+    assert settings.water == MopHumidity.WET
+    assert settings.fan == FanLevel.DEEP
+    assert settings.passes == 3
 
 
 def test_room_profile_override_can_be_cleared() -> None:

@@ -34,6 +34,19 @@ NARWAL_MODELS: dict[str, str] = {
 CONF_DEVICE_ID = "device_id"
 CONF_MODEL = "model"
 CONF_PRODUCT_KEY = "product_key"
+CONF_DEFAULT_WORK_MODE = "default_work_mode"
+CONF_DEFAULT_SUCTION = "default_suction"
+CONF_DEFAULT_WATER = "default_water"
+CONF_DEFAULT_MOP_STRENGTH = "default_mop_strength"
+CONF_DEFAULT_PASSES = "default_passes"
+CONF_DEFAULT_ROUTE = "default_route"
+
+DEFAULT_CLEAN_WORK_MODE = "vacuum_and_mop"
+DEFAULT_CLEAN_SUCTION = "Standard"
+DEFAULT_CLEAN_WATER = "normal"
+DEFAULT_CLEAN_MOP_STRENGTH = "normal"
+DEFAULT_CLEAN_PASSES = 1
+DEFAULT_CLEAN_ROUTE = "meticulous"
 
 NO_BROADCAST_PRODUCT_KEYS = {"hEA7OEshlx"}
 

@@ -16,8 +16,17 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.config_flow import NarwalConfigFlow  # noqa: E402
+from custom_components.narwal.config_flow import (  # noqa: E402
+    NarwalConfigFlow,
+    NarwalOptionsFlow,
+)
 from custom_components.narwal.const import (  # noqa: E402
+    CONF_DEFAULT_MOP_STRENGTH,
+    CONF_DEFAULT_PASSES,
+    CONF_DEFAULT_ROUTE,
+    CONF_DEFAULT_SUCTION,
+    CONF_DEFAULT_WATER,
+    CONF_DEFAULT_WORK_MODE,
     NARWAL_MODELS,
     NO_BROADCAST_PRODUCT_KEYS,
 )
@@ -130,15 +139,14 @@ class TestNarwalConfigFlow:
         with patch(
             "custom_components.narwal.config_flow.NarwalClient",
             return_value=mock_client,
-        ):
-            with pytest.raises(AbortFlow, match="already_configured"):
-                await flow.async_step_user(
-                    user_input={
-                        "host": "10.0.0.100",
-                        "port": 9002,
-                        "model": "Narwal Flow",
-                    },
-                )
+        ), pytest.raises(AbortFlow, match="already_configured"):
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.100",
+                    "port": 9002,
+                    "model": "Narwal Flow",
+                },
+            )
 
         flow.async_set_unique_id.assert_awaited_once_with("duplicate_device")
         mock_client.disconnect.assert_awaited_once()
@@ -257,6 +265,56 @@ class TestNarwalConfigFlow:
         call_kwargs = flow.async_show_form.call_args.kwargs
         assert call_kwargs["step_id"] == "device_id"
         mock_client.disconnect.assert_awaited_once()
+
+
+class TestNarwalOptionsFlow:
+    """Tests for Narwal option persistence."""
+
+    def _make_flow(self, options: dict | None = None) -> NarwalOptionsFlow:
+        """Create an options flow with stubbed base-class methods."""
+        flow = NarwalOptionsFlow.__new__(NarwalOptionsFlow)
+        flow.async_show_form = MagicMock(return_value={"type": "form"})
+        flow.async_create_entry = MagicMock(return_value={"type": "create_entry"})
+        flow.config_entry = MagicMock()
+        flow.config_entry.data = {
+            "device_id": "test_device",
+            "product_key": "QoEsI5qYXO",
+        }
+        flow.config_entry.options = options or {}
+        return flow
+
+    async def test_show_form_when_no_input(self) -> None:
+        """async_step_init with no input returns the options form."""
+        flow = self._make_flow()
+
+        await flow.async_step_init()
+
+        flow.async_show_form.assert_called_once()
+        assert flow.async_show_form.call_args.kwargs["step_id"] == "init"
+
+    async def test_default_clean_options_are_stored(self) -> None:
+        """The options flow stores the default robot clean profile."""
+        flow = self._make_flow(options={"show_room_labels": True})
+
+        await flow.async_step_init(
+            {
+                CONF_DEFAULT_WORK_MODE: "vacuum",
+                CONF_DEFAULT_SUCTION: "Strong",
+                CONF_DEFAULT_WATER: "wet",
+                CONF_DEFAULT_MOP_STRENGTH: "high",
+                CONF_DEFAULT_PASSES: 3,
+                CONF_DEFAULT_ROUTE: "standard",
+            }
+        )
+
+        data = flow.async_create_entry.call_args.kwargs["data"]
+        assert data["show_room_labels"] is True
+        assert data[CONF_DEFAULT_WORK_MODE] == "vacuum"
+        assert data[CONF_DEFAULT_SUCTION] == "Strong"
+        assert data[CONF_DEFAULT_WATER] == "wet"
+        assert data[CONF_DEFAULT_MOP_STRENGTH] == "high"
+        assert data[CONF_DEFAULT_PASSES] == 3
+        assert data[CONF_DEFAULT_ROUTE] == "standard"
 
 
 class TestDiscovery:
