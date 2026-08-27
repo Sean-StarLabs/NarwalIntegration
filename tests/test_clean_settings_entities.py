@@ -165,8 +165,9 @@ def _state(
     state.has_recent_active_working_status = recent
     state.is_returning = returning
     state.is_cleaning = working_status == WorkingStatus.CLEANING and not returning
-    state.is_charging_to_resume = False
     state.is_station_active = False
+    state.has_unmapped_active_dock_task = False
+    state.assumed_active_dock_task = None
     state.map_data = None
     return state
 
@@ -231,8 +232,8 @@ class TestNarwalSelect:
         }
 
     async def test_water_applies_live_while_cleaning(self) -> None:
-        coord = _coordinator(state=MagicMock(is_cleaning=True))
-        coord.active_clean_work_mode = WorkMode.VACUUM_AND_MOP
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.active_clean_work_mode = WorkMode.MOP
         coord.client.set_mop_humidity = AsyncMock(
             return_value=CommandResponse(result_code=CommandResult.SUCCESS)
         )
@@ -272,8 +273,8 @@ class TestNarwalSelect:
         assert water.current_option == "Wet"
 
     async def test_water_accepts_live_accepted_response(self) -> None:
-        coord = _coordinator(state=MagicMock(is_cleaning=True))
-        coord.active_clean_work_mode = WorkMode.VACUUM_AND_MOP
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.active_clean_work_mode = WorkMode.MOP
         coord.client.set_mop_humidity = AsyncMock(
             return_value=CommandResponse(result_code=0)
         )
@@ -315,14 +316,12 @@ class TestNarwalSelect:
 
         coord.client.set_mop_humidity.assert_not_awaited()
 
-    async def test_live_water_hides_unknown_active_mode(self) -> None:
-        """A reload cannot expose water before the accepted task mode is known."""
+    async def test_live_water_rejects_unknown_active_mode(self) -> None:
+        """Unknown active mode must not expose a cross-mode water command."""
         coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         coord.clean_settings.work_mode = WorkMode.MOP
         coord.active_clean_work_mode = None
-        coord.client.set_mop_humidity = AsyncMock(
-            return_value=CommandResponse(result_code=0)
-        )
+        coord.client.set_mop_humidity = AsyncMock()
         sel = NarwalSelect(coord, _DESCS["water"])
 
         assert not sel.available
@@ -350,8 +349,7 @@ class TestNarwalSelect:
         coord.client.set_mop_humidity.assert_awaited_once_with(MopHumidity.WET)
 
     async def test_rejected_live_water_change_does_not_update_settings(self) -> None:
-        coord = _coordinator(state=MagicMock(is_cleaning=True))
-        coord.active_clean_work_mode = WorkMode.VACUUM_AND_MOP
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         coord.clean_settings.water = MopHumidity.NORMAL
         coord.client.set_mop_humidity = AsyncMock(
             return_value=CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
@@ -368,7 +366,7 @@ class TestNarwalSelect:
         assert coord.clean_settings.water == MopHumidity.NORMAL
 
     async def test_no_live_setter_when_not_cleaning(self) -> None:
-        coord = _coordinator(state=MagicMock(is_cleaning=False))
+        coord = _coordinator(state=_state())
         coord.client.set_mop_humidity = AsyncMock()
         sel = NarwalSelect(coord, _DESCS["water"])
         await sel.async_select_option("dry")
@@ -522,13 +520,11 @@ class TestLegacyNarwalSettingSelect:
 
         coord.client.set_fan_speed.assert_not_awaited()
 
-    async def test_legacy_live_suction_hides_unknown_active_mode(self) -> None:
+    async def test_legacy_live_suction_rejects_unknown_active_mode(self) -> None:
         coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         coord.clean_settings.work_mode = WorkMode.VACUUM
         coord.active_clean_work_mode = None
-        coord.client.set_fan_speed = AsyncMock(
-            return_value=CommandResponse(result_code=0)
-        )
+        coord.client.set_fan_speed = AsyncMock()
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
 
         assert not sel.available
@@ -610,6 +606,22 @@ class TestLegacyNarwalSettingSelect:
         get_last_state.assert_not_awaited()
         assert coord.clean_settings.fan == FanLevel.SUPER
 
+    async def test_four_tier_suction_extra_restore_clamps_level_five(self) -> None:
+        coord = _coordinator(
+            settings=CleanSettings(fan=FanLevel.NORMAL),
+            product_key="qV6BujoYLz",
+        )
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+        extra = SettingRestoreData(value=int(FanLevel.SUPER))
+
+        with patch.object(
+            sel, "async_get_last_extra_data", AsyncMock(return_value=extra)
+        ):
+            await sel.async_added_to_hass()
+
+        assert coord.clean_settings.fan == FanLevel.DEEP
+        assert sel.current_option == "Super Powerful"
+
     async def test_unversioned_suction_restore_keeps_v105_meaning(self) -> None:
         coord = _coordinator(settings=CleanSettings(fan=FanLevel.NORMAL))
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
@@ -637,6 +649,23 @@ class TestLegacyNarwalSettingSelect:
             await sel.async_added_to_hass()
 
         assert coord.clean_settings.fan == FanLevel.DEEP
+
+    async def test_four_tier_unversioned_ultra_clamps_level_five(self) -> None:
+        coord = _coordinator(
+            settings=CleanSettings(fan=FanLevel.NORMAL),
+            product_key="qV6BujoYLz",
+        )
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+
+        with patch.object(
+            sel,
+            "async_get_last_state",
+            AsyncMock(return_value=MagicMock(state="Ultra")),
+        ):
+            await sel.async_added_to_hass()
+
+        assert coord.clean_settings.fan == FanLevel.DEEP
+        assert sel.current_option == "Super Powerful"
 
     async def test_select_option_refreshes_related_setting_entities(self) -> None:
         coord = _coordinator(state=_state())

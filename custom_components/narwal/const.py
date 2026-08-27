@@ -12,7 +12,6 @@ from .narwal_client import (
 
 DOMAIN = "narwal"
 DEFAULT_PORT = 9002
-
 MANUFACTURER = "Narwal"
 MODEL = "Flow (AX12)"
 
@@ -159,39 +158,20 @@ _FAN_SPEED_CANONICAL: dict[str, FanLevel] = {
 
 FAN_SPEED_LIST: list[str] = list(_FAN_SPEED_CANONICAL)
 
-# Models whose app exposes only four suction tiers: FanLevel.SUPER (5) is unreachable
-# there, and the live clean/set_fan_level enum (SweepFanLevel) has no SUPER at all, so
-# offering "Ultra" would silently apply Strong. AX26 confirmed by app captures in #70 —
-# its top tier ("Super powerful" / "super puissant") sends CleanParam tag 2 = 4 (DEEP).
-NO_ULTRA_FAN_PRODUCT_KEYS: frozenset[str] = frozenset({"qV6BujoYLz"})
+# Models whose app exposes only four suction tiers: FanLevel.SUPER (5) is
+# unreachable there, and the live clean/set_fan_level enum has no SUPER at all.
+# AX26 confirmed by app captures in #70: its top tier sends CleanParam tag 2 =
+# 4 (DEEP), exposed as "Super Powerful" for those models.
+NO_LEVEL_5_FAN_PRODUCT_KEYS: frozenset[str] = frozenset({"qV6BujoYLz"})
 
+_FAN_SPEED_NO_LEVEL_5: dict[str, FanLevel] = {
+    "Quiet": FanLevel.MUTE,
+    "Standard": FanLevel.NORMAL,
+    "Strong": FanLevel.STRONG,
+    "Super Powerful": FanLevel.DEEP,
+}
 
-def fan_speed_list_for(data: dict) -> list[str]:
-    """fan_speed options for this configured model — no "Ultra" where 5 is unreachable."""
-    if data.get(CONF_PRODUCT_KEY) in NO_ULTRA_FAN_PRODUCT_KEYS:
-        return [
-            label
-            for label, level in _FAN_SPEED_CANONICAL.items()
-            if level is not FanLevel.SUPER
-        ]
-    return FAN_SPEED_LIST
-
-
-def normalize_fan_level_for_model(data: dict, fan: FanLevel) -> FanLevel:
-    """Return a persisted fan level supported by the configured model."""
-    if (
-        fan == FanLevel.SUPER
-        and data.get(CONF_PRODUCT_KEY) in NO_ULTRA_FAN_PRODUCT_KEYS
-    ):
-        return FanLevel.DEEP
-    return fan
-
-
-# FAN_SPEED_MAP also accepts the "… powerful" labels shipped through v1.0.3 and the
-# short "Super" label used by this stack, and the original lowercase fan_speed
-# values (quiet/normal/strong/max) so existing automations keep working; these
-# aliases are not offered in FAN_SPEED_LIST.
-FAN_SPEED_MAP: dict[str, FanLevel] = _FAN_SPEED_CANONICAL | {
+_FAN_SPEED_ALIASES: dict[str, FanLevel] = {
     "Super": FanLevel.DEEP,
     "Super powerful": FanLevel.DEEP,
     "Ultra powerful": FanLevel.SUPER,
@@ -219,6 +199,60 @@ UNVERSIONED_FAN_SPEED_MAP: dict[str, FanLevel] = {
     "max": FanLevel.SUPER,
 }
 
+_FAN_SPEED_NO_LEVEL_5_ALIASES: dict[str, FanLevel] = {
+    "Super": FanLevel.DEEP,
+    "Super powerful": FanLevel.DEEP,
+    "quiet": FanLevel.MUTE,
+    "normal": FanLevel.NORMAL,
+    "strong": FanLevel.STRONG,
+    "max": FanLevel.DEEP,
+}
+
+
+def fan_speed_list_for(data: dict) -> list[str]:
+    """Return visible fan_speed options for this configured model."""
+    return list(fan_speed_map_for(data, include_aliases=False))
+
+
+def fan_speed_map_for(
+    data: dict,
+    *,
+    include_aliases: bool = True,
+) -> dict[str, FanLevel]:
+    """Return visible and compatibility fan_speed labels for this model."""
+    if data.get(CONF_PRODUCT_KEY) in NO_LEVEL_5_FAN_PRODUCT_KEYS:
+        return _FAN_SPEED_NO_LEVEL_5 | (
+            _FAN_SPEED_NO_LEVEL_5_ALIASES if include_aliases else {}
+        )
+    return _FAN_SPEED_CANONICAL | (_FAN_SPEED_ALIASES if include_aliases else {})
+
+
+def fan_speed_label_map_for(data: dict) -> dict[FanLevel, str]:
+    """Return FanLevel -> visible fan_speed label for this model."""
+    return {
+        level: label
+        for label, level in fan_speed_map_for(data, include_aliases=False).items()
+    }
+
+
+def normalize_fan_level_for_model(data: dict, fan: FanLevel) -> FanLevel:
+    """Return a persisted fan level supported by the configured model."""
+    if (
+        fan == FanLevel.SUPER
+        and data.get(CONF_PRODUCT_KEY) in NO_LEVEL_5_FAN_PRODUCT_KEYS
+    ):
+        return FanLevel.DEEP
+    return fan
+
+
+# FAN_SPEED_MAP also accepts the short "Super" label shipped through this stack
+# and v1.0.3's "… powerful" labels, plus the original lowercase fan_speed values
+# (quiet/normal/strong/max) so existing automations keep working; these aliases
+# are not offered in FAN_SPEED_LIST.
+FAN_SPEED_MAP: dict[str, FanLevel] = _FAN_SPEED_CANONICAL | _FAN_SPEED_ALIASES
+
+# Backwards-compatible name for existing imports/tests.
+NO_ULTRA_FAN_PRODUCT_KEYS = NO_LEVEL_5_FAN_PRODUCT_KEYS
 # base_status field 15 (terminateReason) value → HA option key. From the decoded
 # TaskResult enum (re/ENUMS.md). Live-confirmed: 1 = NORMAL_END.
 TASK_RESULT_OPTIONS: dict[int, str] = {

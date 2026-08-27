@@ -64,6 +64,7 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
     """Handle a config flow for Narwal vacuum."""
 
     VERSION = 2
+    MINOR_VERSION = 2
 
     # Host pre-filled when zeroconf or DHCP finds the robot before the user
     # starts the flow. Class-level default: the flow object is also constructed

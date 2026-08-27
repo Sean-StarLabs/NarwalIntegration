@@ -89,10 +89,19 @@ Current verified policy should be conservative:
 
 - Do not allow dock-to-dock parallel starts unless hardware testing proves the
   exact combination.
-- Allow robot start during `dry_dock_bag` only when there is typed live evidence
-  that the active task is dock-bag drying.
-- Block robot starts for emptying, washing, mop drying, dust-bin drying, and
-  unmapped station activity.
+- Treat robot Start/Clean Area as an intent. Send it directly during typed mop,
+  dust-bin, or dock-bag drying: live Flow 2 tests show that the robot ends the
+  first two itself and allows dock-bag drying to continue after departure.
+- Stop a single typed emptying or washing task, refresh, then send the robot
+  command. A wash stop may transition into mop drying, which is safe to hand off
+  to the clean command.
+- Keep mixed emptying/washing plus drying states fail-closed because generic
+  force-end cannot identify one task safely in that state.
+- For multi-target room-clean service calls, reject dock-stop preparation
+  instead of partially cancelling maintenance on one target before another
+  target fails.
+- Block robot starts for ambiguous mixed station activity, unmapped station
+  activity, active robot work, faults, and stale status.
 - Keep robot `stop` available during a dock-side phase that belongs to an
   active clean.
 - Do not infer charge-to-resume from dock maintenance.
