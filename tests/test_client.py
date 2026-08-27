@@ -17,9 +17,9 @@ from narwal_client.const import (
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_BASE_STATUS,
+    TOPIC_CMD_GET_DEBUG_IMAGE,
     TOPIC_CMD_GET_DEVICE_INFO,
     TOPIC_CMD_GET_MAP,
-    TOPIC_CMD_PLAN_START,
     TOPIC_CMD_WASH_MOP,
     AmbientLightCtrlType,
     CleaningRoute,
@@ -105,6 +105,46 @@ class TestNarwalClientInit:
         assert b"map/display_map" in payload
         assert b"status/point_navi_plan_traj" not in payload
         assert b"developer/planning_debug_info" not in payload
+
+    @pytest.mark.asyncio
+    async def test_get_robot_debug_image_uses_whole_map_carpet_images(self) -> None:
+        """Use whole-map carpet debug PNGs, not room planning overlays."""
+        client = NarwalClient("10.0.0.1")
+        planning_png = b"planning"
+        initial_png = b"initial"
+        global_png = b"global"
+        response = CommandResponse(
+            result_code=CommandResult.SUCCESS,
+            data={
+                "1": [
+                    {"1": "UpdateRoom1_PlanningCarpet", "2": planning_png},
+                    {"1": "InitCarpet", "2": initial_png},
+                    {"1": "GlobalCarpet", "2": global_png},
+                ]
+            },
+        )
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = response
+            result = await client.get_robot_debug_image()
+
+        assert result == global_png
+        mock_send.assert_awaited_once_with(TOPIC_CMD_GET_DEBUG_IMAGE, timeout=15.0)
+
+    @pytest.mark.asyncio
+    async def test_get_robot_debug_image_ignores_room_planning_images(self) -> None:
+        """Planning debug images are not returned as carpet masks."""
+        client = NarwalClient("10.0.0.1")
+        response = CommandResponse(
+            result_code=CommandResult.SUCCESS,
+            data={"1": [{"1": "UpdateRoom1_PlanningCarpet", "2": b"planning"}]},
+        )
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_send.return_value = response
+            result = await client.get_robot_debug_image()
+
+        assert result is None
 
     @pytest.mark.asyncio
     async def test_display_map_trajectory_updates_visual_data_only(self) -> None:

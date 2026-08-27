@@ -27,6 +27,7 @@ def _camera(state: NarwalState) -> NarwalMapCamera:
     camera = object.__new__(NarwalMapCamera)
     camera.coordinator = MagicMock()
     camera.coordinator.client.state = state
+    camera.coordinator.client.get_robot_debug_image = AsyncMock(return_value=None)
     camera.coordinator.config_entry = MagicMock()
     camera.coordinator.config_entry.options = {}
     camera.hass = MagicMock()
@@ -41,8 +42,12 @@ def _camera(state: NarwalState) -> NarwalMapCamera:
     camera._async_render = MagicMock(return_value="render-task")
     camera._base_map_image = None
     camera._base_map_ts = 0
-    camera._base_map_options_key = (True, True, True)
+    camera._base_map_options_key = (True, False, False, ((), ()))
     camera._room_label_points = []
+    camera._carpet_map_image = None
+    camera._carpet_map_signature = ()
+    camera._base_carpet_map_signature = ()
+    camera._carpet_map_last_fetch = 0.0
     return camera
 
 
@@ -178,7 +183,7 @@ def test_handle_update_replaces_pending_render_when_state_returns_to_cache() -> 
     camera = _camera(state)
     cached_key = (
         123,
-        (True, False, False),
+        (True, False, False, ((), ())),
         (0, 1.0),
         4.0,
         6.0,

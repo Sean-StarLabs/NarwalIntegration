@@ -1862,32 +1862,34 @@ class NarwalClient:
         the robot is mapping/cleaning; returns None when idle or unavailable.
 
         Response shape: field 1 = repeated {1: filename, 2: png_bytes}. Returns the
-        most recent whole-map ("GlobalCarpet") PNG if present, else the last image
-        in the batch, else None.
+        most recent whole-map ("GlobalCarpet") PNG if present, else the initial
+        whole-map ("InitCarpet") PNG, else None. Room planning debug PNGs are
+        deliberately ignored because they are not carpet masks for the whole map.
         """
         try:
             resp = await self.send_command(TOPIC_CMD_GET_DEBUG_IMAGE, timeout=15.0)
         except Exception:
-            _LOGGER.warning("get_robot_debug_image command failed")
+            _LOGGER.debug("get_robot_debug_image command failed", exc_info=True)
             return None
         entries = resp.data.get("1")
         if isinstance(entries, dict):
             entries = [entries]
         if not isinstance(entries, list):
             return None
-        best: bytes | None = None
-        last: bytes | None = None
+        global_carpet: bytes | None = None
+        initial_carpet: bytes | None = None
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
             img = entry.get("2")
             if not isinstance(img, (bytes, bytearray)):
                 continue
-            last = bytes(img)
             name = entry.get("1")
             if isinstance(name, str) and "GlobalCarpet" in name:
-                best = bytes(img)  # prefer the most recent whole-map carpet overlay
-        return best or last
+                global_carpet = bytes(img)
+            elif isinstance(name, str) and "InitCarpet" in name:
+                initial_carpet = bytes(img)
+        return global_carpet or initial_carpet
 
     async def set_led(self, on: bool) -> None:
         """Turn the camera LED fill light on or off.

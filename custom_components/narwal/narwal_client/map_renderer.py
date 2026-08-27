@@ -25,31 +25,75 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-# Room color palette (RGB) — up to 22 rooms
+# Muted room tint palette (RGB). These are blended lightly into material
+# colours so neighbouring rooms remain distinguishable without app-like neon.
 ROOM_COLORS: list[tuple[int, int, int]] = [
-    (100, 149, 237),  # 1 - cornflower blue
-    (144, 238, 144),  # 2 - light green
-    (255, 182, 193),  # 3 - light pink
-    (255, 218, 185),  # 4 - peach
-    (221, 160, 221),  # 5 - plum
-    (176, 224, 230),  # 6 - powder blue
-    (255, 255, 150),  # 7 - light yellow
-    (188, 143, 143),  # 8 - rosy brown
-    (152, 251, 152),  # 9 - pale green
-    (135, 206, 250),  # 10 - light sky blue
-    (240, 128, 128),  # 11 - light coral
-    (216, 191, 216),  # 12 - thistle
-    (250, 250, 210),  # 13 - light goldenrod
-    (173, 216, 230),  # 14 - light blue
-    (244, 164, 96),   # 15 - sandy brown
-    (245, 222, 179),  # 16 - wheat
-    (127, 255, 212),  # 17 - aquamarine
-    (255, 160, 122),  # 18 - light salmon
-    (186, 218, 160),  # 19 - light green 2
-    (255, 228, 196),  # 20 - bisque
-    (200, 162, 200),  # 21 - light purple
-    (174, 198, 207),  # 22 - pastel blue
+    (142, 156, 166),  # blue grey
+    (150, 161, 145),  # sage
+    (166, 151, 144),  # clay
+    (166, 158, 140),  # muted oak
+    (150, 143, 160),  # mauve grey
+    (138, 158, 160),  # slate aqua
+    (170, 166, 140),  # straw grey
+    (158, 143, 136),  # warm grey
+    (142, 162, 150),  # green grey
+    (137, 151, 163),  # cool slate
+    (166, 142, 142),  # brick grey
+    (155, 147, 159),  # thistle grey
+    (171, 165, 146),  # limestone
+    (150, 160, 164),  # pale slate
+    (169, 149, 128),  # warm timber
+    (166, 158, 146),  # wheat grey
+    (137, 160, 154),  # desaturated teal
+    (170, 146, 132),  # salmon grey
+    (151, 166, 143),  # moss grey
+    (171, 159, 146),  # bisque grey
+    (157, 145, 157),  # purple grey
+    (146, 158, 164),  # pastel slate
 ]
+
+FLOOR_MATERIAL_COLORS: dict[str, tuple[int, int, int]] = {
+    "timber": (178, 169, 152),
+    "tile": (186, 191, 190),
+    "carpet": (105, 107, 108),
+    "concrete": (138, 145, 146),
+    "default": (158, 161, 158),
+}
+FLOOR_MATERIAL_ALIASES: dict[str, str] = {
+    "wood": "timber",
+    "hardwood": "timber",
+    "laminate": "timber",
+    "floorboard": "timber",
+    "floorboards": "timber",
+    "tiles": "tile",
+    "ceramic": "tile",
+    "cement": "concrete",
+}
+
+ROOM_TYPE_MATERIALS: dict[int, str] = {
+    1: "timber",  # Master bedroom
+    2: "timber",  # Secondary bedroom
+    3: "timber",  # Living room
+    4: "timber",  # Kitchen
+    5: "tile",  # Bathroom
+    6: "tile",  # Toilet
+    7: "concrete",  # Balcony
+    8: "timber",  # Dining room
+    9: "timber",  # Closet
+    10: "timber",  # Corridor
+    11: "timber",  # Study
+    12: "timber",  # Kids' room
+    13: "timber",  # Entertainment room
+    14: "timber",  # Storage room
+    15: "timber",  # Others
+}
+
+ROOM_NAME_MATERIAL_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("bath", "shower", "toilet", "wc", "ensuite", "washroom"), "tile"),
+    (("kitchen", "dining", "lounge", "living", "hallway"), "timber"),
+    (("garage", "balcony", "patio"), "concrete"),
+    (("utility", "laundry"), "tile"),
+)
 
 # Obstacle/furniture annotation colors by catalog from APK map_furniture.json
 OBSTACLE_COLORS: dict[int, tuple[int, int, int]] = {
@@ -104,11 +148,11 @@ OBSTACLE_COLOR_DEFAULT = (200, 200, 200)
 
 # Special pixel colors
 COLOR_UNKNOWN = (0, 0, 0, 0)         # outside map / unmapped, transparent
-COLOR_UNASSIGNED_FLOOR = (200, 200, 200)  # floor not assigned to a room
-COLOR_UNASSIGNED_OBSTACLE = (80, 80, 80)  # obstacle not in a room
-COLOR_FALLBACK = (180, 180, 180)     # unknown room ID
-MAP_RENDER_SCALE = 3
-ROOM_LABEL_FONT_SCALE = 10
+COLOR_UNASSIGNED_FLOOR = (142, 141, 133)  # floor not assigned to a room
+COLOR_UNASSIGNED_OBSTACLE = (112, 111, 104)  # obstacle not in a room
+COLOR_FALLBACK = (162, 164, 160)     # unknown room ID
+MAP_RENDER_SCALE = 4
+ROOM_LABEL_FONT_SCALE = 9
 OBSTACLE_LABEL_FONT_SCALE = 6
 FONT_PATHS = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-SemiBold.ttf",
@@ -122,6 +166,486 @@ def _opaque(color: tuple[int, int, int]) -> tuple[int, int, int, int]:
     return (*color, 255)
 
 
+def _paint_solid_cell(
+    px,
+    left: int,
+    top: int,
+    scale: int,
+    color: tuple[int, int, int],
+) -> None:
+    """Paint one scaled map cell with a solid colour."""
+    rgba = _opaque(color)
+    for sy in range(scale):
+        for sx in range(scale):
+            px[left + sx, top + sy] = rgba
+
+
+def _paint_room_cell(
+    px,
+    left: int,
+    top: int,
+    scale: int,
+    room_id: int,
+    ptype: int,
+    room_names: dict[int, str] | None,
+    room_types: dict[int, int] | None,
+    room_materials: dict[object, object] | None = None,
+    carpet_mask_px=None,
+    carpet_zone_mask_px=None,
+) -> None:
+    """Paint one scaled map cell with final-resolution material texture."""
+    material = _floor_material_for_room(
+        room_id, room_names, room_types, room_materials
+    )
+    for sy in range(scale):
+        py = top + sy
+        for sx in range(scale):
+            px_material = material
+            if (
+                carpet_mask_px is not None and carpet_mask_px[left + sx, py] > 0
+            ) or (
+                carpet_zone_mask_px is not None
+                and carpet_zone_mask_px[left + sx, py] > 0
+            ):
+                px_material = "carpet"
+            px[left + sx, py] = _opaque(
+                _textured_room_color(
+                    room_id,
+                    ptype,
+                    left + sx,
+                    py,
+                    room_names,
+                    room_types,
+                    material=px_material,
+                )
+            )
+
+
+def _clamp_channel(value: int) -> int:
+    """Clamp an integer RGB channel to byte range."""
+    return max(0, min(255, value))
+
+
+def _adjust_color(
+    color: tuple[int, int, int],
+    amount: int,
+) -> tuple[int, int, int]:
+    """Lighten or darken an RGB color by a signed amount."""
+    return (
+        _clamp_channel(color[0] + amount),
+        _clamp_channel(color[1] + amount),
+        _clamp_channel(color[2] + amount),
+    )
+
+
+def _mix_color(
+    color: tuple[int, int, int],
+    overlay: tuple[int, int, int],
+    alpha: float,
+) -> tuple[int, int, int]:
+    """Blend two RGB colors."""
+    alpha = max(0.0, min(1.0, alpha))
+    return (
+        _clamp_channel(round((color[0] * (1.0 - alpha)) + (overlay[0] * alpha))),
+        _clamp_channel(round((color[1] * (1.0 - alpha)) + (overlay[1] * alpha))),
+        _clamp_channel(round((color[2] * (1.0 - alpha)) + (overlay[2] * alpha))),
+    )
+
+
+def _normalize_room_key(value: object) -> str:
+    """Return a stable key for matching option values to room names."""
+    text = str(value or "").lower().replace("'", "").replace("’", "")
+    normalized = "".join(char if char.isalnum() else " " for char in text)
+    return " ".join(normalized.split())
+
+
+def _normalize_floor_material(value: object) -> str | None:
+    """Return a supported floor material from an option value."""
+    material = _normalize_room_key(value)
+    if not material or material in {"auto", "none"}:
+        return None
+    if "carpet" in material or "rug" in material:
+        return "carpet"
+    material = material.replace(" ", "_")
+    material = FLOOR_MATERIAL_ALIASES.get(material, material)
+    if material in FLOOR_MATERIAL_COLORS:
+        return material
+    return None
+
+
+def _room_target_matches(
+    target: object,
+    room_id: int,
+    room_names: dict[int, str] | None,
+) -> bool:
+    """Return whether an option target identifies this room."""
+    target_key = _normalize_room_key(target)
+    if not target_key:
+        return False
+    if target_key == str(room_id):
+        return True
+    room_name = (room_names or {}).get(room_id)
+    return bool(room_name and target_key == _normalize_room_key(room_name))
+
+
+def _material_override_for_room(
+    room_id: int,
+    room_names: dict[int, str] | None,
+    room_materials: dict[object, object] | None,
+) -> str | None:
+    """Return a configured material override for this room, if present."""
+    if not room_materials:
+        return None
+    fallback_material: str | None = None
+    for target, value in room_materials.items():
+        material = _normalize_floor_material(value)
+        if material is None:
+            continue
+        if str(target or "").strip().lower() == "*":
+            fallback_material = material
+            continue
+        target_key = _normalize_room_key(target)
+        if target_key == "all":
+            fallback_material = material
+            continue
+        if _room_target_matches(target, room_id, room_names):
+            return material
+    return fallback_material
+
+
+def _mask_coverage(mask: Image.Image) -> float:
+    """Return the fraction of non-zero pixels in a binary mask image."""
+    total = mask.width * mask.height
+    if total <= 0:
+        return 0.0
+    histogram = mask.histogram()
+    return (total - histogram[0]) / total
+
+
+def _mask_from_alpha(image: Image.Image) -> Image.Image | None:
+    """Return an alpha-derived mask when the carpet image has useful alpha."""
+    alpha = image.getchannel("A")
+    alpha_min, alpha_max = alpha.getextrema()
+    if alpha_min >= 250 or alpha_max <= 32:
+        return None
+    mask = alpha.point(lambda value: 255 if value > 32 else 0)
+    coverage = _mask_coverage(mask)
+    if 0.0005 <= coverage <= 0.75:
+        return mask
+    return None
+
+
+def _mask_from_colour(image: Image.Image, *, saturation_threshold: int) -> Image.Image:
+    """Return a mask for coloured carpet pixels in a Narwal debug PNG."""
+    from PIL import Image
+
+    mask = Image.new("L", image.size, 0)
+    src = image.load()
+    dst = mask.load()
+    for y in range(image.height):
+        for x in range(image.width):
+            r, g, b, a = src[x, y]
+            if a <= 32:
+                continue
+            bright = max(r, g, b)
+            dark = min(r, g, b)
+            if bright >= 245 and bright - dark <= 8:
+                continue
+            if bright >= 35 and bright - dark >= saturation_threshold:
+                dst[x, y] = 255
+    return mask
+
+
+def _mask_from_brightness(image: Image.Image) -> Image.Image | None:
+    """Return a mask for greyscale carpet PNGs with a dark/static background."""
+    grayscale = image.convert("L")
+    samples: list[int] = []
+    if grayscale.width and grayscale.height:
+        src = grayscale.load()
+        for x in range(grayscale.width):
+            samples.append(src[x, 0])
+            samples.append(src[x, grayscale.height - 1])
+        for y in range(grayscale.height):
+            samples.append(src[0, y])
+            samples.append(src[grayscale.width - 1, y])
+    if not samples:
+        return None
+
+    samples.sort()
+    background = samples[len(samples) // 2]
+    threshold = min(220, max(40, background + 45))
+    mask = grayscale.point(lambda value: 255 if value >= threshold else 0)
+    coverage = _mask_coverage(mask)
+    if 0.0005 <= coverage <= 0.55:
+        return mask
+    return None
+
+
+def _carpet_mask_from_image(
+    carpet_map_image: bytes | None,
+    target_size: tuple[int, int],
+) -> Image.Image | None:
+    """Build a carpet mask from Narwal's cleartext carpet debug PNG."""
+    if not carpet_map_image or target_size[0] <= 0 or target_size[1] <= 0:
+        return None
+
+    try:
+        from PIL import Image, ImageFilter
+
+        image = Image.open(io.BytesIO(carpet_map_image)).convert("RGBA")
+    except Exception:
+        _LOGGER.debug("Could not decode Narwal carpet debug image", exc_info=True)
+        return None
+
+    if image.size != target_size:
+        image = image.resize(target_size, getattr(Image, "Resampling", Image).BILINEAR)
+
+    # The endpoint returns debug PNGs rather than a documented schema, so prefer
+    # explicit alpha/colour masks and reject candidates that cover most of the map.
+    mask = _mask_from_alpha(image)
+    if mask is None:
+        for threshold in (35, 55, 75):
+            colour_mask = _mask_from_colour(image, saturation_threshold=threshold)
+            coverage = _mask_coverage(colour_mask)
+            if 0.0005 <= coverage <= 0.65:
+                mask = colour_mask
+                break
+    if mask is None:
+        mask = _mask_from_brightness(image)
+    if mask is None:
+        return None
+
+    return mask.filter(ImageFilter.GaussianBlur(radius=0.6)).point(
+        lambda value: 255 if value >= 64 else 0
+    )
+
+
+def _room_bounds_for_pixels(
+    pixels: list[int],
+    width: int,
+) -> dict[int, tuple[int, int, int, int]]:
+    """Return floor-cell bounds for each room in unflipped grid coordinates."""
+    room_bounds: dict[int, tuple[int, int, int, int]] = {}
+    if width <= 0:
+        return room_bounds
+    for index, value in enumerate(pixels):
+        if value == 0 or value in (0x20, 0x28):
+            continue
+        room_id = value >> 8
+        ptype = value & 0xFF
+        if ptype & 0x10:
+            continue
+        x = index % width
+        y = index // width
+        min_x, min_y, max_x, max_y = room_bounds.get(room_id, (x, y, x, y))
+        room_bounds[room_id] = (
+            min(min_x, x),
+            min(min_y, y),
+            max(max_x, x),
+            max(max_y, y),
+        )
+    return room_bounds
+
+
+def _zone_fraction(
+    zone: dict,
+    keys: tuple[str, ...],
+    default: float,
+    *,
+    minimum: float = 0.0,
+) -> float:
+    """Return a clamped room-relative fraction from a carpet zone option."""
+    value = default
+    for key in keys:
+        if key not in zone:
+            continue
+        try:
+            value = float(zone[key])
+        except (TypeError, ValueError):
+            value = default
+        break
+    if value > 1.0:
+        value /= 100.0
+    return max(minimum, min(1.0, value))
+
+
+def _room_id_for_zone(
+    zone: dict,
+    room_names: dict[int, str] | None,
+    room_bounds: dict[int, tuple[int, int, int, int]],
+) -> int | None:
+    """Resolve a carpet zone's room target to a room_id."""
+    for key in ("room_id", "room", "room_name"):
+        if key not in zone:
+            continue
+        target = zone[key]
+        for room_id in room_bounds:
+            if _room_target_matches(target, room_id, room_names):
+                return room_id
+    return None
+
+
+def _carpet_zone_mask_from_overrides(
+    carpet_zones: list[dict[str, object]] | tuple[dict[str, object], ...] | None,
+    room_names: dict[int, str] | None,
+    room_bounds: dict[int, tuple[int, int, int, int]],
+    width: int,
+    height: int,
+    scale: int,
+) -> Image.Image | None:
+    """Build a mask for configured carpet/rug zones."""
+    if not carpet_zones or width <= 0 or height <= 0 or scale <= 0:
+        return None
+
+    from PIL import Image, ImageDraw
+
+    mask = Image.new("L", (width * scale, height * scale), 0)
+    draw = ImageDraw.Draw(mask)
+    drew_zone = False
+
+    for zone in carpet_zones:
+        if not isinstance(zone, dict):
+            continue
+        room_id = _room_id_for_zone(zone, room_names, room_bounds)
+        if room_id is None:
+            continue
+        min_x, min_y, max_x, max_y = room_bounds[room_id]
+        room_left = min_x * scale
+        room_top = (height - 1 - max_y) * scale
+        room_right = (max_x + 1) * scale
+        room_bottom = (height - min_y) * scale
+        room_width = max(1.0, room_right - room_left)
+        room_height = max(1.0, room_bottom - room_top)
+
+        centre_x = room_left + (
+            room_width * _zone_fraction(zone, ("x_percent", "center_x", "x"), 0.5)
+        )
+        centre_y = room_top + (
+            room_height * _zone_fraction(zone, ("y_percent", "center_y", "y"), 0.5)
+        )
+        zone_width = room_width * _zone_fraction(
+            zone, ("width_percent", "width", "w"), 0.36, minimum=0.02
+        )
+        zone_height = room_height * _zone_fraction(
+            zone, ("height_percent", "height", "h"), 0.28, minimum=0.02
+        )
+        bounds = [
+            int(round(centre_x - (zone_width / 2))),
+            int(round(centre_y - (zone_height / 2))),
+            int(round(centre_x + (zone_width / 2))),
+            int(round(centre_y + (zone_height / 2))),
+        ]
+        shape = _normalize_room_key(zone.get("shape", "ellipse"))
+        if shape in {"rectangle", "rect", "square"}:
+            try:
+                draw.rounded_rectangle(
+                    bounds,
+                    radius=max(2, int(min(zone_width, zone_height) * 0.08)),
+                    fill=255,
+                )
+            except AttributeError:
+                draw.rectangle(bounds, fill=255)
+        else:
+            draw.ellipse(bounds, fill=255)
+        drew_zone = True
+
+    return mask if drew_zone else None
+
+
+def _texture_noise(room_id: int, x: int, y: int) -> int:
+    """Return a deterministic small noise value for map texture."""
+    value = (x * 73_856_093) ^ (y * 19_349_663) ^ (room_id * 83_492_791)
+    value ^= value >> 13
+    value *= 1_274_126_177
+    return ((value >> 16) & 0xFF) - 128
+
+
+def _floor_material_for_room(
+    room_id: int,
+    room_names: dict[int, str] | None = None,
+    room_types: dict[int, int] | None = None,
+    room_materials: dict[object, object] | None = None,
+) -> str:
+    """Infer a coarse floor material from Narwal room metadata."""
+    if material := _material_override_for_room(room_id, room_names, room_materials):
+        return material
+
+    room_type = (room_types or {}).get(room_id)
+    if room_type in ROOM_TYPE_MATERIALS:
+        return ROOM_TYPE_MATERIALS[room_type]
+
+    room_name = (room_names or {}).get(room_id, "").lower()
+    for hints, material in ROOM_NAME_MATERIAL_HINTS:
+        if any(hint in room_name for hint in hints):
+            return material
+
+    return "timber"
+
+
+def _material_base_color(
+    room_id: int,
+    material: str,
+) -> tuple[int, int, int]:
+    """Return a material colour with a subtle deterministic room tint."""
+    base = FLOOR_MATERIAL_COLORS.get(material, FLOOR_MATERIAL_COLORS["default"])
+    tint = ROOM_COLORS[(room_id - 1) % len(ROOM_COLORS)]
+    return _mix_color(base, tint, 0.14)
+
+
+def _textured_room_color(
+    room_id: int,
+    ptype: int,
+    x: int,
+    y: int,
+    room_names: dict[int, str] | None = None,
+    room_types: dict[int, int] | None = None,
+    *,
+    material: str | None = None,
+) -> tuple[int, int, int]:
+    """Return the rendered colour for one room pixel."""
+    material = material or _floor_material_for_room(room_id, room_names, room_types)
+    color = _material_base_color(room_id, material)
+    noise = _texture_noise(room_id, x, y)
+
+    if material == "timber":
+        plank_height = 18
+        joint_length = 118
+        plank_y = (y + (room_id * 7)) % plank_height
+        joint_x = (x + ((y // plank_height) % 2) * (joint_length // 2)) % joint_length
+        color = _adjust_color(color, noise // 34)
+        if plank_y in (0, 1):
+            color = _adjust_color(color, -16)
+        if joint_x in (0, 1) and plank_y > 2:
+            color = _adjust_color(color, -10)
+        if ((x * 5) + (y * 2) + room_id) % 29 == 0:
+            color = _adjust_color(color, 4)
+    elif material == "tile":
+        tile_size = 28
+        grout_x = (x + room_id) % tile_size
+        grout_y = (y + room_id) % tile_size
+        color = _adjust_color(color, noise // 44)
+        if grout_x in (0, 1) or grout_y in (0, 1):
+            color = _mix_color(color, (238, 240, 238), 0.64)
+    elif material == "carpet":
+        color = _adjust_color(color, noise // 20)
+        if (x + y + room_id) % 3 == 0:
+            color = _adjust_color(color, 3)
+        if (x - y + room_id) % 4 == 0:
+            color = _adjust_color(color, -3)
+    elif material == "concrete":
+        color = _adjust_color(color, noise // 18)
+        if (x * 5 + y * 3 + room_id) % 47 == 0:
+            color = _adjust_color(color, 12)
+        if (x * 7 + y + room_id) % 53 == 0:
+            color = _adjust_color(color, -10)
+    else:
+        color = _adjust_color(color, noise // 24)
+
+    if ptype & 0x10:
+        return _darken(color, 44)
+    return color
+
+
 def _load_font(image_font: object, size: int):
     """Load a crisp TrueType font, falling back to Pillow's default font."""
     for path in FONT_PATHS:
@@ -130,6 +654,28 @@ def _load_font(image_font: object, size: int):
         except OSError:
             continue
     return image_font.load_default()
+
+
+def _fit_label_font(
+    image_font: object,
+    text: str,
+    max_size: int,
+    *,
+    max_width: int | None = None,
+    max_height: int | None = None,
+):
+    """Return the largest label font that fits the available room space."""
+    min_size = max(8, min(max_size, 14))
+    for size in range(max_size, min_size - 1, -1):
+        font = _load_font(image_font, size)
+        bbox = font.getbbox(text)
+        width = bbox[2] - bbox[0]
+        height = bbox[3] - bbox[1]
+        if (max_width is None or width <= max_width) and (
+            max_height is None or height <= max_height
+        ):
+            return font
+    return _load_font(image_font, min_size)
 
 
 def _scaled_coord(value: float, scale: float, size: int) -> int:
@@ -161,13 +707,19 @@ def _draw_label(
         tx + tw + padding,
         ty + th + padding,
     ]
-    draw.rounded_rectangle(bg, radius=padding * 2, fill=(0, 0, 0, 120))
+    draw.rounded_rectangle(
+        bg,
+        radius=max(5, padding * 2),
+        fill=(14, 16, 18, 170),
+        outline=(255, 255, 255, 45),
+        width=1,
+    )
     draw.text(
         (tx, ty),
         text,
         fill=fill,
         font=font,
-        stroke_width=max(1, padding // 2),
+        stroke_width=max(1, padding // 3),
         stroke_fill=stroke_fill,
     )
 
@@ -338,8 +890,8 @@ def room_label_points(
     width: int,
     height: int,
     room_names: dict[int, str] | None,
-) -> list[tuple[str, float, float]]:
-    """Return room label centre points in unflipped grid coordinates."""
+) -> list[tuple[str, float, float, float, float]]:
+    """Return room label centre points and room bounds in unflipped grid coordinates."""
     if not compressed or width <= 0 or height <= 0 or not room_names:
         return []
 
@@ -357,6 +909,7 @@ def room_label_points(
     room_sum_x: dict[int, int] = {}
     room_sum_y: dict[int, int] = {}
     room_count: dict[int, int] = {}
+    room_bounds: dict[int, tuple[int, int, int, int]] = {}
     for i, val in enumerate(pixels):
         if val == 0 or val in (0x20, 0x28):
             continue
@@ -369,17 +922,107 @@ def room_label_points(
         room_sum_x[room_id] = room_sum_x.get(room_id, 0) + x
         room_sum_y[room_id] = room_sum_y.get(room_id, 0) + y
         room_count[room_id] = room_count.get(room_id, 0) + 1
+        min_x, min_y, max_x, max_y = room_bounds.get(room_id, (x, y, x, y))
+        room_bounds[room_id] = (
+            min(min_x, x),
+            min(min_y, y),
+            max(max_x, x),
+            max(max_y, y),
+        )
 
-    points: list[tuple[str, float, float]] = []
+    points: list[tuple[str, float, float, float, float]] = []
     for room_id, name in room_names.items():
         if not name or room_id not in room_count:
             continue
+        min_x, min_y, max_x, max_y = room_bounds[room_id]
         points.append((
             name,
             room_sum_x[room_id] / room_count[room_id],
             room_sum_y[room_id] / room_count[room_id],
+            max_x - min_x + 1,
+            max_y - min_y + 1,
         ))
     return points
+
+
+def _render_floor_pixels(
+    pixels: list[int],
+    width: int,
+    height: int,
+    room_names: dict[int, str] | None,
+    room_types: dict[int, int] | None,
+    carpet_map_image: bytes | None = None,
+    room_materials: dict[object, object] | None = None,
+    carpet_zones: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
+) -> tuple[
+    Image.Image,
+    dict[int, int],
+    dict[int, int],
+    dict[int, int],
+    dict[int, tuple[int, int, int, int]],
+]:
+    """Render map pixels at final resolution and return room label metadata."""
+    from PIL import Image
+
+    scale = MAP_RENDER_SCALE
+    img = Image.new("RGBA", (width * scale, height * scale), COLOR_UNKNOWN)
+    px = img.load()
+    room_bounds = _room_bounds_for_pixels(pixels, width)
+    carpet_mask = _carpet_mask_from_image(carpet_map_image, img.size)
+    carpet_mask_px = carpet_mask.load() if carpet_mask is not None else None
+    carpet_zone_mask = _carpet_zone_mask_from_overrides(
+        carpet_zones,
+        room_names,
+        room_bounds,
+        width,
+        height,
+        scale,
+    )
+    carpet_zone_mask_px = (
+        carpet_zone_mask.load() if carpet_zone_mask is not None else None
+    )
+
+    room_sum_x: dict[int, int] = {}
+    room_sum_y: dict[int, int] = {}
+    room_count: dict[int, int] = {}
+
+    for i, val in enumerate(pixels):
+        x = i % width
+        y = i // width
+        left = x * scale
+        top = (height - 1 - y) * scale
+
+        if val == 0:
+            continue
+        if val == 0x20:
+            _paint_solid_cell(px, left, top, scale, COLOR_UNASSIGNED_FLOOR)
+            continue
+        if val == 0x28:
+            _paint_solid_cell(px, left, top, scale, COLOR_UNASSIGNED_OBSTACLE)
+            continue
+
+        room_id = val >> 8
+        ptype = val & 0xFF
+        _paint_room_cell(
+            px,
+            left,
+            top,
+            scale,
+            room_id,
+            ptype,
+            room_names,
+            room_types,
+            room_materials,
+            carpet_mask_px,
+            carpet_zone_mask_px,
+        )
+
+        if room_names and room_id in room_names and not (ptype & 0x10):
+            room_sum_x[room_id] = room_sum_x.get(room_id, 0) + x
+            room_sum_y[room_id] = room_sum_y.get(room_id, 0) + y
+            room_count[room_id] = room_count.get(room_id, 0) + 1
+
+    return img, room_sum_x, room_sum_y, room_count, room_bounds
 
 
 def _darken(color: tuple[int, int, int], amount: int = 80) -> tuple[int, int, int]:
@@ -529,6 +1172,10 @@ def render_map_png(
     dock_x: float | None = None,
     dock_y: float | None = None,
     room_names: dict[int, str] | None = None,
+    room_types: dict[int, int] | None = None,
+    carpet_map_image: bytes | None = None,
+    room_materials: dict[object, object] | None = None,
+    carpet_zones: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
 ) -> bytes:
     """Render decompressed map data as a PNG image.
 
@@ -550,6 +1197,10 @@ def render_map_png(
         dock_x: Dock X position in grid coordinates (optional).
         dock_y: Dock Y position in grid coordinates (optional).
         room_names: Mapping of room_id to display name (optional).
+        room_types: Mapping of room_id to Narwal RoomType enum (optional).
+        carpet_map_image: Narwal carpet debug PNG bytes (optional).
+        room_materials: Optional room_id/name -> material overrides.
+        carpet_zones: Optional room-relative carpet/rug zones.
 
     Returns:
         PNG image as bytes, or empty bytes on failure.
@@ -558,7 +1209,7 @@ def render_map_png(
         return b""
 
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import ImageDraw, ImageFont
     except ImportError:
         _LOGGER.error("Pillow is required for map rendering")
         return b""
@@ -575,65 +1226,36 @@ def render_map_png(
     elif len(pixels) > expected:
         pixels = pixels[:expected]
 
-    img = Image.new("RGBA", (width, height), COLOR_UNKNOWN)
-    px = img.load()
-
-    # Track room pixel sums for centroid computation
-    room_sum_x: dict[int, int] = {}
-    room_sum_y: dict[int, int] = {}
-    room_count: dict[int, int] = {}
-
-    for i, val in enumerate(pixels):
-        x = i % width
-        y = i // width
-
-        if val == 0:
-            continue  # already set to COLOR_UNKNOWN
-        elif val == 0x20:
-            px[x, y] = _opaque(COLOR_UNASSIGNED_FLOOR)
-        elif val == 0x28:
-            px[x, y] = _opaque(COLOR_UNASSIGNED_OBSTACLE)
-        else:
-            room_id = val >> 8
-            ptype = val & 0xFF
-
-            base = (
-                ROOM_COLORS[room_id - 1]
-                if 1 <= room_id <= len(ROOM_COLORS)
-                else COLOR_FALLBACK
-            )
-
-            if ptype & 0x10:  # wall/border edge
-                px[x, y] = _opaque(_darken(base))
-            else:
-                px[x, y] = _opaque(base)
-
-            # Accumulate for centroid (floor pixels only, not walls)
-            if room_names and room_id in room_names and not (ptype & 0x10):
-                room_sum_x[room_id] = room_sum_x.get(room_id, 0) + x
-                room_sum_y[room_id] = room_sum_y.get(room_id, 0) + y
-                room_count[room_id] = room_count.get(room_id, 0) + 1
-
-    # Flip vertically BEFORE drawing overlays — pixel data is stored with
-    # Y increasing upward (math coordinates) but images render Y downward.
-    # Overlays (labels, dock, robot) use flipped coordinates so text is right-side up.
-    img = img.transpose(Image.FLIP_TOP_BOTTOM)
     scale = MAP_RENDER_SCALE
-    if scale > 1:
-        img = img.resize(
-            (width * scale, height * scale),
-            getattr(Image, "Resampling", Image).NEAREST,
-        )
+    img, room_sum_x, room_sum_y, room_count, room_bounds = _render_floor_pixels(
+        pixels,
+        width,
+        height,
+        room_names,
+        room_types,
+        carpet_map_image,
+        room_materials,
+        carpet_zones,
+    )
 
     draw = ImageDraw.Draw(img)
     scaled_height = height * scale
 
     # Draw room labels at flipped centroids
     if room_names:
-        font = _load_font(ImageFont, ROOM_LABEL_FONT_SCALE * scale)
         for rid, name in room_names.items():
             if not name or rid not in room_count:
                 continue
+            min_x, min_y, max_x, max_y = room_bounds[rid]
+            max_label_width = int((max_x - min_x + 1) * scale * 0.82)
+            max_label_height = int((max_y - min_y + 1) * scale * 0.46)
+            font = _fit_label_font(
+                ImageFont,
+                name,
+                ROOM_LABEL_FONT_SCALE * scale,
+                max_width=max_label_width,
+                max_height=max_label_height,
+            )
             cx = _scaled_coord(
                 room_sum_x[rid] // room_count[rid], scale, img.width
             )
@@ -701,6 +1323,10 @@ def render_base_map(
     show_obstacle_labels: bool = True,
     show_room_labels: bool = True,
     show_dock: bool = True,
+    room_types: dict[int, int] | None = None,
+    carpet_map_image: bytes | None = None,
+    room_materials: dict[object, object] | None = None,
+    carpet_zones: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
 ) -> Image.Image | None:
     """Render the static floor plan as a PIL Image (no robot overlay).
 
@@ -714,9 +1340,13 @@ def render_base_map(
         show_obstacle_labels: Whether to draw furniture/obstacle labels.
         show_room_labels: Whether to draw room labels into the base image.
         show_dock: Whether to draw the dock into the base image.
+        room_types: Mapping of room_id to Narwal RoomType enum (optional).
+        carpet_map_image: Narwal carpet debug PNG bytes (optional).
+        room_materials: Optional room_id/name -> material overrides.
+        carpet_zones: Optional room-relative carpet/rug zones.
     """
     try:
-        from PIL import Image, ImageDraw, ImageFont
+        from PIL import ImageDraw, ImageFont
     except ImportError:
         _LOGGER.error("Pillow is required for map rendering")
         return None
@@ -733,57 +1363,33 @@ def render_base_map(
     elif len(pixels) > expected:
         pixels = pixels[:expected]
 
-    img = Image.new("RGBA", (width, height), COLOR_UNKNOWN)
-    px = img.load()
-
-    room_sum_x: dict[int, int] = {}
-    room_sum_y: dict[int, int] = {}
-    room_count: dict[int, int] = {}
-
-    for i, val in enumerate(pixels):
-        x = i % width
-        y = i // width
-
-        if val == 0:
-            continue
-        elif val == 0x20:
-            px[x, y] = _opaque(COLOR_UNASSIGNED_FLOOR)
-        elif val == 0x28:
-            px[x, y] = _opaque(COLOR_UNASSIGNED_OBSTACLE)
-        else:
-            room_id = val >> 8
-            ptype = val & 0xFF
-
-            base = (
-                ROOM_COLORS[room_id - 1]
-                if 1 <= room_id <= len(ROOM_COLORS)
-                else COLOR_FALLBACK
-            )
-
-            if ptype & 0x10:
-                px[x, y] = _opaque(_darken(base))
-            else:
-                px[x, y] = _opaque(base)
-
-            if room_names and room_id in room_names and not (ptype & 0x10):
-                room_sum_x[room_id] = room_sum_x.get(room_id, 0) + x
-                room_sum_y[room_id] = room_sum_y.get(room_id, 0) + y
-                room_count[room_id] = room_count.get(room_id, 0) + 1
-
-    img = img.transpose(Image.FLIP_TOP_BOTTOM)
     scale = MAP_RENDER_SCALE
-    if scale > 1:
-        img = img.resize(
-            (width * scale, height * scale),
-            getattr(Image, "Resampling", Image).NEAREST,
-        )
+    img, room_sum_x, room_sum_y, room_count, room_bounds = _render_floor_pixels(
+        pixels,
+        width,
+        height,
+        room_names,
+        room_types,
+        carpet_map_image,
+        room_materials,
+        carpet_zones,
+    )
     draw = ImageDraw.Draw(img)
 
     if room_names and show_room_labels:
-        font = _load_font(ImageFont, ROOM_LABEL_FONT_SCALE * scale)
         for rid, name in room_names.items():
             if not name or rid not in room_count:
                 continue
+            min_x, min_y, max_x, max_y = room_bounds[rid]
+            max_label_width = int((max_x - min_x + 1) * scale * 0.82)
+            max_label_height = int((max_y - min_y + 1) * scale * 0.46)
+            font = _fit_label_font(
+                ImageFont,
+                name,
+                ROOM_LABEL_FONT_SCALE * scale,
+                max_width=max_label_width,
+                max_height=max_label_height,
+            )
             cx = _scaled_coord(
                 room_sum_x[rid] // room_count[rid], scale, img.width
             )
@@ -860,7 +1466,8 @@ def render_overlay(
     trail: list[tuple[float, float]] | None = None,
     rotation_degrees: int = 0,
     zoom: float = 1.0,
-    room_labels: list[tuple[str, float, float]] | None = None,
+    room_labels: list[tuple[str, float, float] | tuple[str, float, float, float, float]]
+    | None = None,
     dock_x: float | None = None,
     dock_y: float | None = None,
 ) -> bytes:
@@ -875,7 +1482,7 @@ def render_overlay(
         trail: Narwal-native display_map trajectory points in grid coordinates.
         rotation_degrees: Clockwise map rotation in degrees.
         zoom: Centre zoom factor.
-        room_labels: Room label centre points in grid coordinates.
+        room_labels: Room label centre points and optional bounds in grid coordinates.
         dock_x: Dock X position in grid coordinates.
         dock_y: Dock Y position in grid coordinates.
 
@@ -964,13 +1571,26 @@ def render_overlay(
                     )
 
     if room_labels:
-        font = _load_font(ImageFont, ROOM_LABEL_FONT_SCALE * int(round(scale)))
-        for label, grid_x, grid_y in room_labels:
+        max_font_size = ROOM_LABEL_FONT_SCALE * int(round(scale))
+        for label_info in room_labels:
+            label, grid_x, grid_y = label_info[:3]
             point = final_point(grid_x, grid_y)
             if point is None:
                 continue
             x, y = point
             if -80 <= x <= img.width + 80 and -80 <= y <= img.height + 80:
+                max_label_width = None
+                max_label_height = None
+                if len(label_info) >= 5:
+                    max_label_width = int(label_info[3] * scale * 0.82)
+                    max_label_height = int(label_info[4] * scale * 0.46)
+                font = _fit_label_font(
+                    ImageFont,
+                    label,
+                    max_font_size,
+                    max_width=max_label_width,
+                    max_height=max_label_height,
+                )
                 _draw_label(draw, (x, y), label, font, padding=max(4, int(scale)))
 
     if dock_x is not None and dock_y is not None:
@@ -1033,6 +1653,10 @@ def render_map_from_compressed(
     dock_x: float | None = None,
     dock_y: float | None = None,
     room_names: dict[int, str] | None = None,
+    room_types: dict[int, int] | None = None,
+    carpet_map_image: bytes | None = None,
+    room_materials: dict[object, object] | None = None,
+    carpet_zones: list[dict[str, object]] | tuple[dict[str, object], ...] | None = None,
 ) -> bytes:
     """Decompress and render map data in one step (legacy interface).
 
@@ -1046,6 +1670,10 @@ def render_map_from_compressed(
         dock_x: Dock X position (optional).
         dock_y: Dock Y position (optional).
         room_names: Mapping of room_id to display name (optional).
+        room_types: Mapping of room_id to Narwal RoomType enum (optional).
+        carpet_map_image: Narwal carpet debug PNG bytes (optional).
+        room_materials: Optional room_id/name -> material overrides.
+        carpet_zones: Optional room-relative carpet/rug zones.
 
     Returns:
         PNG image as bytes, or empty bytes on failure.
@@ -1053,5 +1681,6 @@ def render_map_from_compressed(
     decompressed = decompress_map(compressed)
     return render_map_png(
         decompressed, width, height, robot_x, robot_y, robot_heading,
-        dock_x, dock_y, room_names,
+        dock_x, dock_y, room_names, room_types, carpet_map_image,
+        room_materials, carpet_zones,
     )

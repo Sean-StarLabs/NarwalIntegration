@@ -74,6 +74,8 @@ MAP_OPTION_DEFAULTS: dict[str, bool] = {
 # their defaults — an unrotated, unzoomed map, i.e. the pre-#62 rendering.
 CONF_MAP_ROTATION = "map_rotation"
 CONF_MAP_ZOOM = "map_zoom"
+CONF_MAP_ROOM_MATERIALS = "map_room_materials"
+CONF_MAP_CARPET_ZONES = "map_carpet_zones"
 
 MAP_ROTATION_DEFAULT = 0  # degrees clockwise; renderer accepts 0/90/180/270
 MAP_ZOOM_DEFAULT = 1.0  # renderer clamps to 1.0–2.0

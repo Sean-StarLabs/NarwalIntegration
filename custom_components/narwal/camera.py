@@ -6,6 +6,7 @@ import asyncio
 import logging
 import math
 import time
+import zlib
 
 from homeassistant.components.camera import Camera
 from homeassistant.core import HomeAssistant, callback
@@ -13,6 +14,8 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
 from .const import (
+    CONF_MAP_CARPET_ZONES,
+    CONF_MAP_ROOM_MATERIALS,
     CONF_MAP_ROTATION,
     CONF_MAP_ZOOM,
     CONF_SHOW_FURNITURE,
@@ -38,6 +41,7 @@ _MIN_RENDER_INTERVAL = 2
 _NATIVE_TRAIL_MIN_GRID_DELTA = 0.25
 _NATIVE_TRAIL_MAX_POINTS = 50000
 _NATIVE_TRAIL_RECENT_TAIL_POINTS = 200
+_CARPET_MAP_FETCH_INTERVAL = 30.0
 
 
 async def async_setup_entry(
@@ -110,12 +114,19 @@ class NarwalMapCamera(NarwalEntity, Camera):
         # Cached base map (PIL Image) — only re-rendered when static map changes
         self._base_map_image = None  # PIL Image or None
         self._base_map_ts: int = 0  # created_at of the static map used for base
-        self._base_map_options_key: tuple[bool, bool, bool] = (
+        self._base_map_options_key: tuple = (
             MAP_OPTION_DEFAULTS[CONF_SHOW_ROOM_LABELS],
             MAP_OPTION_DEFAULTS[CONF_SHOW_FURNITURE],
             MAP_OPTION_DEFAULTS[CONF_SHOW_FURNITURE_LABELS],
+            ((), ()),
         )
-        self._room_label_points: list[tuple[str, float, float]] = []
+        self._room_label_points: list[
+            tuple[str, float, float] | tuple[str, float, float, float, float]
+        ] = []
+        self._carpet_map_image: bytes | None = None
+        self._carpet_map_signature: tuple[int, int] | tuple[()] = ()
+        self._base_carpet_map_signature: tuple[int, int] | tuple[()] = ()
+        self._carpet_map_last_fetch: float = 0.0
 
     def _map_option(self, key: str) -> bool:
         """Return a persisted map display option."""
@@ -152,6 +163,59 @@ class NarwalMapCamera(NarwalEntity, Camera):
         except (TypeError, ValueError):
             return MAP_ZOOM_DEFAULT
         return max(1.0, min(2.0, zoom))
+
+    def _map_material_options(
+        self,
+    ) -> tuple[dict[str, str], tuple[dict[str, str], ...], tuple]:
+        """Return configured floor material overrides and a cache key."""
+        options = self.coordinator.config_entry.options
+
+        room_materials: dict[str, str] = {}
+        raw_materials = options.get(CONF_MAP_ROOM_MATERIALS)
+        if isinstance(raw_materials, dict):
+            room_materials = {
+                str(room): str(material)
+                for room, material in raw_materials.items()
+                if room is not None and material is not None
+            }
+
+        zone_keys = {
+            "room_id",
+            "room",
+            "room_name",
+            "shape",
+            "x_percent",
+            "center_x",
+            "x",
+            "y_percent",
+            "center_y",
+            "y",
+            "width_percent",
+            "width",
+            "w",
+            "height_percent",
+            "height",
+            "h",
+        }
+        carpet_zones: list[dict[str, str]] = []
+        raw_zones = options.get(CONF_MAP_CARPET_ZONES)
+        if isinstance(raw_zones, list):
+            for raw_zone in raw_zones:
+                if not isinstance(raw_zone, dict):
+                    continue
+                zone = {
+                    str(key): str(value)
+                    for key, value in raw_zone.items()
+                    if key in zone_keys and value is not None
+                }
+                if zone:
+                    carpet_zones.append(zone)
+
+        options_key = (
+            tuple(sorted(room_materials.items())),
+            tuple(tuple(sorted(zone.items())) for zone in carpet_zones),
+        )
+        return room_materials, tuple(carpet_zones), options_key
 
     async def async_camera_image(
         self, width: int | None = None, height: int | None = None,
@@ -239,6 +303,44 @@ class NarwalMapCamera(NarwalEntity, Camera):
             return ()
         return display.trajectory_signature
 
+    @staticmethod
+    def _carpet_signature(image: bytes | None) -> tuple[int, int] | tuple[()]:
+        """Return a compact signature for the latest Narwal carpet debug PNG."""
+        if image is None:
+            return ()
+        return (len(image), zlib.crc32(image) & 0xFFFFFFFF)
+
+    @staticmethod
+    def _should_fetch_carpet_map(state) -> bool:
+        """Return True when the robot may be producing carpet debug images."""
+        return state is not None and (
+            state.is_cleaning
+            or state.has_recent_active_working_status
+            or state.working_status == WorkingStatus.REMAPPING
+        )
+
+    def _carpet_poll_key(self, state) -> tuple[int] | tuple[()]:
+        """Return a cache component that polls carpet data while active."""
+        if not self._should_fetch_carpet_map(state):
+            return ()
+        return (int(time.monotonic() // _CARPET_MAP_FETCH_INTERVAL),)
+
+    async def _async_refresh_carpet_map(self, state) -> None:
+        """Refresh Narwal's carpet debug image while the robot is active."""
+        if not self._should_fetch_carpet_map(state):
+            return
+        now = time.monotonic()
+        if now - self._carpet_map_last_fetch < _CARPET_MAP_FETCH_INTERVAL:
+            return
+        self._carpet_map_last_fetch = now
+        image = await self.coordinator.client.get_robot_debug_image()
+        if image is None:
+            return
+        signature = self._carpet_signature(image)
+        if signature != self._carpet_map_signature:
+            self._carpet_map_image = image
+            self._carpet_map_signature = signature
+
     @classmethod
     def _render_overlay_image(
         cls,
@@ -247,7 +349,9 @@ class NarwalMapCamera(NarwalEntity, Camera):
         display,
         map_rotation: int,
         map_zoom: float,
-        room_label_points: list[tuple[str, float, float]],
+        room_label_points: list[
+            tuple[str, float, float] | tuple[str, float, float, float, float]
+        ],
     ) -> bytes | None:
         """Render dynamic map overlays in an executor thread."""
         from .narwal_client.map_renderer import render_overlay
@@ -299,24 +403,41 @@ class NarwalMapCamera(NarwalEntity, Camera):
             return
 
         static_ts = static_map.created_at or 0
+        _, _, material_options_key = self._map_material_options()
         map_options_key = (
             self._map_option(CONF_SHOW_ROOM_LABELS),
             self._map_option(CONF_SHOW_FURNITURE),
             self._map_option(CONF_SHOW_FURNITURE_LABELS),
+            material_options_key,
+        )
+        carpet_poll_key = self._carpet_poll_key(state)
+        carpet_key = (
+            (self._carpet_map_signature, carpet_poll_key)
+            if self._carpet_map_signature or carpet_poll_key
+            else ()
         )
         view_options_key = (self._map_rotation(), self._map_zoom())
         if display:
-            new_key = (
+            base_key = (
                 static_ts,
                 map_options_key,
                 view_options_key,
                 display.robot_x,
                 display.robot_y,
                 display.robot_heading,
-                self._trajectory_cache_key(display),
             )
+            if carpet_key:
+                new_key = (*base_key, carpet_key, self._trajectory_cache_key(display))
+            else:
+                new_key = (*base_key, self._trajectory_cache_key(display))
         else:
-            new_key = (static_ts, map_options_key, view_options_key)
+            new_key = (
+                static_ts,
+                map_options_key,
+                view_options_key,
+            )
+            if carpet_key:
+                new_key = (*new_key, carpet_key)
 
         if new_key == self._cache_key and self._cached_image:
             if self._render_task is not None and not self._render_task.done():
@@ -386,22 +507,28 @@ class NarwalMapCamera(NarwalEntity, Camera):
         )
 
         # Rebuild base map only when static map data changes
+        await self._async_refresh_carpet_map(state)
         static_ts = static_map.created_at or 0
+        room_materials, carpet_zones, material_options_key = (
+            self._map_material_options()
+        )
         map_options_key = (
             self._map_option(CONF_SHOW_ROOM_LABELS),
             self._map_option(CONF_SHOW_FURNITURE),
             self._map_option(CONF_SHOW_FURNITURE_LABELS),
+            material_options_key,
         )
         if (
             self._base_map_image is None
             or static_ts != self._base_map_ts
             or map_options_key != self._base_map_options_key
+            or self._carpet_map_signature != self._base_carpet_map_signature
         ):
             room_names: dict[int, str] | None = None
-            if map_options_key[0] and static_map.rooms:
-                room_names = {
-                    r.room_id: r.display_name for r in static_map.rooms
-                }
+            room_types: dict[int, int] | None = None
+            if static_map.rooms:
+                room_types = {r.room_id: r.room_sub_type for r in static_map.rooms}
+                room_names = {r.room_id: r.display_name for r in static_map.rooms}
             obstacles = static_map.obstacles if map_options_key[1] else None
             base_img = await self.hass.async_add_executor_job(
                 render_base_map,
@@ -417,17 +544,23 @@ class NarwalMapCamera(NarwalEntity, Camera):
                 map_options_key[2],
                 False,
                 False,
+                room_types,
+                self._carpet_map_image,
+                room_materials,
+                carpet_zones,
             )
             if base_img:
                 self._base_map_image = base_img
                 self._base_map_ts = static_ts
                 self._base_map_options_key = map_options_key
+                self._base_carpet_map_signature = self._carpet_map_signature
+                label_room_names = room_names if map_options_key[0] else None
                 self._room_label_points = await self.hass.async_add_executor_job(
                     room_label_points,
                     static_map.compressed_map,
                     static_map.width,
                     static_map.height,
-                    room_names,
+                    label_room_names,
                 )
                 _LOGGER.info(
                     "Base map rendered (ts=%d, %dx%d)",

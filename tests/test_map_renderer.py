@@ -12,9 +12,11 @@ import io
 import zlib
 
 from narwal_client.map_renderer import (
+    FLOOR_MATERIAL_COLORS,
     MAP_RENDER_SCALE,
     OBSTACLE_COLOR_DEFAULT,
     OBSTACLE_COLORS,
+    _floor_material_for_room,
     _scaled_coord,
     _transform_point,
     render_base_map,
@@ -60,6 +62,28 @@ def _make_room_grid(width: int, height: int, room_id: int = 1) -> bytes:
     """
     pixel_value = (room_id << 8) | 0x00
     return _make_compressed_grid(width, height, fill_value=pixel_value)
+
+
+def _rgb_for_grid(image, width: int, height: int, grid_x: int, grid_y: int):
+    x = _scaled_coord(grid_x, MAP_RENDER_SCALE, width * MAP_RENDER_SCALE)
+    y = _scaled_coord(height - 1 - grid_y, MAP_RENDER_SCALE, height * MAP_RENDER_SCALE)
+    return image.getpixel((x, y))[:3]
+
+
+def _make_carpet_debug_png(
+    width: int,
+    height: int,
+    box: tuple[int, int, int, int],
+) -> bytes:
+    """Create a simple Narwal-style coloured carpet debug PNG."""
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (width, height), (0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle(box, fill=(220, 60, 45))
+    output = io.BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
 
 
 class TestRenderBaseMap:
@@ -134,6 +158,227 @@ class TestRenderBaseMap:
         result = render_base_map(compressed, width, height)
         assert result is not None
         assert isinstance(result, Image.Image)
+
+    def test_room_name_hint_selects_material(self) -> None:
+        """Named wet rooms render as tile, but carpets are not guessed by name."""
+        assert _floor_material_for_room(1, {1: "Family bathroom"}) == "tile"
+        assert _floor_material_for_room(2, {2: "Landing"}) == "timber"
+        assert _floor_material_for_room(4, {4: "Willow's room"}) == "timber"
+        assert _floor_material_for_room(3, {3: "Kitchen"}) == "timber"
+
+    def test_room_material_override_accepts_room_name_or_id(self) -> None:
+        """Explicit material overrides can target room names or Narwal room ids."""
+        assert (
+            _floor_material_for_room(
+                1,
+                {1: "Willow's Room"},
+                room_materials={"willows room": "carpet"},
+            )
+            == "carpet"
+        )
+        assert (
+            _floor_material_for_room(
+                2,
+                {2: "Kitchen"},
+                room_materials={"2": "tile"},
+            )
+            == "tile"
+        )
+        assert (
+            _floor_material_for_room(
+                3,
+                {3: "Landing"},
+                room_types={3: 10},
+                room_materials={"landing": "medium pile carpet"},
+            )
+            == "carpet"
+        )
+        assert (
+            _floor_material_for_room(
+                4,
+                {4: "Bathroom"},
+                room_types={4: 5},
+                room_materials={"*": "carpet", "bathroom": "tile"},
+            )
+            == "tile"
+        )
+        assert (
+            _floor_material_for_room(
+                5,
+                {5: "Spare Room"},
+                room_materials={"*": "carpet", "bathroom": "tile"},
+            )
+            == "carpet"
+        )
+
+    def test_room_type_selects_material_without_labels(self) -> None:
+        """Narwal room types drive hard-floor materials, not carpet guesses."""
+        assert _floor_material_for_room(1, room_types={1: 5}) == "tile"
+        assert _floor_material_for_room(2, room_types={2: 12}) == "timber"
+        assert _floor_material_for_room(3, room_types={3: 4}) == "timber"
+
+    def test_render_base_map_applies_subtle_texture(self) -> None:
+        """Rendered rooms have material texture while staying muted."""
+        width, height = 30, 30
+        compressed = _make_room_grid(width, height, room_id=1)
+
+        result = render_base_map(
+            compressed,
+            width,
+            height,
+            room_types={1: 4},
+            show_room_labels=False,
+        )
+
+        assert result is not None
+        samples = [
+            _rgb_for_grid(result, width, height, x, 12)
+            for x in (6, 9, 12, 15, 18, 21)
+        ]
+        assert len(set(samples)) > 1
+        assert all(max(rgb) - min(rgb) < 80 for rgb in samples)
+        assert all(max(rgb) < 225 for rgb in samples)
+
+    def test_room_type_changes_rendered_material(self) -> None:
+        """Different Narwal room types render as different material families."""
+        width, height = 20, 20
+        compressed = _make_room_grid(width, height, room_id=1)
+
+        kitchen = render_base_map(
+            compressed,
+            width,
+            height,
+            room_types={1: 4},
+            show_room_labels=False,
+        )
+        bathroom = render_base_map(
+            compressed,
+            width,
+            height,
+            room_types={1: 5},
+            show_room_labels=False,
+        )
+
+        assert kitchen is not None
+        assert bathroom is not None
+        assert _rgb_for_grid(kitchen, width, height, 11, 11) != _rgb_for_grid(
+            bathroom, width, height, 11, 11
+        )
+        assert _floor_material_for_room(1, room_types={1: 5}) in FLOOR_MATERIAL_COLORS
+
+    def test_render_base_map_applies_room_material_override(self) -> None:
+        """Explicit room material overrides affect the rendered floor texture."""
+        width, height = 24, 24
+        compressed = _make_room_grid(width, height, room_id=1)
+
+        timber = render_base_map(
+            compressed,
+            width,
+            height,
+            room_names={1: "Bedroom"},
+            room_types={1: 2},
+            show_room_labels=False,
+        )
+        carpet = render_base_map(
+            compressed,
+            width,
+            height,
+            room_names={1: "Bedroom"},
+            room_types={1: 2},
+            show_room_labels=False,
+            room_materials={"bedroom": "carpet"},
+        )
+
+        assert timber is not None
+        assert carpet is not None
+        timber_rgb = _rgb_for_grid(timber, width, height, 12, 12)
+        carpet_rgb = _rgb_for_grid(carpet, width, height, 12, 12)
+        assert max(carpet_rgb) < max(timber_rgb) - 25
+
+    def test_render_base_map_applies_room_relative_carpet_zone(self) -> None:
+        """Configured carpet zones render rugs inside the targeted room only."""
+        width, height = 40, 30
+        compressed = _make_room_grid(width, height, room_id=1)
+
+        result = render_base_map(
+            compressed,
+            width,
+            height,
+            room_names={1: "Lounge"},
+            room_types={1: 3},
+            show_room_labels=False,
+            carpet_zones=[
+                {
+                    "room": "lounge",
+                    "shape": "ellipse",
+                    "x_percent": 0.5,
+                    "y_percent": 0.5,
+                    "width_percent": 0.45,
+                    "height_percent": 0.32,
+                }
+            ],
+        )
+
+        assert result is not None
+        rug_rgb = _rgb_for_grid(result, width, height, 20, 15)
+        timber_rgb = _rgb_for_grid(result, width, height, 3, 3)
+        assert max(rug_rgb) < max(timber_rgb) - 25
+
+    def test_carpet_debug_image_overlays_carpet_material(self) -> None:
+        """Narwal's carpet debug PNG controls where carpet texture is rendered."""
+        width, height = 30, 20
+        compressed = _make_room_grid(width, height, room_id=1)
+        carpet_debug = _make_carpet_debug_png(
+            width * MAP_RENDER_SCALE,
+            height * MAP_RENDER_SCALE,
+            (0, 0, (width * MAP_RENDER_SCALE) // 2, height * MAP_RENDER_SCALE),
+        )
+
+        result = render_base_map(
+            compressed,
+            width,
+            height,
+            room_types={1: 4},
+            show_room_labels=False,
+            carpet_map_image=carpet_debug,
+        )
+
+        assert result is not None
+        carpet_rgb = _rgb_for_grid(result, width, height, 6, 10)
+        timber_rgb = _rgb_for_grid(result, width, height, 23, 10)
+        assert max(carpet_rgb) < max(timber_rgb) - 25
+
+    def test_carpet_debug_image_is_not_allowed_to_cover_the_whole_map(self) -> None:
+        """A noisy/full debug PNG is rejected instead of turning every room into carpet."""
+        width, height = 20, 20
+        compressed = _make_room_grid(width, height, room_id=1)
+        full_debug = _make_carpet_debug_png(
+            width * MAP_RENDER_SCALE,
+            height * MAP_RENDER_SCALE,
+            (0, 0, width * MAP_RENDER_SCALE, height * MAP_RENDER_SCALE),
+        )
+
+        result = render_base_map(
+            compressed,
+            width,
+            height,
+            room_types={1: 4},
+            show_room_labels=False,
+            carpet_map_image=full_debug,
+        )
+        without_debug = render_base_map(
+            compressed,
+            width,
+            height,
+            room_types={1: 4},
+            show_room_labels=False,
+        )
+
+        assert result is not None
+        assert without_debug is not None
+        assert _rgb_for_grid(result, width, height, 10, 10) == _rgb_for_grid(
+            without_debug, width, height, 10, 10
+        )
 
 
 class TestRenderOverlay:
