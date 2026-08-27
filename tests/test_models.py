@@ -4,9 +4,16 @@ from __future__ import annotations
 
 import logging
 import struct
+from dataclasses import replace
+from unittest.mock import patch
 
 from narwal_client.const import WorkingStatus
 from narwal_client.models import (
+    DOCK_TASK_DRY_DOCK_BAG,
+    DOCK_TASK_DRY_DUST_BIN,
+    DOCK_TASK_DRY_MOP,
+    DOCK_TASK_EMPTY_DUSTBIN,
+    DOCK_TASK_WASH_MOP,
     MapData,
     NarwalState,
     ObstacleInfo,
@@ -45,6 +52,122 @@ class TestNarwalState:
         state.update_from_working_status({"13": 18000})
         assert state.working_status == WorkingStatus.UNKNOWN
         assert not state.has_recent_active_working_status
+
+    def test_working_status_maps_dock_task_timers(self) -> None:
+        """Typed dock timer pairs expose task progress without marking cleaning."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2, "47": 3})
+
+        state.update_from_working_status({"8": 90, "9": 300, "12": 60, "13": 180})
+
+        assert state.active_dock_task_keys == (
+            DOCK_TASK_DRY_MOP,
+            DOCK_TASK_DRY_DOCK_BAG,
+        )
+        assert not state.is_cleaning
+        timer = state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG)
+        assert timer is not None
+        assert timer.remaining == 120
+        assert timer.progress_percent == 33
+
+    def test_dry_dock_bag_timer_survives_robot_departure(self) -> None:
+        """Dock-bag drying can continue after the robot leaves the dock."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2, "47": 3})
+        state.update_from_working_status({"12": 60, "13": 180})
+
+        state.update_from_base_status({"3": {"1": 4}, "11": 1, "47": 2})
+
+        assert state.active_dock_task_keys == (DOCK_TASK_DRY_DOCK_BAG,)
+        assert state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is not None
+
+    def test_other_dock_timers_require_dock_presence(self) -> None:
+        """Robot-owned dock timers are hidden once the robot is explicitly away."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2, "47": 3})
+        state.update_from_working_status({"10": 60, "11": 180})
+
+        state.update_from_base_status({"3": {"1": 4}, "11": 1, "47": 2})
+
+        assert state.active_dock_task_keys == ()
+        assert state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is None
+
+    def test_docked_v2_with_off_dock_fields_is_not_docked(self) -> None:
+        """Explicit dock fields override a coarse DOCKED_V2 working status."""
+        state = NarwalState()
+
+        state.update_from_base_status({"3": {"1": 2}, "11": 1, "47": 2})
+
+        assert state.working_status == WorkingStatus.DOCKED_V2
+        assert state.has_explicit_off_dock_signal
+        assert not state.is_docked
+
+    def test_dock_task_timer_uses_latest_reported_snapshot(self) -> None:
+        """Timer-backed dock tasks do not locally count down to completion."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2, "47": 3})
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=10,
+            target=20,
+            fields=("8", "9"),
+        )
+        timer = state.dock_drying_tasks[DOCK_TASK_DRY_MOP]
+        state.dock_drying_tasks[DOCK_TASK_DRY_MOP] = replace(
+            timer,
+            observed_at=timer.observed_at - 11,
+        )
+        timer = state.dock_drying_tasks[DOCK_TASK_DRY_MOP]
+
+        assert timer.remaining == 10
+        assert timer.progress_percent == 50
+        assert state.active_dock_task_keys == (DOCK_TASK_DRY_MOP,)
+
+    def test_zeroed_timers_do_not_create_dock_tasks(self) -> None:
+        """Configured timer totals at zero elapsed are idle, even with field 19."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "12": 4}, "11": 2})
+
+        state.update_from_working_status(
+            {"8": 0, "9": 300, "12": 0, "13": 180, "19": 1}
+        )
+
+        assert state.active_dock_task_keys == ()
+        assert not state.has_unmapped_active_dock_task
+
+    def test_idle_timer_snapshot_suppresses_stale_station_drying(self) -> None:
+        """Fresh typed timer evidence beats stale coarse station drying state."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "18": 4}, "11": 2})
+
+        state.update_from_working_status({"8": 0, "9": 300})
+
+        assert state.active_dock_task_keys == ()
+        assert not state.has_unmapped_active_dock_task
+        assert not state.is_station_active
+
+    def test_unmapped_dock_timer_expires_by_freshness_window(self) -> None:
+        """Unmapped timer fields stop blocking when their packet is stale."""
+        state = NarwalState()
+        state.update_from_working_status({"14": 60, "15": 180})
+        state.dock_drying_status_time -= 181
+
+        assert not state.has_unmapped_active_dock_task
+
+    def test_zeroed_unmapped_timer_does_not_block_commands(self) -> None:
+        """A zeroed unknown timer pair is a configured total, not active work."""
+        state = NarwalState()
+        state.update_from_working_status({"14": 0, "15": 180})
+
+        assert not state.has_unmapped_active_dock_task
+
+    def test_unmapped_dock_timer_blocks_commands(self) -> None:
+        """Unmapped active timer pairs are kept as a blocking safety signal."""
+        state = NarwalState()
+        state.update_from_working_status({"14": 60, "15": 180})
+
+        assert state.active_dock_task_keys == ()
+        assert state.has_unmapped_active_dock_task
 
     def test_zeroed_task_metrics_do_not_mark_cleaning(self) -> None:
         """A zeroed session counter is not evidence of an active clean.
@@ -93,6 +216,209 @@ class TestNarwalState:
         assert state.working_status == WorkingStatus.DOCKED
         assert state.is_docked
 
+    def test_base_status_maps_station_activity_to_dock_tasks(self) -> None:
+        """Coarse station activity still names emptying and washing tasks."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "18": 1}, "11": 2})
+        assert state.active_dock_task_keys == (DOCK_TASK_EMPTY_DUSTBIN,)
+
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "18": 2}, "11": 2})
+        assert state.active_dock_task_keys == (DOCK_TASK_WASH_MOP,)
+
+    def test_unknown_station_activity_blocks_commands(self) -> None:
+        """Unknown station activity must not be exposed as an idle dock."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "18": 99}, "11": 2})
+
+        assert state.active_dock_task_keys == ()
+        assert state.has_unmapped_active_dock_task
+
+    def test_unknown_dock_activity_blocks_commands(self) -> None:
+        """Unknown nonzero dock activity is not treated as a safe idle dock."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "12": 99}, "11": 2})
+
+        assert state.active_dock_task_keys == ()
+        assert state.has_unmapped_active_dock_task
+
+    def test_idle_base_status_clears_stale_coarse_dock_activity(self) -> None:
+        """A later authoritative idle packet clears stale dock_activity."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "12": 4}, "11": 2})
+        assert state.active_dock_task_keys == (DOCK_TASK_DRY_MOP,)
+
+        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2})
+
+        assert state.dock_activity == 0
+        assert state.active_dock_task_keys == ()
+
+    def test_stale_idle_base_status_preserves_private_dock_task_guard(self) -> None:
+        """Accepted command reservations block starts without publishing task state."""
+        state = NarwalState()
+        state.assume_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2})
+
+        assert state.active_dock_task_keys == (DOCK_TASK_EMPTY_DUSTBIN,)
+        assert state.blocks_robot_start_for_dock_task
+
+    def test_confirmed_dock_task_clears_reservation_then_idle_clears_task(self) -> None:
+        """Hardware activity owns state once a reservation has been confirmed."""
+        state = NarwalState()
+        state.assume_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "18": 1}, "11": 2})
+
+        assert state.assumed_active_dock_task is None
+        assert state.active_dock_task_keys == (DOCK_TASK_EMPTY_DUSTBIN,)
+
+        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2})
+
+        assert state.active_dock_task_keys == ()
+
+    def test_active_cleaning_clears_stale_station_activity(self) -> None:
+        """Cleaning telemetry clears coarse dock activity from prior station work."""
+        state = NarwalState()
+        state.station_activity = 1
+        state.dock_activity = 4
+        state.assume_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        state.update_from_working_status({"3": 120})
+
+        assert state.station_activity == 0
+        assert state.dock_activity == 0
+        assert not state.is_station_active
+        assert state.active_dock_task_keys == ()
+
+    def test_active_base_status_clears_stale_station_activity(self) -> None:
+        """Active robot base-status packets cannot keep stale dock switches on."""
+        state = NarwalState()
+        state.assume_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        state.update_from_base_status({"3": {"1": 4, "12": 4, "18": 1}, "11": 2})
+
+        assert state.dock_activity == 0
+        assert state.station_activity == 0
+        assert state.active_dock_task_keys == ()
+
+    def test_dock_activity_is_timer_presence_signal(self) -> None:
+        """Dock activity alone is enough to keep a robot-owned timer visible."""
+        state = NarwalState()
+        state.dock_activity = 4
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+
+        assert state.dock_task_timer(DOCK_TASK_DRY_MOP) is not None
+
+    def test_explicit_docked_status_is_timer_presence_signal(self) -> None:
+        """Docked working status keeps typed dock timers active without field 11/47."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2}})
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+
+        assert state.working_status == WorkingStatus.DOCKED_V2
+        assert state.is_docked
+        assert not state.has_dock_presence_signal
+        assert state.dock_task_timer(DOCK_TASK_DRY_MOP) is not None
+        assert state.active_dock_task_keys == (DOCK_TASK_DRY_MOP,)
+        assert state.blocks_robot_start_for_dock_task
+
+    def test_stale_dock_timer_does_not_remain_active(self) -> None:
+        """Typed dock timers stop driving visible state after telemetry expires."""
+        state = NarwalState()
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+
+        state.dock_drying_status_time -= 181
+
+        assert state.dock_task_timer(DOCK_TASK_DRY_MOP) is None
+        assert state.active_dock_task_keys == ()
+        assert not state.has_unmapped_active_dock_task
+        assert not state.blocks_robot_start_for_dock_task
+
+    def test_stale_dock_timer_with_station_activity_fails_closed(self) -> None:
+        """Stale typed identity cannot classify fresh-looking station work."""
+        state = NarwalState()
+        state.station_activity = 4
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+
+        state.dock_drying_status_time -= 181
+
+        assert state.dock_task_timer(DOCK_TASK_DRY_MOP) is None
+        assert state.active_dock_task_keys == ()
+        assert state.has_unmapped_active_dock_task
+        assert state.blocks_robot_start_for_dock_task
+
+    def test_robot_start_blocked_by_dock_work_except_typed_dock_bag(self) -> None:
+        """Only typed dock-bag drying is compatible with a new robot clean."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6, "18": 1}, "11": 2})
+        assert state.blocks_robot_start_for_dock_task
+
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2})
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        assert not state.blocks_robot_start_for_dock_task
+
+        state.dock_drying_status_time -= 181
+
+        assert state.active_dock_task_keys == ()
+        assert not state.blocks_robot_start_for_dock_task
+
+    def test_assumed_dock_task_temporarily_blocks_robot_start(self) -> None:
+        """Accepted-command reservations block new robot starts until telemetry arrives."""
+        state = NarwalState()
+        state.assume_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+        assert state.active_dock_task_keys == (DOCK_TASK_DRY_DOCK_BAG,)
+        assert state.blocks_robot_start_for_dock_task
+
+    def test_assumed_robot_clean_clears_on_active_telemetry(self) -> None:
+        """Accepted robot-start reservations stop once real cleaning status arrives."""
+        state = NarwalState()
+        state.assume_robot_clean()
+
+        state.update_from_working_status({"3": 120})
+
+        assert not state.has_assumed_robot_clean
+        assert state.is_cleaning
+
+    def test_dock_task_assumption_is_only_a_short_command_guard(self) -> None:
+        """Dock task assumptions must not fabricate long-running device state."""
+        state = NarwalState()
+
+        with patch("narwal_client.models.time.monotonic", return_value=1000.0):
+            state.assume_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+        with patch("narwal_client.models.time.monotonic", return_value=1029.0):
+            assert state.assumed_active_dock_task == DOCK_TASK_DRY_DOCK_BAG
+            assert state.active_dock_task_keys == (DOCK_TASK_DRY_DOCK_BAG,)
+        with patch("narwal_client.models.time.monotonic", return_value=1031.0):
+            assert state.assumed_active_dock_task is None
+            assert state.active_dock_task_keys == ()
+
     def test_update_from_base_status_charged(self) -> None:
         """Status 14 = fully charged on dock."""
         state = NarwalState()
@@ -137,6 +463,13 @@ class TestNarwalState:
         assert state.working_status == WorkingStatus.STANDBY
         assert state.dock_field11 == 2
         assert state.dock_field47 == 3
+        assert state.is_docked
+
+    def test_update_from_base_status_standby_on_dock_presence_only(self) -> None:
+        """STANDBY with field 3.3 dock presence means on dock."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 1, "3": 6}})
+        assert state.working_status == WorkingStatus.STANDBY
         assert state.is_docked
 
     def test_update_from_base_status_standby_on_dock_field47_only(self) -> None:
@@ -240,7 +573,7 @@ class TestNarwalState:
     def test_unknown_working_status_value(self) -> None:
         """Unmapped working_status value falls back to UNKNOWN."""
         state = NarwalState()
-        state.update_from_base_status({"3": {"1": 99}})
+        state.update_from_base_status({"3": {"1": 255}})
         assert state.working_status == WorkingStatus.UNKNOWN
 
     def test_unknown_working_status_warns_once(self, caplog) -> None:
@@ -531,7 +864,7 @@ class TestNarwalState:
         assert state.is_cleaning
         assert not state.is_returning
 
-    def test_unknown_working_status_value(self) -> None:
+    def test_unknown_working_status_high_value(self) -> None:
         """Unknown status values should fall back to UNKNOWN."""
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 255}})
@@ -571,7 +904,13 @@ class TestMapData:
             "4": 341,
             "5": 494,
             "6": {"1": -341, "2": 152, "3": -280, "4": 60},
-            "8": {"1": {"1": _float_to_uint32(-8.0188), "2": _float_to_uint32(0.221)}, "2": _float_to_uint32(0.036)},
+            "8": {
+                "1": {
+                    "1": _float_to_uint32(-8.0188),
+                    "2": _float_to_uint32(0.221),
+                },
+                "2": _float_to_uint32(0.036),
+            },
             "17": b"",
         }}
         m = MapData.from_response(decoded)
@@ -642,7 +981,14 @@ class TestMapData:
                     {
                         "1": 1,
                         "2": 14,
-                        "3": {"1": {"1": _float_to_uint32(-110.5), "2": _float_to_uint32(-129.5)}, "2": _float_to_uint32(11.0), "3": _float_to_uint32(41.0)},
+                        "3": {
+                            "1": {
+                                "1": _float_to_uint32(-110.5),
+                                "2": _float_to_uint32(-129.5),
+                            },
+                            "2": _float_to_uint32(11.0),
+                            "3": _float_to_uint32(41.0),
+                        },
                         "4": _float_to_uint32(180.0),
                     },
                 ],
@@ -704,13 +1050,27 @@ class TestParseObstacles:
                 {
                     "1": 1,
                     "2": 14,
-                    "3": {"1": {"1": _float_to_uint32(-110.5), "2": _float_to_uint32(-129.5)}, "2": _float_to_uint32(11.0), "3": _float_to_uint32(41.0)},
+                    "3": {
+                        "1": {
+                            "1": _float_to_uint32(-110.5),
+                            "2": _float_to_uint32(-129.5),
+                        },
+                        "2": _float_to_uint32(11.0),
+                        "3": _float_to_uint32(41.0),
+                    },
                     "4": _float_to_uint32(180.0),
                 },
                 {
                     "1": 4,
                     "2": 2,
-                    "3": {"1": {"1": _float_to_uint32(10.0), "2": _float_to_uint32(95.5)}, "2": _float_to_uint32(36.0), "3": _float_to_uint32(29.0)},
+                    "3": {
+                        "1": {
+                            "1": _float_to_uint32(10.0),
+                            "2": _float_to_uint32(95.5),
+                        },
+                        "2": _float_to_uint32(36.0),
+                        "3": _float_to_uint32(29.0),
+                    },
                     "4": _float_to_uint32(180.0),
                 },
             ],
@@ -736,7 +1096,14 @@ class TestParseObstacles:
             "1": {
                 "1": 13,
                 "2": 4,
-                "3": {"1": {"1": _float_to_uint32(-154.0), "2": _float_to_uint32(-55.5)}, "2": _float_to_uint32(13.0), "3": _float_to_uint32(20.0)},
+                "3": {
+                    "1": {
+                        "1": _float_to_uint32(-154.0),
+                        "2": _float_to_uint32(-55.5),
+                    },
+                    "2": _float_to_uint32(13.0),
+                    "3": _float_to_uint32(20.0),
+                },
                 "4": _float_to_uint32(90.0),
             },
         }
@@ -753,7 +1120,14 @@ class TestParseObstacles:
             "1": {
                 "1": 1,
                 "2": 14,
-                "3": {"1": {"1": _float_to_uint32(-110.5), "2": _float_to_uint32(-129.5)}, "2": _float_to_uint32(11.0), "3": _float_to_uint32(41.0)},
+                "3": {
+                    "1": {
+                        "1": _float_to_uint32(-110.5),
+                        "2": _float_to_uint32(-129.5),
+                    },
+                    "2": _float_to_uint32(11.0),
+                    "3": _float_to_uint32(41.0),
+                },
                 "4": _float_to_uint32(180.0),
             },
         }
@@ -908,9 +1282,10 @@ class TestCurrentRoomTracking:
 
 
 class TestRoomInfoNames:
-    """Tests for the shared RoomType→name table (issue #22).
+    """Tests for the shared RoomType-to-name table (issue #22).
 
-    The app names rooms through one switch keyed only on the RoomType enum (no model parameter), so every model resolves the same names — taken verbatim from the app's en-US.json.
+    The app names rooms through one switch keyed only on the RoomType enum, so
+    every model resolves the same names from the app's en-US.json.
     """
 
     def test_shared_table_names(self) -> None:
