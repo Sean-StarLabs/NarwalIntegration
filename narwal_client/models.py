@@ -764,6 +764,22 @@ class NarwalState:
         )
 
     @property
+    def has_explicit_off_dock_signal(self) -> bool:
+        """True when dock telemetry explicitly says the robot is not seated."""
+        if (
+            self.dock_sub_state == 1
+            or self.dock_activity > 0
+            or self.dock_field11 >= 2
+            or self.dock_field47 in (1, 3)
+        ):
+            return False
+        return (
+            self.dock_presence == 2
+            or self.dock_sub_state == 2
+            or (self.dock_field11 == 1 and self.dock_field47 == 2)
+        )
+
+    @property
     def is_docked(self) -> bool:
         """True when on dock: DOCKED(10), CHARGED(14), DOCKED_V2(2), or dock field signals.
 
@@ -780,6 +796,8 @@ class NarwalState:
         cleaning is not active, since the robot can report unmapped states
         (e.g. self-test) while physically docked.
         """
+        if self.has_explicit_off_dock_signal:
+            return False
         if self.working_status in (
             WorkingStatus.DOCKED, WorkingStatus.CHARGED, WorkingStatus.DOCKED_V2,
         ):
@@ -805,6 +823,8 @@ class NarwalState:
     @property
     def has_dock_presence_signal(self) -> bool:
         """True when any field reports the robot is on the dock."""
+        if self.has_explicit_off_dock_signal:
+            return False
         return (
             self.dock_presence in (1, 6)
             or self.dock_sub_state == 1

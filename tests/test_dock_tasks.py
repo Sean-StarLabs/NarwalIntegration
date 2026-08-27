@@ -96,6 +96,15 @@ def test_idle_docked_state_can_start_any_single_task() -> None:
     )
 
 
+def test_docked_v2_with_off_dock_fields_hides_dock_start_controls() -> None:
+    """A coarse docked status is not enough when dock telemetry says off-dock."""
+    state = NarwalState()
+    state.update_from_base_status({"3": {"1": 2}, "11": 1, "47": 2})
+
+    assert not state.is_docked
+    assert not can_start_dock_task(state, DOCK_TASK_EMPTY_DUSTBIN)
+
+
 def test_cleaning_state_hides_dock_start_controls() -> None:
     """Robot cleaning context blocks dock starts."""
     state = NarwalState(working_status=WorkingStatus.CLEANING)

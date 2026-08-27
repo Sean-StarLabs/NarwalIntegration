@@ -92,6 +92,16 @@ class TestNarwalState:
         assert state.active_dock_task_keys == ()
         assert state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is None
 
+    def test_docked_v2_with_off_dock_fields_is_not_docked(self) -> None:
+        """Explicit dock fields override a coarse DOCKED_V2 working status."""
+        state = NarwalState()
+
+        state.update_from_base_status({"3": {"1": 2}, "11": 1, "47": 2})
+
+        assert state.working_status == WorkingStatus.DOCKED_V2
+        assert state.has_explicit_off_dock_signal
+        assert not state.is_docked
+
     def test_dock_task_timer_uses_latest_reported_snapshot(self) -> None:
         """Timer-backed dock tasks do not locally count down to completion."""
         state = NarwalState()

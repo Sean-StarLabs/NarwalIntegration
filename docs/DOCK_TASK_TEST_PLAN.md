@@ -138,6 +138,46 @@ Notes:
 - Parallel dock-task starts were not relaxed. While one task was active, the
   other task switches were unavailable.
 
+### 2026-08-27, Upstairs Flow 2
+
+Tested with Home Assistant Core stopped and a direct local client connected
+from the HA SSH environment. The test started one dock task from idle, sent one
+robot-side command, captured state at roughly `T+2s` and `T+10s`, then cleaned
+up to idle before the next cell.
+
+Verified robot-command behavior while `empty_dustbin` was active:
+
+| Robot command | Response | Follow-up state | Integration rule |
+|---|---|---|---|
+| `locate` | `SUCCESS` | Emptying continued | Safe but optional to expose |
+| `return_to_base` | `CONFLICT` | Emptying continued | Hide while docked/dock task active |
+| `pause` | `SUCCESS` | Emptying cleared/idle | Hide; raw command affects dock work |
+| `stop` | `SUCCESS` | Emptying cleared/idle | Keep on dock switch only, not vacuum entity |
+| `clean/start_clean` | `CONFLICT` | Emptying continued | Hide start/clean-area |
+
+Verified robot-command behavior while `wash_mop` was active:
+
+| Robot command | Response | Follow-up state | Integration rule |
+|---|---|---|---|
+| `locate` | `SUCCESS` | Washing continued | Safe but optional to expose |
+| `return_to_base` | `APPLIED` | Stale paused/docked-looking state | Hide while docked/dock task active |
+| `pause` | `SUCCESS` | Stale paused/docked-looking state | Hide; raw command affects dock work |
+| `stop` | `SUCCESS` | Transitioned into `dry_mop` | Keep stop scoped to dock task controls |
+| `clean/start_clean` | `SUCCESS` | Did not start cleaning; left contradictory dock fields | Hide start/clean-area |
+
+After the raw `clean/start_clean` attempt during `wash_mop`, the robot reported
+`working_status=DOCKED_V2` while explicit dock fields reported off-dock
+(`dock_field11=1`, `dock_field47=2`, later `dock_presence=0`). Recall was
+accepted in that state. The integration must therefore treat explicit off-dock
+fields as stronger than the coarse `DOCKED_V2` value for dock readiness and
+return-home availability.
+
+Drying-task cross-section rows were not considered verified in this run because
+`dry_mop`, `dry_dust_bin`, and `dry_dock_bag` setup starts returned `CONFLICT`
+after the contradictory post-wash state. Their start/stop baseline remains the
+2026-08-26 Downstairs evidence above until a fresh accepted drying run is
+captured.
+
 ## Per-Task Evidence
 
 ### Empty dustbin
