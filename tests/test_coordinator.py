@@ -2112,6 +2112,7 @@ async def test_setup_retains_trajectory_received_with_initial_map() -> None:
     coordinator._pending_map_display_cache_restore = None
     coordinator._clean_session_active = False
     coordinator._prev_working_status = WorkingStatus.UNKNOWN
+    coordinator._cloud_client = None
     coordinator._listen_task = None
     coordinator._fast_poll_remaining = 0
     coordinator.config_entry.async_create_background_task.side_effect = (
