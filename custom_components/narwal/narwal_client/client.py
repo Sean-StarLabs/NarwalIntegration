@@ -364,6 +364,17 @@ class NarwalClient:
 
         self.state.update_from_base_status(decoded)
 
+    def _update_from_display_map_broadcast(self, decoded: dict[str, Any]) -> None:
+        """Apply a display-map broadcast and mark the trajectory as fresh."""
+        self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
+        self._last_display_map_time = time.monotonic()
+        _LOGGER.debug(
+            "display_map received: robot=(%.2f, %.2f) ts=%d",
+            self.state.map_display_data.robot_x,
+            self.state.map_display_data.robot_y,
+            self.state.map_display_data.timestamp,
+        )
+
     async def connect(self) -> None:
         """Establish WebSocket connection to the vacuum.
 
@@ -637,14 +648,7 @@ class NarwalClient:
         elif short_topic == "status/download_status":
             self.state.update_from_download_status(decoded)
         elif short_topic == "map/display_map":
-            self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
-            self._last_display_map_time = time.monotonic()
-            _LOGGER.debug(
-                "display_map received: robot=(%.2f, %.2f) ts=%d",
-                self.state.map_display_data.robot_x,
-                self.state.map_display_data.robot_y,
-                self.state.map_display_data.timestamp,
-            )
+            self._update_from_display_map_broadcast(decoded)
         if self.on_state_update:
             self.on_state_update(self.state)
 
@@ -1086,7 +1090,7 @@ class NarwalClient:
             elif short_topic == "status/download_status":
                 self.state.update_from_download_status(decoded)
             elif short_topic == "map/display_map":
-                self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
+                self._update_from_display_map_broadcast(decoded)
 
         raise NarwalCommandError(
             f"No field5 response within {timeout}s"
