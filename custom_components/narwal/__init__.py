@@ -23,15 +23,16 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import service
 
 from .const import (
+    CONF_DEVICE_ID,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
     DOMAIN,
     PLATFORMS,
     SERVICE_CLEAN_ROOMS,
     configured_model_name,
-    fan_speed_list_for,
+    fan_speed_map_for,
 )
-from .coordinator import NarwalCoordinator, can_start_cleaning
+from .coordinator import NarwalCoordinator, can_prepare_clean_start
 from .narwal_client import (
     CleaningRoute,
     CommandResult,
@@ -47,6 +48,16 @@ _LOGGER = logging.getLogger(__name__)
 
 NarwalConfigEntry: TypeAlias = ConfigEntry[NarwalCoordinator]
 
+_CONFIG_ENTRY_MINOR_VERSION = 2
+_LEGACY_REPLACED_SENSOR_SUFFIXES = (
+    "base_station_cleaning_filter_used_hours",
+    "current_room",
+    "map_metadata",
+    "status",
+    "task_progress",
+    "task_status",
+)
+
 FIELD_ROOMS = "rooms"
 FIELD_MODE = "mode"
 FIELD_SUCTION = "suction"
@@ -61,16 +72,18 @@ WORK_MODE_OPTIONS: dict[str, WorkMode] = {
     "vacuum_then_mop": WorkMode.VACUUM_THEN_MOP,
     "vacuum_and_mop": WorkMode.VACUUM_AND_MOP,
 }
-SUCTION_OPTIONS: dict[str, FanLevel] = {
-    "ai": FanLevel.UNSPECIFIED,
-    "quiet": FanLevel.MUTE,
-    "standard": FanLevel.NORMAL,
-    "strong": FanLevel.STRONG,
-    "super": FanLevel.DEEP,
-    "ultra": FanLevel.SUPER,
-    "super_powerful": FanLevel.DEEP,
-    "ultra_powerful": FanLevel.SUPER,
-}
+SUCTION_OPTIONS = (
+    "ai",
+    "quiet",
+    "standard",
+    "normal",
+    "strong",
+    "ultra",
+    "super",
+    "ultra_powerful",
+    "super_powerful",
+    "max",
+)
 WATER_OPTIONS: dict[str, MopHumidity] = {
     "dry": MopHumidity.DRY,
     "normal": MopHumidity.NORMAL,
@@ -103,6 +116,34 @@ CLEAN_ROOMS_SCHEMA = vol.Schema(
         vol.Optional(FIELD_ROUTE): vol.In(ROUTE_OPTIONS),
     }
 )
+
+SUCTION_OPTION_LABELS: dict[str, str] = {
+    "quiet": "Quiet",
+    "standard": "Standard",
+    "normal": "Standard",
+    "strong": "Strong",
+    "ultra": "Ultra",
+    "ultra_powerful": "Ultra",
+    "super": "Super",
+    "super_powerful": "Super",
+    "max": "Super",
+}
+
+
+def _suction_for_coordinator(
+    coordinator: NarwalCoordinator,
+    option: str,
+) -> FanLevel:
+    """Return the model-valid suction level for a service option."""
+    if option == "ai":
+        return FanLevel.UNSPECIFIED
+    label = SUCTION_OPTION_LABELS[option]
+    fan_map = fan_speed_map_for(coordinator.config_entry.data, include_aliases=False)
+    if label not in fan_map:
+        raise HomeAssistantError(
+            f"{label} suction is not supported by this Narwal model"
+        )
+    return fan_map[label]
 
 
 def _domain_data(hass: HomeAssistant) -> dict[str, NarwalCoordinator]:
@@ -322,7 +363,6 @@ def _async_register_services(hass: HomeAssistant) -> None:
         coordinator = coordinators[0]
 
         work_mode = WORK_MODE_OPTIONS[call.data[FIELD_MODE]]
-        fan = SUCTION_OPTIONS[call.data[FIELD_SUCTION]]
         water = WATER_OPTIONS[call.data[FIELD_WATER]]
         mop_strength = MOP_STRENGTH_OPTIONS[call.data[FIELD_MOP_STRENGTH]]
         passes = call.data[FIELD_PASSES]
@@ -338,12 +378,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
         if not room_ids:
             raise HomeAssistantError("At least one room must be selected")
 
-        if fan is FanLevel.SUPER and "Ultra" not in fan_speed_list_for(
-            coordinator.config_entry.data
-        ):
-            raise HomeAssistantError(
-                "Ultra suction is not supported by this Narwal model"
-            )
+        fan = _suction_for_coordinator(coordinator, call.data[FIELD_SUCTION])
         route = ROUTE_OPTIONS.get(route_label, coordinator.clean_settings.route)
         requested_settings = RoomCleanSettings(
             work_mode=work_mode,
@@ -362,7 +397,9 @@ def _async_register_services(hass: HomeAssistant) -> None:
         async with coordinator.dock_action_lock:
             if not await coordinator.async_refresh_dock_status():
                 raise HomeAssistantError("Narwal status could not be refreshed")
-            if not can_start_cleaning(coordinator.client.state):
+            if not can_prepare_clean_start(coordinator.client.state):
+                raise HomeAssistantError("Narwal room clean cannot be started right now")
+            if not await coordinator.async_prepare_clean_start():
                 raise HomeAssistantError("Narwal room clean cannot be started right now")
 
             client = coordinator.client
@@ -418,7 +455,9 @@ async def async_setup(hass: HomeAssistant, config: dict) -> bool:
 
 
 async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) -> bool:
-    """Migrate old config entries to version 2 (add product_key)."""
+    """Migrate old config entries and remove replaced status sensors."""
+    update_kwargs: dict[str, object] = {}
+
     if config_entry.version < 2:
         _LOGGER.info(
             "Migrating Narwal config entry from version %d to 2",
@@ -429,15 +468,65 @@ async def async_migrate_entry(hass: HomeAssistant, config_entry: ConfigEntry) ->
             new_data[CONF_PRODUCT_KEY] = "QoEsI5qYXO"
         if CONF_MODEL not in new_data:
             new_data[CONF_MODEL] = "Narwal Flow"
-        hass.config_entries.async_update_entry(
-            config_entry, data=new_data, version=2,
-        )
+        update_kwargs["data"] = new_data
+        update_kwargs["version"] = 2
         _LOGGER.info("Migration complete: product_key=%s", new_data[CONF_PRODUCT_KEY])
+
+    if getattr(config_entry, "minor_version", 1) < _CONFIG_ENTRY_MINOR_VERSION:
+        _async_remove_legacy_replaced_sensors(hass, config_entry)
+        update_kwargs["minor_version"] = _CONFIG_ENTRY_MINOR_VERSION
+
+    if update_kwargs:
+        hass.config_entries.async_update_entry(config_entry, **update_kwargs)
     return True
+
+
+def _async_remove_legacy_replaced_sensors(
+    hass: HomeAssistant,
+    config_entry: ConfigEntry,
+) -> None:
+    """Remove old sensors now represented by native entities or attributes."""
+    device_id = config_entry.data.get(CONF_DEVICE_ID)
+    if not device_id:
+        return
+
+    registry = er.async_get(hass)
+    unique_ids = {
+        f"{device_id}_{suffix}" for suffix in _LEGACY_REPLACED_SENSOR_SUFFIXES
+    }
+    entity_ids: set[str] = set()
+
+    for unique_id in unique_ids:
+        entity_id = registry.async_get_entity_id(
+            "sensor",
+            DOMAIN,
+            unique_id,
+        )
+        if entity_id is not None:
+            entity_ids.add(entity_id)
+
+    for entry in er.async_entries_for_config_entry(
+        registry,
+        config_entry.entry_id,
+    ):
+        if (
+            entry.domain == "sensor"
+            and entry.platform == DOMAIN
+            and entry.unique_id in unique_ids
+        ):
+            entity_ids.add(entry.entity_id)
+
+    for entity_id in sorted(entity_ids):
+        registry_entry = registry.async_get(entity_id)
+        if registry_entry is None or registry_entry.platform != DOMAIN:
+            continue
+        _LOGGER.info("Removing legacy Narwal sensor %s", entity_id)
+        registry.async_remove(entity_id)
 
 
 async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bool:
     """Set up Narwal from a config entry."""
+    _async_remove_legacy_replaced_sensors(hass, entry)
     coordinator = NarwalCoordinator(hass, entry)
     try:
         await coordinator.async_setup()

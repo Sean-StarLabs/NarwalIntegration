@@ -79,8 +79,8 @@ Direct client calls:
 | Charging to resume | all five dock tasks | active task if present | Separate recharge from dock maintenance |
 | Dock-side phase during clean | none | robot stop, matching dock stop | Keep robot cancellation available |
 | Unmapped active station task | all five dock tasks | active task if known | Block unsafe starts |
-| `dry_dock_bag` active | room clean, all other dock tasks | `dry_dock_bag` | Validate robot-compatible dock task |
-| Robot leaves while `dry_dock_bag` active | no dock starts | `dry_dock_bag` | Preserve dock-owned task after departure |
+| `dry_dock_bag` active | room clean, all other dock tasks | `dry_dock_bag` | Validate clean starts while dock-bag drying continues |
+| Robot leaves while `dry_dock_bag` active | no dock starts | `dry_dock_bag` | Preserve already-running dock-owned task after departure |
 
 ## Conflict Matrix
 
@@ -106,7 +106,9 @@ For each active dock task, also try:
 Expected conservative default before verification:
 
 - Other dock task starts are unavailable.
-- Robot start is unavailable except during verified `dry_dock_bag`.
+- Robot start is exposed directly during typed drying tasks. During a single
+  emptying or washing task, it is exposed when preflight can stop that task,
+  refresh, then send the clean command.
 - Robot stop remains available only when the dock task is part of an active
   robot clean session.
 - Locate and return-to-base should not run while station work would make the
@@ -185,6 +187,71 @@ confirmed the same dust-bin drying task was active. Treat that as real device
 telemetry, not a restored HA switch assumption. Dock task switches should only
 come from robot telemetry or a short accepted-command guard.
 
+### 2026-08-29, Flow 2 upstairs, firmware `v01.09.08.00`
+
+Tested through Home Assistant service calls against the upstairs robot.
+
+| Scenario | Result | Notes |
+|---|---|---|
+| HA restart/load while robot docked idle | needs refresh | Vacuum loaded as `docked`, but all dock task switches were `unavailable` until `homeassistant.update_entity` refreshed the Narwal entities. |
+| `empty_dustbin` start/stop | verified | Start set only the empty switch on; other dock starts were unavailable; stop cleared it back to idle. |
+| `wash_mop` start/stop | verified | Stop was accepted and then the dock automatically entered `dry_mop`, matching app-style wash behavior. |
+| clean start during `dry_mop` | blocked | Current code returned a service error instead of stopping the safe blocker first. |
+| `dry_mop` stop | verified | Generic single-task stop cleared the task after the auto-dry phase. |
+| `dry_dust_bin` start | verified | Timer/progress appeared as `45m` and percent progress. |
+| clean start during `dry_dust_bin` | blocked | Current code rejected before attempting a safe blocker stop. |
+| `dry_dust_bin` stop after stale state | fixed in code | First stop attempt was rejected before refresh; an explicit entity refresh then allowed the scoped `0805` stop to clear it. Switch stop now refreshes before stop validation. |
+| `dry_dock_bag` start/stop | verified with caveat | Scoped `0801` stop cleared a correctly typed dock-bag drying task after status settled. A generic-force-end probe did not clear it and briefly exposed overlapping dry task telemetry; do not replace the scoped payload. |
+| clean start during `dry_dock_bag` | accepted, needs repeat | `narwal.clean_rooms` returned success while dock-bag drying was active; HA did not show robot progress for ~25s, then after a HA restart the robot reported Bathroom cleaning at 91%. Treat this as evidence that the robot may accept it, not as the integration rule for a new Start intent. |
+| robot pause during near-complete clean | inconclusive | `vacuum.pause` returned success but HA stayed cleaning at 91%; this may have been a near-completion race. |
+| robot stop/return after accepted clean | verified | `vacuum.stop` accepted, then `vacuum.return_to_base` accepted. After a refresh the vacuum was `docked` and all dock switches were idle. |
+| repeat clean start after `dry_mop` | blocked by hardware fault | After deploying the stricter start planner, a room clean request stopped `dry_mop` and was accepted. Follow-up refresh showed Bathroom progress, but the robot then entered fault `34603041` (`0x02100021`): trapped while navigating back to the base, with no automatic recall. Further live testing needs the upstairs robot physically cleared/reset first. |
+
+Code follow-up from this run:
+
+- Dock switch start/stop service methods refresh before rejecting so stale local
+  state does not block a task that fresh telemetry can stop.
+- Clean start paths should treat Start as an intent: hand typed drying tasks to
+  the robot command, or stop one known emptying/washing task and refresh first.
+  They still fail closed for unmapped activity, ambiguous mixed blockers,
+  active robot work, faults, and stale status.
+- Multi-target room-clean service calls preflight every target before any start.
+  If any target would require stopping a dock task, the call fails before
+  mutation because dock-stop preparation cannot be rolled back atomically.
+- Vacuum supported features should expose Start/Clean Area when the clean-start
+  planner can first clear a safe dock blocker.
+
+### 2026-08-29, Flow 2 downstairs, firmware `v01.09.08.00`
+
+Tested through Home Assistant first, then with Core stopped and a direct local
+client for commands that intentionally bypass the integration's safety gate.
+
+| Active dock task | HA Start with preflight | Raw clean command | Start rule |
+|---|---|---|---|
+| none | accepted; cleaning began | not repeated | send directly |
+| `empty_dustbin` | stopped task, then cleaning began | `CONFLICT` in the direct-client matrix | stop, refresh, start |
+| `wash_mop` | stopped task, then cleaning began | previously returned success without starting and left contradictory fields | stop, refresh, start |
+| `dry_mop` | stopped by the old preflight, then cleaning began | accepted; timer cleared and robot departed | send directly |
+| `dry_dust_bin` | stopped by the old preflight, then cleaning began | accepted; timer cleared and robot departed | send directly |
+| `dry_dock_bag` | stopped by the old preflight, then cleaning began | accepted; timer remained active after robot departure | send directly |
+
+While the robot was cleaning, Home Assistant removed the native Start feature.
+The public service therefore rejected a second start before it reached the
+integration action method.
+
+A raw `dry_station_bag` command sent while `dry_mop` was active returned success,
+but repeated full status refreshes never reported dock-bag drying. This is a
+no-op, not proof that user-started dock tasks can run in parallel. Parallel dock
+task starts remain unavailable. If authoritative telemetry reports multiple
+drying timers, the clean command may be sent directly because each reported
+drying task has independently been verified as start-compatible. Mixed
+emptying/washing plus drying remains fail-closed.
+
+Direct raw starts also showed why command acceptance alone is insufficient:
+after a clean command, coarse `DOCKED_V2` persisted briefly while fields 11 and
+47 correctly changed to off-dock. Follow-up telemetry, not the response code or
+coarse status, was used to classify every result.
+
 ## Per-Task Evidence
 
 ### Empty dustbin
@@ -235,7 +302,8 @@ Verify:
 - Start command accepted from docked idle.
 - Active state maps to `dry_dock_bag`.
 - Timer fields `12/13`, if present, produce `progress` and `time_left`.
-- Robot can start a clean while dock-bag drying continues.
+- A new robot Start intent leaves dock-bag drying active and sends the clean
+  command directly.
 - The switch stays on after the robot leaves the dock if the dock task is still
   running.
 - Typed stop stops dock-bag drying without cancelling a robot clean.
@@ -255,8 +323,8 @@ Unit/entity tests should cover:
 - Wake paths refresh status and revalidate the selected task before command
   dispatch.
 - Polling-only command assumptions clear on authoritative idle state or TTL.
-- `dry_dock_bag` is preserved during robot departure only when backed by typed
-  evidence or a bounded accepted-command fallback.
+- `dry_dock_bag` remains active when a new robot Start is sent; authoritative
+  dock-bag telemetry remains visible after the robot departs.
 - Dock maintenance does not create charge-to-resume.
 - Robot stop remains available during active-clean dock phases.
 

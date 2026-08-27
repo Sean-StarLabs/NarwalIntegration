@@ -7,6 +7,8 @@ import struct
 from dataclasses import replace
 from unittest.mock import patch
 
+import pytest
+
 from narwal_client.const import WorkingStatus
 from narwal_client.models import (
     DOCK_TASK_DRY_DOCK_BAG,
@@ -35,7 +37,7 @@ class TestNarwalState:
         assert not state.is_returning
 
     def test_update_from_working_status(self) -> None:
-        """working_status topic sets cleaning metrics and marks active cleaning."""
+        """working_status topic sets cleaning metrics without rewriting status."""
         state = NarwalState()
         # Field 2 = coveredArea (float32, m²); field 13 = totalDryStationBagTime, ignored.
         state.update_from_working_status(
@@ -43,7 +45,7 @@ class TestNarwalState:
         )
         assert state.cleaning_time == 120
         assert state.cleaning_area == 12.5
-        assert state.working_status == WorkingStatus.CLEANING
+        assert state.working_status == WorkingStatus.UNKNOWN
         assert state.has_recent_active_working_status
 
     def test_working_status_station_timers_do_not_mark_cleaning(self) -> None:
@@ -51,7 +53,33 @@ class TestNarwalState:
         state = NarwalState()
         state.update_from_working_status({"13": 18000})
         assert state.working_status == WorkingStatus.UNKNOWN
+        assert state.last_active_working_status_time == 0.0
         assert not state.has_recent_active_working_status
+
+    def test_robot_side_drying_ignores_stale_clean_counters(self) -> None:
+        """Mop and robot-bin drying timers override prior clean metrics."""
+        for payload in (
+            {"3": 120, "8": 60, "9": 180},
+            {"3": 120, "10": 60, "11": 180},
+        ):
+            state = NarwalState()
+            state.update_from_base_status(
+                {"3": {"1": 10, "3": 6}, "11": 2, "47": 3}
+            )
+
+            state.update_from_working_status(payload)
+
+            assert not state.has_recent_active_working_status
+
+    def test_dock_bag_drying_does_not_hide_live_clean_counters(self) -> None:
+        """Dock-bag drying may continue while the robot cleans off-dock."""
+        state = NarwalState()
+
+        state.update_from_working_status(
+            {"3": 120, "12": 60, "13": 180}
+        )
+
+        assert state.has_recent_active_working_status
 
     def test_working_status_maps_dock_task_timers(self) -> None:
         """Typed dock timer pairs expose task progress without marking cleaning."""
@@ -101,6 +129,80 @@ class TestNarwalState:
         assert state.working_status == WorkingStatus.DOCKED_V2
         assert state.has_explicit_off_dock_signal
         assert not state.is_docked
+
+    def test_off_dock_fields_prevent_false_terminal_metric_suppression(self) -> None:
+        """A coarse dock enum cannot suppress later live off-dock metrics."""
+        state = NarwalState()
+
+        state.update_from_base_status(
+            {"3": {"1": 10, "3": 6, "10": 1}, "11": 2, "47": 3}
+        )
+        assert state.last_terminal_working_status_time > 0
+
+        state.update_from_base_status({"3": {"1": 2}, "11": 1, "47": 2})
+        state.update_from_working_status({"3": 120})
+
+        assert state.has_explicit_off_dock_signal
+        assert state.has_recent_active_working_status
+        assert state.is_cleaning
+
+    def test_off_dock_standby_clears_terminal_metric_suppression(self) -> None:
+        """Explicit departure clears a prior terminal timestamp before metrics."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 10, "3": 6, "10": 1}, "11": 2, "47": 3}
+        )
+        assert state.last_terminal_working_status_time > 0
+
+        state.update_from_base_status(
+            {"3": {"1": 1, "3": 2, "10": 2}, "11": 1, "47": 2}
+        )
+        state.update_from_working_status({"3": 120})
+
+        assert state.working_status == WorkingStatus.STANDBY
+        assert state.has_explicit_off_dock_signal
+        assert state.last_terminal_working_status_time == 0.0
+        assert state.has_recent_active_working_status
+        assert state.is_cleaning
+
+    def test_nested_off_dock_fields_apply_before_terminal_classification(self) -> None:
+        """Current nested presence overrides retained dock indicators."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 10, "3": 6, "10": 1}, "11": 2, "47": 3}
+        )
+
+        state.update_from_base_status({"3": {"1": 2, "3": 2, "10": 2}})
+        state.update_from_working_status({"3": 120})
+
+        assert state.has_explicit_off_dock_signal
+        assert state.has_recent_active_working_status
+        assert state.is_cleaning
+
+    def test_sparse_docked_status_preserves_current_dock_evidence(self) -> None:
+        """Retained off-dock fields cannot erase a newer confirmed docking."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 4, "3": 2, "10": 2}})
+        state.update_from_base_status({"3": {"1": 10, "3": 6}})
+
+        state.update_from_base_status({"3": {"1": 2}})
+
+        assert not state.has_explicit_off_dock_signal
+        assert state.is_docked
+
+    def test_presence_only_departure_clears_retained_dock_evidence(self) -> None:
+        """Current nested departure wins over omitted prior dock fields."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 10, "3": 6, "10": 1}, "11": 2, "47": 3}
+        )
+
+        state.update_from_base_status({"3": {"1": 2, "3": 2}})
+        state.update_from_working_status({"3": 120})
+
+        assert state.has_explicit_off_dock_signal
+        assert state.has_recent_active_working_status
+        assert state.is_cleaning
 
     def test_explicit_off_dock_fields_override_retained_dock_activity(self) -> None:
         """Coarse station activity cannot override current off-dock fields."""
@@ -173,6 +275,15 @@ class TestNarwalState:
         assert state.active_dock_task_keys == (DOCK_TASK_DRY_MOP,)
         assert not state.has_fresh_idle_dock_drying_snapshot
 
+    def test_recent_clean_metrics_preserve_fresh_emptying_activity(self) -> None:
+        """An intermediate empty phase remains active despite recent counters."""
+        state = NarwalState(working_status=WorkingStatus.CLEANING)
+        state.update_from_working_status({"3": 60})
+        state.station_activity = 1
+
+        assert state.has_recent_active_working_status
+        assert state.is_station_active
+
     def test_unmapped_dock_timer_expires_by_freshness_window(self) -> None:
         """Unmapped timer fields stop blocking when their packet is stale."""
         state = NarwalState()
@@ -213,6 +324,74 @@ class TestNarwalState:
         assert state.is_docked
         assert state.working_status == WorkingStatus.DOCKED
 
+    def test_working_status_decodes_progress_and_remaining_time(self) -> None:
+        """working_status reports progress and remaining time for vacuum attrs."""
+        state = NarwalState()
+
+        state.update_from_working_status(
+            {"1": _float_to_uint32(0.64), "3": 120, "4": 600}
+        )
+
+        assert state.task_progress_percent == 64
+        assert state.cleaning_time == 120
+        assert state.task_elapsed_time == 120
+        assert state.task_remaining_time == 600
+
+    def test_non_cleaning_base_status_clears_stale_task_details(self) -> None:
+        """Progress/current-room fields from the prior clean should not leak."""
+        state = NarwalState()
+        state.task_progress_percent = 72
+        state.task_elapsed_time = 900
+        state.task_remaining_time = 300
+        state.current_room_id = 4
+        state.current_room_aux_name = "Kitchen"
+
+        state.update_from_base_status({"3": {"1": 10, "10": 1}})
+
+        assert state.task_progress_percent is None
+        assert state.task_elapsed_time == 0
+        assert state.task_remaining_time == 0
+        assert state.current_room_id is None
+        assert state.current_room_aux_name == ""
+
+    def test_terminal_docked_status_clears_stale_paused_context(self) -> None:
+        """A stale paused bit cannot keep a confirmed docked robot active."""
+        state = NarwalState()
+        state.last_active_working_status_time = 1.0
+        state.task_progress_percent = 72
+        state.task_elapsed_time = 900
+        state.current_room_id = 4
+
+        state.update_from_base_status(
+            {"3": {"1": 10, "2": 1, "10": 1}, "11": 2, "47": 3}
+        )
+
+        assert state.last_active_working_status_time == 0.0
+        assert not state.has_recent_active_working_status
+        assert state.task_progress_percent is None
+        assert state.task_elapsed_time == 0
+        assert state.current_room_id is None
+        assert state.is_docked
+
+    def test_off_dock_task_completed_clears_stale_paused_context(self) -> None:
+        """Completion cannot retain a resumable paused overlay off the dock."""
+        state = NarwalState(working_status=WorkingStatus.CLEANING)
+        state.is_paused = True
+        state.cleaning_area = 25.5
+        state.cleaning_time = 900
+        state.task_elapsed_time = 900
+        state.dock_presence = 2
+
+        state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.TASK_COMPLETED), "2": 1, "3": 2}}
+        )
+
+        assert not state.is_paused
+        assert state.cleaning_area == 0.0
+        assert state.cleaning_time == 0
+        assert state.task_elapsed_time == 0
+        assert not state.has_paused_clean_task_context
+
     def test_working_status_clears_stale_dock_fields(self) -> None:
         """Fresh task metrics override stale dock indicators."""
         state = NarwalState(working_status=WorkingStatus.DOCKED)
@@ -225,10 +404,24 @@ class TestNarwalState:
 
         assert state.is_cleaning
         assert not state.is_docked
-        assert state.dock_sub_state == 0
-        assert state.dock_activity == 0
-        assert state.dock_field11 == 1
-        assert state.dock_field47 == 2
+        assert state.working_status == WorkingStatus.DOCKED
+
+    def test_recent_working_status_survives_stale_docked_base_packet(self) -> None:
+        """A delayed dock packet cannot erase a confirmed clean handoff."""
+        state = NarwalState(working_status=WorkingStatus.DOCKED)
+        state.assume_robot_clean()
+        state.update_from_working_status({"1": 25, "3": 120, "6": 4})
+
+        state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.DOCKED), "10": 1}, "11": 2, "47": 3}
+        )
+
+        assert state.has_recent_active_working_status
+        assert state.is_cleaning
+        assert not state.is_docked
+        assert state.task_progress_percent == 25
+        assert state.task_elapsed_time == 120
+        assert state.current_room_id == 4
 
     def test_update_from_base_status_cleaning(self) -> None:
         state = NarwalState()
@@ -303,19 +496,24 @@ class TestNarwalState:
 
         assert state.active_dock_task_keys == ()
 
-    def test_active_cleaning_clears_stale_station_activity(self) -> None:
-        """Cleaning telemetry clears coarse dock activity from prior station work."""
-        state = NarwalState()
-        state.station_activity = 1
-        state.dock_activity = 4
-        state.assume_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+    def test_stale_working_metrics_do_not_override_active_station_task(self) -> None:
+        """Historic clean counters cannot hide fresh emptying or washing."""
+        for station_activity, dock_activity, task in (
+            (1, 0, DOCK_TASK_EMPTY_DUSTBIN),
+            (2, 0, DOCK_TASK_WASH_MOP),
+            (0, 3, DOCK_TASK_WASH_MOP),
+        ):
+            state = NarwalState(working_status=WorkingStatus.DOCKED)
+            state.dock_presence = 6
+            state.station_activity = station_activity
+            state.dock_activity = dock_activity
 
-        state.update_from_working_status({"3": 120})
+            state.update_from_working_status({"3": 120})
 
-        assert state.station_activity == 0
-        assert state.dock_activity == 0
-        assert not state.is_station_active
-        assert state.active_dock_task_keys == ()
+            assert state.station_activity == station_activity
+            assert state.dock_activity == dock_activity
+            assert not state.has_recent_active_working_status
+            assert state.active_dock_task_keys == (task,)
 
     def test_active_base_status_clears_stale_station_activity(self) -> None:
         """Active robot base-status packets cannot keep stale dock switches on."""
@@ -357,7 +555,7 @@ class TestNarwalState:
         assert not state.has_dock_presence_signal
         assert state.dock_task_timer(DOCK_TASK_DRY_MOP) is not None
         assert state.active_dock_task_keys == (DOCK_TASK_DRY_MOP,)
-        assert state.blocks_robot_start_for_dock_task
+        assert not state.blocks_robot_start_for_dock_task
 
     def test_stale_dock_timer_does_not_remain_active(self) -> None:
         """Typed dock timers stop driving visible state after telemetry expires."""
@@ -394,21 +592,26 @@ class TestNarwalState:
         assert state.has_unmapped_active_dock_task
         assert state.blocks_robot_start_for_dock_task
 
-    def test_robot_start_blocked_by_dock_work_except_typed_dock_bag(self) -> None:
-        """Only typed dock-bag drying is compatible with a new robot clean."""
+    def test_robot_start_allows_only_typed_drying_work(self) -> None:
+        """Typed drying is compatible with a new robot clean."""
         state = NarwalState()
         state.update_from_base_status({"3": {"1": 10, "3": 6, "18": 1}, "11": 2})
         assert state.blocks_robot_start_for_dock_task
 
-        state = NarwalState()
-        state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2})
-        state.set_dock_drying_task(
-            DOCK_TASK_DRY_DOCK_BAG,
-            elapsed=60,
-            target=180,
-            fields=("12", "13"),
-        )
-        assert not state.blocks_robot_start_for_dock_task
+        for task, fields in (
+            (DOCK_TASK_DRY_MOP, ("8", "9")),
+            (DOCK_TASK_DRY_DUST_BIN, ("10", "11")),
+            (DOCK_TASK_DRY_DOCK_BAG, ("12", "13")),
+        ):
+            state = NarwalState()
+            state.update_from_base_status({"3": {"1": 10, "3": 6}, "11": 2})
+            state.set_dock_drying_task(
+                task,
+                elapsed=60,
+                target=180,
+                fields=fields,
+            )
+            assert not state.blocks_robot_start_for_dock_task
 
         state.dock_drying_status_time -= 181
 
@@ -423,15 +626,62 @@ class TestNarwalState:
         assert state.active_dock_task_keys == (DOCK_TASK_DRY_DOCK_BAG,)
         assert state.blocks_robot_start_for_dock_task
 
-    def test_assumed_robot_clean_clears_on_active_telemetry(self) -> None:
-        """Accepted robot-start reservations stop once real cleaning status arrives."""
+    def test_assumed_robot_clean_waits_for_active_base_status(self) -> None:
+        """Working metrics do not expose a start to delayed dock packets."""
         state = NarwalState()
         state.assume_robot_clean()
 
         state.update_from_working_status({"3": 120})
 
-        assert not state.has_assumed_robot_clean
+        assert state.has_assumed_robot_clean
         assert state.is_cleaning
+
+        state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.CLEANING)}, "11": 1, "47": 2}
+        )
+
+        assert not state.has_assumed_robot_clean
+
+    def test_assumed_robot_clean_covers_slow_status_handoff(self) -> None:
+        """Accepted room starts may take over 30s to publish task telemetry."""
+        state = NarwalState()
+
+        with patch("narwal_client.models.time.monotonic", return_value=1000.0):
+            state.assume_robot_clean()
+        with patch("narwal_client.models.time.monotonic", return_value=1179.0):
+            assert state.has_assumed_robot_clean
+        with patch("narwal_client.models.time.monotonic", return_value=1181.0):
+            assert not state.has_assumed_robot_clean
+
+    def test_assumed_robot_clean_ignores_unknown_off_dock_handoff(self) -> None:
+        """UNKNOWN/off-dock base status can appear before task telemetry arrives."""
+        state = NarwalState()
+        state.assume_robot_clean()
+
+        state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
+
+        assert state.has_assumed_robot_clean
+
+    def test_assumed_robot_clean_ignores_previous_docked_base_status(self) -> None:
+        """A stale dock status cannot erase an accepted start during handoff."""
+        state = NarwalState()
+        with patch("narwal_client.models.time.monotonic", return_value=1000.0):
+            state.assume_robot_clean()
+
+        with patch("narwal_client.models.time.monotonic", return_value=1059.0):
+            state.update_from_base_status({"3": {"1": 10, "10": 1}, "11": 2})
+            assert state.has_assumed_robot_clean
+
+    def test_assumed_robot_clean_clears_after_docked_handoff_grace(self) -> None:
+        """Current idle dock telemetry wins if an accepted start never begins."""
+        state = NarwalState()
+        with patch("narwal_client.models.time.monotonic", return_value=1000.0):
+            state.assume_robot_clean()
+
+        with patch("narwal_client.models.time.monotonic", return_value=1061.0):
+            state.update_from_base_status({"3": {"1": 10, "10": 1}, "11": 2})
+
+        assert not state.has_assumed_robot_clean
 
     def test_paused_context_handles_missing_task_metrics(self) -> None:
         """Paused context is safe before richer task metric fields exist."""
@@ -444,6 +694,95 @@ class TestNarwalState:
 
         assert state.has_paused_clean_task_context
 
+    @pytest.mark.parametrize(
+        "status",
+        (
+            WorkingStatus.DOCKED,
+            WorkingStatus.CHARGED,
+            WorkingStatus.DOCKED_V2,
+            WorkingStatus.TASK_COMPLETED,
+            WorkingStatus.ERROR,
+        ),
+    )
+    def test_terminal_status_ignores_late_active_metrics(
+        self, status: WorkingStatus
+    ) -> None:
+        """Late counters cannot reactivate a terminal robot state."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": int(status)}})
+
+        state.update_from_working_status({"2": 12.5, "3": 900})
+
+        assert not state.has_recent_active_working_status
+        assert not state.is_cleaning
+
+    def test_terminal_suppressed_metrics_cannot_revive_paused_context(self) -> None:
+        """A later pause bit cannot revive metrics rejected after docking."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.DOCKED), "10": 1}, "11": 2}
+        )
+
+        state.update_from_working_status({"1": 25, "2": 12.5, "3": 900, "6": 4})
+        state.update_from_base_status({"3": {"2": 1}})
+
+        assert state.task_progress_percent is None
+        assert state.task_elapsed_time == 0
+        assert state.current_room_id is None
+        assert not state.has_paused_clean_task_context
+
+    @pytest.mark.parametrize(
+        "status", (WorkingStatus.TASK_COMPLETED, WorkingStatus.ERROR)
+    )
+    def test_explicit_terminal_status_rejects_progressing_metrics(
+        self, status: WorkingStatus
+    ) -> None:
+        """Metric progression cannot override an explicit terminal robot state."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": int(status)}})
+
+        state.update_from_working_status({"1": 25, "3": 120})
+        state.update_from_working_status({"1": 26, "3": 121})
+
+        assert not state.has_recent_active_working_status
+        assert not state.is_cleaning
+
+    @pytest.mark.parametrize(
+        "dock_fields",
+        ({"11": 2}, {"11": 3}, {"47": 1}, {"47": 3}),
+    )
+    def test_docked_standby_ignores_late_active_metrics(
+        self, dock_fields: dict[str, int]
+    ) -> None:
+        """Legacy and newer docked STANDBY packets are terminal telemetry."""
+        state = NarwalState(working_status=WorkingStatus.CLEANING)
+        state.update_from_working_status({"2": 12.5, "3": 900})
+        assert state.has_recent_active_working_status
+
+        state.update_from_base_status({"3": {"1": 1}, **dock_fields})
+        state.update_from_working_status({"2": 12.5, "3": 900})
+
+        assert state.working_status == WorkingStatus.STANDBY
+        assert state.is_docked
+        assert not state.has_recent_active_working_status
+        assert not state.is_cleaning
+
+    def test_task_completed_clears_metrics_after_accepted_start(self) -> None:
+        """Completion ends fresh metrics even during the accepted-start handoff."""
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.assume_robot_clean()
+        state.update_from_working_status({"2": 12.5, "3": 900})
+        assert state.has_assumed_robot_clean
+        assert state.is_cleaning
+
+        state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.TASK_COMPLETED)}}
+        )
+
+        assert not state.has_assumed_robot_clean
+        assert not state.has_recent_active_working_status
+        assert not state.is_cleaning
+
     def test_paused_context_ignores_stale_metrics_after_docking(self) -> None:
         """Docked API state ends stale paused overlays from the previous task."""
         state = NarwalState()
@@ -452,6 +791,17 @@ class TestNarwalState:
         state.current_room_id = 4
 
         assert not state.has_paused_clean_task_context
+
+    def test_paused_context_outranks_cached_dock_fields(self) -> None:
+        """Only a current terminal update may end retained paused context."""
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.is_paused = True
+        state.cleaning_time = 120
+        state.dock_presence = 6
+        state.dock_field11 = 2
+        state.dock_field47 = 3
+
+        assert state.has_paused_clean_task_context
 
     def test_dock_task_assumption_is_only_a_short_command_guard(self) -> None:
         """Dock task assumptions must not fabricate long-running device state."""
@@ -892,6 +1242,16 @@ class TestNarwalState:
         assert state.is_returning  # should be True via field 3.7
         assert not state.is_cleaning  # returning takes priority
 
+    def test_stale_return_flag_does_not_hide_active_clean(self) -> None:
+        """Field 3.7 alone is not an authoritative returning state."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 4, "7": 1}})
+        state.last_active_working_status_time = 0.0
+
+        assert state.is_returning_to_dock
+        assert not state.is_returning
+        assert state.is_cleaning
+
     def test_returning_clears_when_docked(self) -> None:
         """Returning flag clears when robot docks."""
         state = NarwalState()
@@ -1239,6 +1599,16 @@ class TestCurrentRoomTracking:
         state = NarwalState()
         state.update_from_working_status({"6": 0})
         assert state.current_room_id is None
+
+    def test_nested_current_room_details_supply_id_and_name(self) -> None:
+        """Nested firmware room details populate the fallback room name."""
+        state = NarwalState()
+
+        state.update_from_working_status({"6": {"1": 4, "3": b"Kitchen"}})
+
+        assert state.current_room_id == 4
+        assert state.current_room_aux_name == "Kitchen"
+        assert state.current_room_name == "Kitchen"
 
     def test_current_room_id_not_cleared_when_field6_absent(self) -> None:
         """If field 6 is not in the message, current_room_id is not cleared.
