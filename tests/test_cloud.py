@@ -378,6 +378,53 @@ def test_consumable_info_reset_descriptions_include_unknown_active_codes() -> No
     assert descriptions["replacement_301_clear"].replace_items == (301,)
 
 
+def test_consumable_info_reset_descriptions_keep_known_unique_ids_stable() -> None:
+    """Known clear buttons keep their original unique-id keys."""
+    state = NarwalState()
+    state.maintain_items = [6, 8, 10]
+    state.replace_items = [5]
+
+    descriptions = {
+        description.key: description
+        for description in _active_consumable_info_reset_descriptions(state)
+    }
+
+    assert descriptions["maintenance_universal_wheel_clear"].suggested_key == (
+        "universal_wheel_maintenance_clear"
+    )
+    assert descriptions["maintenance_side_distance_sensor_clear"].suggested_key == (
+        "side_distance_sensor_maintenance_clear"
+    )
+    assert descriptions["maintenance_anti_winding_brush_clear"].suggested_key == (
+        "anti_winding_brush_maintenance_clear"
+    )
+    assert descriptions["replacement_roller_brush_clear"].suggested_key == (
+        "roller_brush_replacement_clear"
+    )
+    assert "universal_wheel_maintenance_clear" not in descriptions
+
+
+def test_consumable_info_reset_button_uses_readable_suggested_object_id() -> None:
+    """Stable unique ids do not force awkward object ids on new installs."""
+    state = NarwalState()
+    state.maintain_items = [6]
+    description = _active_consumable_info_reset_descriptions(state)[0]
+    coordinator = MagicMock()
+    coordinator.config_entry.data = {"device_id": "dev1", "model": "flow"}
+    coordinator.config_entry.title = "Narwal Test"
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.last_update_success = True
+
+    button = NarwalConsumableInfoResetButton(coordinator, description)
+
+    assert button._attr_unique_id == "dev1_maintenance_universal_wheel_clear"
+    assert (
+        button._attr_suggested_object_id
+        == "narwal_test_universal_wheel_maintenance_clear"
+    )
+
+
 def test_consumable_info_reset_button_does_not_require_base_status() -> None:
     """Consumable-info reset availability is driven by alert lists."""
     state = NarwalState()
