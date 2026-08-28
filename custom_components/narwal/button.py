@@ -8,12 +8,13 @@ from homeassistant.components.button import ButtonEntity
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 from homeassistant.util import slugify
 
 from . import NarwalConfigEntry
 from .cloud import NarwalCloudConsumable, NarwalCloudError
-from .const import CONSUMABLE_MAINTAIN_ITEMS, CONSUMABLE_REPLACE_ITEMS
+from .const import CONSUMABLE_MAINTAIN_ITEMS, CONSUMABLE_REPLACE_ITEMS, DOMAIN
 from .coordinator import NarwalCoordinator
 from .entity import (
     NarwalEntity,
@@ -28,6 +29,7 @@ class NarwalConsumableInfoResetDescription:
     """Description for clearing a robot-reported consumable alert item."""
 
     key: str
+    suggested_key: str
     name: str
     icon: str
     maintain_items: tuple[int, ...] = ()
@@ -64,14 +66,20 @@ def _friendly_item_name(item: str) -> str:
     return item[:1].upper() + item[1:]
 
 
+def _consumable_info_item_key(item: str) -> str:
+    """Return the stable key fragment for a consumable alert item."""
+    return slugify(item.replace("-", " "))
+
+
 def _maintenance_reset_descriptions() -> tuple[NarwalConsumableInfoResetDescription, ...]:
     """Return reset button descriptions for robot consumable alert lists."""
     descriptions: list[NarwalConsumableInfoResetDescription] = []
     for code, item in sorted(CONSUMABLE_MAINTAIN_ITEMS.items()):
-        item_key = slugify(item)
+        item_key = _consumable_info_item_key(item)
         descriptions.append(
             NarwalConsumableInfoResetDescription(
-                key=f"{item_key}_maintenance_clear",
+                key=f"maintenance_{item_key}_clear",
+                suggested_key=f"{item_key}_maintenance_clear",
                 name=f"{_friendly_item_name(item)} maintenance clear",
                 icon=CONSUMABLE_CLEAR_ICONS.get(item, "mdi:wrench-clock"),
                 maintain_items=(code,),
@@ -80,10 +88,11 @@ def _maintenance_reset_descriptions() -> tuple[NarwalConsumableInfoResetDescript
     for code, item in sorted(CONSUMABLE_REPLACE_ITEMS.items()):
         if item in AUTOCLEAR_REPLACE_ITEMS:
             continue
-        item_key = slugify(item)
+        item_key = _consumable_info_item_key(item)
         descriptions.append(
             NarwalConsumableInfoResetDescription(
-                key=f"{item_key}_replacement_clear",
+                key=f"replacement_{item_key}_clear",
+                suggested_key=f"{item_key}_replacement_clear",
                 name=f"{_friendly_item_name(item)} replacement clear",
                 icon=CONSUMABLE_CLEAR_ICONS.get(item, "mdi:package-variant-closed"),
                 replace_items=(code,),
@@ -93,6 +102,46 @@ def _maintenance_reset_descriptions() -> tuple[NarwalConsumableInfoResetDescript
 
 
 CONSUMABLE_INFO_RESET_DESCRIPTIONS = _maintenance_reset_descriptions()
+
+
+@callback
+def _async_migrate_consumable_info_reset_unique_ids(
+    hass: HomeAssistant,
+    entry: NarwalConfigEntry,
+) -> None:
+    """Migrate reset buttons created by earlier fork revisions."""
+    device_id = entry.data["device_id"]
+    registry = er.async_get(hass)
+    for description in CONSUMABLE_INFO_RESET_DESCRIPTIONS:
+        old_unique_id = f"{device_id}_{description.suggested_key}"
+        new_unique_id = f"{device_id}_{description.key}"
+        if old_unique_id == new_unique_id:
+            continue
+        old_entity_id = registry.async_get_entity_id(
+            "button", DOMAIN, old_unique_id
+        )
+        if old_entity_id is None:
+            continue
+        old_entry = registry.async_get(old_entity_id)
+        if (
+            old_entry is None
+            or old_entry.platform != DOMAIN
+            or old_entry.config_entry_id != entry.entry_id
+        ):
+            continue
+        new_entity_id = registry.async_get_entity_id(
+            "button", DOMAIN, new_unique_id
+        )
+        if new_entity_id is not None:
+            new_entry = registry.async_get(new_entity_id)
+            if (
+                new_entry is None
+                or new_entry.platform != DOMAIN
+                or new_entry.config_entry_id != entry.entry_id
+            ):
+                continue
+            registry.async_remove(new_entity_id)
+        registry.async_update_entity(old_entity_id, new_unique_id=new_unique_id)
 
 
 def _active_consumable_info_reset_descriptions(
@@ -116,6 +165,7 @@ def _active_consumable_info_reset_descriptions(
         descriptions.append(
             NarwalConsumableInfoResetDescription(
                 key=f"maintenance_{code}_clear",
+                suggested_key=f"maintenance_code_{code}_clear",
                 name=f"Maintenance code {code} clear",
                 icon="mdi:wrench-clock",
                 maintain_items=(code,),
@@ -125,6 +175,7 @@ def _active_consumable_info_reset_descriptions(
         descriptions.append(
             NarwalConsumableInfoResetDescription(
                 key=f"replacement_{code}_clear",
+                suggested_key=f"replacement_code_{code}_clear",
                 name=f"Replacement code {code} clear",
                 icon="mdi:package-variant-closed",
                 replace_items=(code,),
@@ -140,6 +191,7 @@ async def async_setup_entry(
     async_add_entities: AddConfigEntryEntitiesCallback,
 ) -> None:
     """Set up Narwal consumable button entities."""
+    _async_migrate_consumable_info_reset_unique_ids(hass, entry)
     coordinator = entry.runtime_data
     known_consumable_info_resets: set[str] = set()
 
@@ -281,7 +333,7 @@ class NarwalConsumableInfoResetButton(NarwalEntity, ButtonEntity):
         title = slugify(coordinator.config_entry.title)
         self.description = description
         self._attr_unique_id = f"{device_id}_{description.key}"
-        self._attr_suggested_object_id = f"{title}_{description.key}"
+        self._attr_suggested_object_id = f"{title}_{description.suggested_key}"
         self._attr_name = description.name
         self._attr_icon = description.icon
         if is_dock_consumable_name(description.name):
