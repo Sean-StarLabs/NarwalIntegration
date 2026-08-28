@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,9 +18,11 @@ from custom_components.narwal.binary_sensor import (  # noqa: E402
     NarwalConsumableOverdueBinarySensor,
 )
 from custom_components.narwal.button import (  # noqa: E402
+    CONSUMABLE_INFO_RESET_DESCRIPTIONS,
     NarwalConsumableInfoResetButton,
     NarwalConsumableResetButton,
     _active_consumable_info_reset_descriptions,
+    _async_migrate_consumable_info_reset_unique_ids,
 )
 from custom_components.narwal.cloud import (  # noqa: E402
     NarwalCloudClient,
@@ -377,6 +380,124 @@ def test_consumable_info_reset_descriptions_include_unknown_active_codes() -> No
 
     assert descriptions["maintenance_300_clear"].maintain_items == (300,)
     assert descriptions["replacement_301_clear"].replace_items == (301,)
+
+
+def test_consumable_info_reset_descriptions_keep_known_unique_ids_stable() -> None:
+    """Known clear buttons keep their original unique-id keys."""
+    state = NarwalState()
+    state.maintain_items = [6, 8, 10]
+    state.replace_items = [5]
+
+    descriptions = {
+        description.key: description
+        for description in _active_consumable_info_reset_descriptions(state)
+    }
+
+    assert descriptions["maintenance_universal_wheel_clear"].suggested_key == (
+        "universal_wheel_maintenance_clear"
+    )
+    assert descriptions["maintenance_side_distance_sensor_clear"].suggested_key == (
+        "side_distance_sensor_maintenance_clear"
+    )
+    assert descriptions["maintenance_anti_winding_brush_clear"].suggested_key == (
+        "anti_winding_brush_maintenance_clear"
+    )
+    assert descriptions["replacement_roller_brush_clear"].suggested_key == (
+        "roller_brush_replacement_clear"
+    )
+    assert "universal_wheel_maintenance_clear" not in descriptions
+
+
+def test_consumable_info_reset_button_uses_readable_suggested_object_id() -> None:
+    """Stable unique ids do not force awkward object ids on new installs."""
+    state = NarwalState()
+    state.maintain_items = [6]
+    description = _active_consumable_info_reset_descriptions(state)[0]
+    coordinator = MagicMock()
+    coordinator.config_entry.data = {"device_id": "dev1", "model": "flow"}
+    coordinator.config_entry.title = "Narwal Test"
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.last_update_success = True
+
+    button = NarwalConsumableInfoResetButton(coordinator, description)
+
+    assert button._attr_unique_id == "dev1_maintenance_universal_wheel_clear"
+    assert (
+        button._attr_suggested_object_id
+        == "narwal_test_universal_wheel_maintenance_clear"
+    )
+
+
+def test_consumable_info_reset_button_unique_id_migration() -> None:
+    """Earlier reset-button registry entries retain their entity IDs."""
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.data = {"device_id": "dev1"}
+    entry.entry_id = "entry-id"
+    description = next(
+        item
+        for item in CONSUMABLE_INFO_RESET_DESCRIPTIONS
+        if item.key == "maintenance_universal_wheel_clear"
+    )
+    old_unique_id = f"dev1_{description.suggested_key}"
+    new_unique_id = f"dev1_{description.key}"
+    registry = MagicMock()
+    registry.async_get_entity_id.side_effect = (
+        lambda _domain, _platform, unique_id: (
+            "button.narwal_test_universal_wheel_maintenance_clear"
+            if unique_id == old_unique_id
+            else None
+        )
+    )
+    registry.async_get.return_value = SimpleNamespace(
+        platform="narwal", config_entry_id="entry-id"
+    )
+
+    with patch(
+        "custom_components.narwal.button.er.async_get", return_value=registry
+    ):
+        _async_migrate_consumable_info_reset_unique_ids(hass, entry)
+
+    registry.async_update_entity.assert_called_once_with(
+        "button.narwal_test_universal_wheel_maintenance_clear",
+        new_unique_id=new_unique_id,
+    )
+
+
+def test_consumable_info_reset_button_unique_id_migration_preserves_original() -> None:
+    """A duplicate is removed without changing the original entity ID."""
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.data = {"device_id": "dev1"}
+    entry.entry_id = "entry-id"
+    description = next(
+        item
+        for item in CONSUMABLE_INFO_RESET_DESCRIPTIONS
+        if item.key == "maintenance_universal_wheel_clear"
+    )
+    old_unique_id = f"dev1_{description.suggested_key}"
+    new_unique_id = f"dev1_{description.key}"
+    registry = MagicMock()
+    registry.async_get_entity_id.side_effect = (
+        lambda _domain, _platform, unique_id: {
+            old_unique_id: "button.old_reset",
+            new_unique_id: "button.current_reset",
+        }.get(unique_id)
+    )
+    registry.async_get.return_value = SimpleNamespace(
+        platform="narwal", config_entry_id="entry-id"
+    )
+
+    with patch(
+        "custom_components.narwal.button.er.async_get", return_value=registry
+    ):
+        _async_migrate_consumable_info_reset_unique_ids(hass, entry)
+
+    registry.async_remove.assert_called_once_with("button.current_reset")
+    registry.async_update_entity.assert_called_once_with(
+        "button.old_reset", new_unique_id=new_unique_id
+    )
 
 
 def test_consumable_info_reset_button_does_not_require_base_status() -> None:
