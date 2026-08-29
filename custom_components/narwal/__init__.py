@@ -124,9 +124,9 @@ SUCTION_OPTION_LABELS: dict[str, str] = {
     "strong": "Strong",
     "ultra": "Ultra",
     "ultra_powerful": "Ultra",
-    "super": "Super",
-    "super_powerful": "Super",
-    "max": "Super",
+    "super": "Super Powerful",
+    "super_powerful": "Super Powerful",
+    "max": "Super Powerful",
 }
 
 
@@ -137,8 +137,10 @@ def _suction_for_coordinator(
     """Return the model-valid suction level for a service option."""
     if option == "ai":
         return FanLevel.UNSPECIFIED
-    label = SUCTION_OPTION_LABELS[option]
     fan_map = fan_speed_map_for(coordinator.config_entry.data, include_aliases=False)
+    if option == "max":
+        return list(fan_map.values())[-1]
+    label = SUCTION_OPTION_LABELS[option]
     if label not in fan_map:
         raise HomeAssistantError(
             f"{label} suction is not supported by this Narwal model"

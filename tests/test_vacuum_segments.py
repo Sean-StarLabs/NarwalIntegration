@@ -391,6 +391,20 @@ class TestVacuumSupportedFeatures:
         assert features & VacuumEntityFeature.LOCATE
         assert features & VacuumEntityFeature.FAN_SPEED
 
+    def test_metric_only_clean_with_dock_bag_drying_keeps_stop(self) -> None:
+        """Fresh clean metrics identify robot work alongside compatible drying."""
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.update_from_working_status({"3": 120})
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        vac = _make_vacuum(state=state)
+
+        assert vac.supported_features & VacuumEntityFeature.STOP
+
     def test_intermediate_mop_wash_keeps_active_clean_stop(self) -> None:
         """Mapped station work cannot hide Stop for a current robot clean."""
         state = _active_clean_state()
@@ -1839,6 +1853,28 @@ class TestAsyncStop:
         await vac.async_stop()
 
         vac.coordinator.async_refresh_action_status.assert_awaited_once()
+        vac.coordinator.client.stop.assert_awaited_once()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_stop_routes_metric_only_clean_with_dock_bag_to_robot(self) -> None:
+        """Fresh metrics keep robot STOP actionable during dock-bag drying."""
+        state = NarwalState(working_status=WorkingStatus.STANDBY)
+        state.update_from_working_status({"3": 120})
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        await vac.async_stop()
+
         vac.coordinator.client.stop.assert_awaited_once()
         vac.coordinator.client.stop_dock_task.assert_not_awaited()
 
