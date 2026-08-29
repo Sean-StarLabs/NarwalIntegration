@@ -74,6 +74,8 @@ def _coordinator(
     coord.room_clean_settings = {}
     coord.room_clean_settings_customized = {}
     coord.active_clean_work_mode = None
+    coord.has_selected_clean_rooms.return_value = False
+    coord.active_clean_setting.return_value = None
     coord.data = state
     coord._legacy_mode_option = "Vacuum and mop"
 
@@ -222,6 +224,36 @@ class TestNarwalSelect:
         await sel.async_select_option("wet")
         assert coord.clean_settings.water == MopHumidity.WET
         coord.client.set_mop_humidity.assert_awaited_once_with(MopHumidity.WET)
+        coord.set_active_clean_setting.assert_called_once_with(
+            "water", MopHumidity.WET
+        )
+
+    def test_whole_floor_settings_hide_when_rooms_are_selected(self) -> None:
+        """An explicit room selection leaves only room-level setup controls."""
+        coord = _coordinator(state=_state())
+        coord.has_selected_clean_rooms.return_value = True
+
+        assert not NarwalSelect(coord, _DESCS["work_mode"]).available
+        assert not LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["mode"]).available
+        assert not NarwalPassesNumber(coord).available
+
+    def test_live_controls_report_active_room_values(self) -> None:
+        """Runtime suction and water reflect the dispatched room profile."""
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.has_selected_clean_rooms.return_value = True
+        coord.active_clean_work_mode = WorkMode.VACUUM_AND_MOP
+        coord.active_clean_setting.side_effect = lambda attr: {
+            "fan": FanLevel.STRONG,
+            "water": MopHumidity.WET,
+        }.get(attr)
+
+        suction = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+        water = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["water"])
+
+        assert suction.available
+        assert suction.current_option == "Strong"
+        assert water.available
+        assert water.current_option == "Wet"
 
     async def test_water_accepts_live_accepted_response(self) -> None:
         coord = _coordinator(state=_state(WorkingStatus.CLEANING))

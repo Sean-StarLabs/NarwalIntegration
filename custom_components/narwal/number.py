@@ -53,7 +53,10 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
     @property
     def available(self) -> bool:
         """Return True when the pass count can be changed now."""
-        return can_edit_pending_clean_settings(self.coordinator.data)
+        return (
+            can_edit_pending_clean_settings(self.coordinator.data)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
 
     @property
     def native_value(self) -> float:
@@ -62,7 +65,10 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         """Store the pass count."""
-        if not can_edit_pending_clean_settings(self.coordinator.data):
+        if (
+            not can_edit_pending_clean_settings(self.coordinator.data)
+            or self.coordinator.has_selected_clean_rooms()
+        ):
             raise HomeAssistantError("Narwal pass count cannot be changed right now")
         try:
             passes = _validate_pass_count(value)

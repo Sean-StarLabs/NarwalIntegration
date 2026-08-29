@@ -256,6 +256,47 @@ def test_selected_clean_rooms_are_filtered_and_map_scoped() -> None:
     assert coordinator.selected_clean_room_ids_for([4, 5], map_id="upstairs") == [4, 5]
 
 
+def test_selected_clean_room_presence_is_map_scoped() -> None:
+    """Whole-floor setup can distinguish explicit selections per map."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.selected_clean_rooms = {"upstairs": {5}}
+
+    assert coordinator.has_selected_clean_rooms(map_id="upstairs")
+    assert not coordinator.has_selected_clean_rooms(map_id="downstairs")
+
+
+def test_active_clean_settings_follow_current_room_and_runtime_updates() -> None:
+    """Live controls report dispatched room profiles instead of pending globals."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    state = NarwalState(working_status=WorkingStatus.CLEANING)
+    state.current_room_id = 5
+    coordinator.client = MagicMock()
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.active_clean_work_mode = None
+    coordinator.active_room_clean_settings = {}
+    requested = {
+        4: RoomCleanSettings(fan=FanLevel.NORMAL),
+        5: RoomCleanSettings(fan=FanLevel.STRONG),
+    }
+
+    coordinator.record_accepted_clean_start(requested)
+
+    assert coordinator.active_clean_setting("fan") == FanLevel.STRONG
+    assert coordinator.active_room_clean_settings[5] is not requested[5]
+
+    coordinator.set_active_clean_setting("fan", FanLevel.DEEP)
+
+    assert coordinator.active_clean_setting("fan") == FanLevel.DEEP
+    assert all(
+        settings.fan == FanLevel.DEEP
+        for settings in coordinator.active_room_clean_settings.values()
+    )
+
+
 def test_paused_standby_task_context_blocks_new_actions() -> None:
     """Paused STANDBY overlays still represent the current clean task."""
     state = NarwalState()
@@ -615,6 +656,8 @@ class TestCoordinatorResilience:
         # Fresh subscription so renewal does not fire in unrelated tests.
         coordinator._last_topic_subscribe = time.monotonic()
         coordinator._prev_working_status = MagicMock()
+        coordinator.active_clean_work_mode = None
+        coordinator.active_room_clean_settings = {}
         coordinator._map_display_cache_store = _FakeStore()
         coordinator._map_display_cache_signature = ()
         coordinator._pending_map_display_cache_snapshot = None
@@ -748,6 +791,7 @@ class TestCoordinatorResilience:
         """Accepted-task mode metadata is only kept for active clean contexts."""
         coordinator = self._make_coordinator()
         coordinator.active_clean_work_mode = WorkMode.MOP
+        coordinator.active_room_clean_settings = {4: RoomCleanSettings()}
         coordinator.async_set_updated_data = MagicMock()
         coordinator._prev_working_status = WorkingStatus.CLEANING
         state = NarwalState()
@@ -756,6 +800,7 @@ class TestCoordinatorResilience:
         coordinator._on_state_update(state)
 
         assert coordinator.active_clean_work_mode is None
+        assert coordinator.active_room_clean_settings == {}
 
     async def test_poll_does_not_call_connect(self) -> None:
         """_async_update_data does NOT call client.connect() when disconnected."""
@@ -1140,6 +1185,8 @@ class TestTopicSubscriptionRenewal:
         c._last_display_map_resub = 0.0
         c._last_topic_subscribe = last_subscribe
         c._prev_working_status = MagicMock()
+        c.active_clean_work_mode = None
+        c.active_room_clean_settings = {}
         c.update_interval = None
         return c
 

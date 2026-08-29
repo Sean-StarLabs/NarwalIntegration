@@ -61,6 +61,8 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     coordinator.last_update_success = True
     coordinator.clean_settings = CleanSettings()
     coordinator.active_clean_work_mode = None
+    coordinator.has_selected_clean_rooms.return_value = False
+    coordinator.active_clean_setting.return_value = None
     coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
     coordinator.async_prepare_clean_start = AsyncMock(return_value=True)
     coordinator.async_refresh_action_status = AsyncMock(return_value=True)
@@ -702,6 +704,14 @@ class TestAsyncCleanSegments:
 
 
 class TestVacuumFanSpeed:
+    def test_fan_speed_reports_active_room_profile(self) -> None:
+        """The vacuum entity reports the dispatched room fan while cleaning."""
+        vac = _make_vacuum(state=_active_clean_state())
+        vac.coordinator.clean_settings.fan = FanLevel.NORMAL
+        vac.coordinator.active_clean_setting.return_value = FanLevel.STRONG
+
+        assert vac.fan_speed == "Strong"
+
     async def test_restore_none_fan_speed_as_ai_suction(self) -> None:
         """HA persists AI fan_speed as None; restore it as FanLevel.UNSPECIFIED."""
         vac = _make_vacuum(state=_docked_state())
@@ -728,6 +738,9 @@ class TestVacuumFanSpeed:
 
         vac.coordinator.client.set_fan_speed.assert_awaited_once_with(FanLevel.STRONG)
         assert vac.coordinator.clean_settings.fan == FanLevel.STRONG
+        vac.coordinator.set_active_clean_setting.assert_called_once_with(
+            "fan", FanLevel.STRONG
+        )
 
     async def test_fan_change_stages_when_unavailable_idle(self) -> None:
         """Idle pending fan changes do not need a live coordinator connection."""

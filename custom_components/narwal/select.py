@@ -343,7 +343,10 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
     def available(self) -> bool:
         """Return True when this clean parameter can be changed now."""
         state = self.coordinator.data
-        setup_available = can_edit_pending_clean_settings(state)
+        setup_available = (
+            can_edit_pending_clean_settings(state)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
         setup_applies = clean_setting_applies_to_mode(
             self.entity_description.attr,
             self.coordinator.clean_settings.work_mode,
@@ -364,7 +367,12 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
     @property
     def current_option(self) -> str | None:
         """Return the stored option label."""
-        value = getattr(self.coordinator.clean_settings, self.entity_description.attr)
+        value = self.coordinator.active_clean_setting(self.entity_description.attr)
+        if value is None:
+            value = getattr(
+                self.coordinator.clean_settings,
+                self.entity_description.attr,
+            )
         return self._labels.get(int(value))
 
     async def async_select_option(self, option: str) -> None:
@@ -372,7 +380,10 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
         if option not in self.entity_description.mapping:
             raise HomeAssistantError(f"Unsupported Narwal option: {option}")
         state = self.coordinator.data
-        setup_available = can_edit_pending_clean_settings(state)
+        setup_available = (
+            can_edit_pending_clean_settings(state)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
         live_available = super().available and is_live_clean_setting_available(state)
         setup_applies = clean_setting_applies_to_mode(
             self.entity_description.attr,
@@ -423,6 +434,10 @@ class NarwalSelect(NarwalEntity, RestoreEntity, SelectEntity):
                 value
             )
             _raise_if_command_failed(response, f"set {self.entity_description.name}")
+            self.coordinator.set_active_clean_setting(
+                self.entity_description.attr,
+                value,
+            )
         setattr(self.coordinator.clean_settings, self.entity_description.attr, value)
         self.async_write_ha_state()
         self.coordinator.async_update_listeners()
@@ -774,7 +789,10 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         """Return whether this setting is currently meaningful and actionable."""
         key = self.entity_description.setting_key
         state = self.coordinator.data
-        setup_available = can_edit_pending_clean_settings(state)
+        setup_available = (
+            can_edit_pending_clean_settings(state)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
         live_available = super().available and is_live_clean_setting_available(state)
         setup_applies = self._setting_applies_to_mode(key)
         if key in LEGACY_START_ONLY_SETTINGS:
@@ -811,10 +829,14 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         if key == "mode":
             option = LEGACY_MODE_LABELS.get(settings.work_mode)
         elif key == "suction":
-            option = self._suction_labels.get(settings.fan)
+            value = self.coordinator.active_clean_setting("fan")
+            option = self._suction_labels.get(
+                value if value is not None else settings.fan
+            )
         elif key == "water":
+            value = self.coordinator.active_clean_setting("water")
             option = {value: label for label, value in LEGACY_WATER_MAP.items()}.get(
-                settings.water
+                value if value is not None else settings.water
             )
         elif key == "scrub":
             option = {value: label for label, value in LEGACY_SCRUB_MAP.items()}.get(
@@ -854,7 +876,10 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
 
         key = self.entity_description.setting_key
         state = self.coordinator.data
-        setup_available = can_edit_pending_clean_settings(state)
+        setup_available = (
+            can_edit_pending_clean_settings(state)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
         live_available = super().available and is_live_clean_setting_available(state)
         setup_applies = self._setting_applies_to_mode(key)
         live_applies = self._setting_applies_to_mode(key, live=True)
@@ -899,6 +924,15 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             raise HomeAssistantError(
                 f"Narwal setting command failed: {result_name}"
             )
+
+        if response is not None:
+            attr = "fan" if key == "suction" else "water"
+            value = (
+                self._suction_map[option]
+                if key == "suction"
+                else LEGACY_WATER_MAP[option]
+            )
+            self.coordinator.set_active_clean_setting(attr, value)
 
         self._apply_option(option)
         self.async_write_ha_state()

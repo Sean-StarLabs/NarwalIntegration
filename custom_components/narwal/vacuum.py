@@ -258,7 +258,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
 
     def _fan_speed_available(self, state: Any) -> bool:
         """Return True when HA should expose the native fan speed control."""
-        setup_available = can_edit_pending_clean_settings(state)
+        setup_available = (
+            can_edit_pending_clean_settings(state)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
         live_available = super().available and is_live_clean_setting_available(state)
         setup_applies = clean_setting_applies_to_mode(
             "fan",
@@ -314,9 +317,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         pending value held in coordinator.clean_settings (applied at the next clean
         and, while cleaning, written live via set_fan_speed).
         """
-        return fan_speed_label_map_for(self.coordinator.config_entry.data).get(
-            self.coordinator.clean_settings.fan
-        )
+        fan = self.coordinator.active_clean_setting("fan")
+        if fan is None:
+            fan = self.coordinator.clean_settings.fan
+        return fan_speed_label_map_for(self.coordinator.config_entry.data).get(fan)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any] | None:
@@ -523,7 +527,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if level is None:
             raise HomeAssistantError(f"Unsupported Narwal fan speed: {fan_speed}")
         state = self.coordinator.data
-        setup_available = can_edit_pending_clean_settings(state)
+        setup_available = (
+            can_edit_pending_clean_settings(state)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
         live_available = super().available and is_live_clean_setting_available(state)
         setup_applies = clean_setting_applies_to_mode(
             "fan",
@@ -549,6 +556,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if live_available:
             resp = await self.coordinator.client.set_fan_speed(level)
             _raise_if_command_failed(resp, "set fan speed")
+            self.coordinator.set_active_clean_setting("fan", level)
         self.coordinator.clean_settings.fan = level
         self.async_write_ha_state()
         self.coordinator.async_update_listeners()

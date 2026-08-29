@@ -47,6 +47,8 @@ class TestCoordinatorMapRefresh:
         coordinator._last_display_map_resub = 0.0
         coordinator._last_status_resub = 0.0
         coordinator._prev_working_status = WorkingStatus.UNKNOWN
+        coordinator.active_clean_work_mode = None
+        coordinator.active_room_clean_settings = {}
         coordinator._map_display_cache_store = MagicMock()
         coordinator._map_display_cache_store.async_save = AsyncMock()
         coordinator._map_display_cache_signature = ()

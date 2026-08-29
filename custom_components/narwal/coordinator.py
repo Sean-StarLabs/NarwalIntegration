@@ -8,7 +8,7 @@ import contextlib
 import logging
 import time
 from collections.abc import Mapping
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from datetime import timedelta
 
 from homeassistant.config_entries import ConfigEntry
@@ -361,6 +361,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.room_clean_settings_customized: dict[tuple[str | None, int], set[str]] = {}
         self.selected_clean_rooms: dict[str | None, set[int]] = {}
         self.active_clean_work_mode: WorkMode | None = None
+        self.active_room_clean_settings: dict[int, RoomCleanSettings] = {}
         self._listen_task: asyncio.Task[None] | None = None
         self._fast_poll_remaining = 0
         self._prev_working_status = WorkingStatus.UNKNOWN
@@ -468,10 +469,37 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self,
         room_settings: Mapping[int, RoomCleanSettings],
     ) -> None:
-        """Record the effective mode for the accepted robot task."""
+        """Record effective room profiles for the accepted robot task."""
         self.active_clean_work_mode = self.compatible_room_clean_work_mode(
             room_settings
         )
+        self.active_room_clean_settings = {
+            room_id: replace(settings)
+            for room_id, settings in room_settings.items()
+        }
+
+    def active_clean_setting(self, attr: str) -> object | None:
+        """Return the effective live value for the current clean, if known."""
+        state = self.data or self.client.state
+        if not is_clean_session_context(state):
+            return None
+        if (
+            state.current_room_id is not None
+            and state.current_room_id in self.active_room_clean_settings
+        ):
+            return getattr(
+                self.active_room_clean_settings[state.current_room_id], attr
+            )
+        values = {
+            getattr(settings, attr)
+            for settings in self.active_room_clean_settings.values()
+        }
+        return next(iter(values)) if len(values) == 1 else None
+
+    def set_active_clean_setting(self, attr: str, value: object) -> None:
+        """Update the displayed live value after an accepted runtime command."""
+        for settings in self.active_room_clean_settings.values():
+            setattr(settings, attr, value)
 
     def clean_setting_applicability_mode(
         self, *, live: bool = False
@@ -487,6 +515,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         """Clear accepted-task metadata once the robot is no longer in a clean context."""
         if not is_clean_session_context(state):
             self.active_clean_work_mode = None
+            self.active_room_clean_settings.clear()
 
     @staticmethod
     def _normalise_room_settings_map_id(map_id: object) -> str | None:
@@ -581,6 +610,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         selected = self.selected_clean_rooms.get(map_key, set())
         selected_room_ids = [room_id for room_id in room_ids if room_id in selected]
         return selected_room_ids or list(room_ids)
+
+    def has_selected_clean_rooms(self, *, map_id: str | None = None) -> bool:
+        """Return whether the current map has an explicit next-clean selection."""
+        map_key = map_id if map_id is not None else self.room_settings_map_id()
+        return bool(self.selected_clean_rooms.get(map_key))
 
     def is_room_selected_for_clean(
         self,
