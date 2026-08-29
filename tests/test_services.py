@@ -254,6 +254,37 @@ async def test_clean_rooms_service_uses_requested_settings_over_room_profiles() 
     assert kwargs["room_settings"][7].fan == FanLevel.STRONG
 
 
+@pytest.mark.parametrize(
+    ("product_key", "expected"),
+    [
+        ("QoEsI5qYXO", FanLevel.SUPER),
+        ("qV6BujoYLz", FanLevel.DEEP),
+    ],
+)
+async def test_clean_rooms_service_resolves_max_for_each_model(
+    product_key: str,
+    expected: FanLevel,
+) -> None:
+    """The max alias resolves through each model's visible tiers."""
+    coordinator = _coordinator(product_key=product_key)
+    handler, registry = _register_clean_rooms_handler(coordinator)
+    call = _clean_rooms_call()
+    call.data[FIELD_SUCTION] = "max"
+
+    with (
+        patch(
+            "custom_components.narwal.service.async_extract_entity_ids",
+            new_callable=AsyncMock,
+            return_value=["vacuum.downstairs_narwal"],
+        ),
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+    ):
+        await handler(call)
+
+    room_settings = coordinator.client.start_rooms.await_args.kwargs["room_settings"]
+    assert all(settings.fan == expected for settings in room_settings.values())
+
+
 async def test_clean_rooms_service_rejects_unavailable_start() -> None:
     """The service enforces the same availability as the start entities."""
     coordinator = _coordinator(docked=False)

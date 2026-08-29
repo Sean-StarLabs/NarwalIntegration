@@ -42,6 +42,7 @@ from .coordinator import (
     clean_setting_applies_to_mode,
     is_live_clean_setting_available,
 )
+from .dock_tasks import ROBOT_RETURN_COMPATIBLE_DOCK_TASKS
 from .entity import NarwalEntity
 from .narwal_client import CommandResult, FanLevel, WorkingStatus
 from .narwal_client.const import ACTIVE_CLEANING_STATUSES
@@ -147,7 +148,17 @@ def _has_dock_stop_context(state: Any) -> bool:
 
 def _can_stop_vacuum(state: Any) -> bool:
     """Return true when the aggregate vacuum stop command is safe to expose."""
-    if _has_dock_stop_context(state) and not _has_live_robot_stop_context(state):
+    compatible_metric_clean = (
+        state.has_recent_active_working_status
+        and not state.has_unmapped_active_dock_task
+        and set(state.active_dock_task_keys)
+        <= ROBOT_RETURN_COMPATIBLE_DOCK_TASKS
+    )
+    if (
+        _has_dock_stop_context(state)
+        and not _has_live_robot_stop_context(state)
+        and not compatible_metric_clean
+    ):
         return False
     return can_stop_cleaning(state)
 
@@ -300,7 +311,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
 
     def _fan_speed_available(self, state: Any) -> bool:
         """Return True when HA should expose the native fan speed control."""
-        setup_available = can_edit_pending_clean_settings(state)
+        setup_available = (
+            can_edit_pending_clean_settings(state)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
         live_available = super().available and is_live_clean_setting_available(state)
         setup_applies = clean_setting_applies_to_mode(
             "fan",
