@@ -214,7 +214,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if state is None or not self.available:
             return features
 
-        if can_prepare_clean_start(state) or can_resume_cleaning(state):
+        if self._can_start_selected_rooms(state) or can_resume_cleaning(state):
             features |= VacuumEntityFeature.START
         if _can_stop_vacuum(state):
             features |= VacuumEntityFeature.STOP
@@ -229,6 +229,32 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if Segment is not None and can_prepare_clean_start(state):
             features |= VacuumEntityFeature.CLEAN_AREA
         return features
+
+    def _can_start_selected_rooms(self, state: Any) -> bool:
+        """Return True when native START can use the current room selection."""
+        if not can_prepare_clean_start(state):
+            return False
+        room_ids = self._known_room_ids(state)
+        if room_ids is None:
+            # async_start can still fetch the map before dispatch.
+            return True
+        if not room_ids:
+            return False
+        selected_room_ids = self.coordinator.selected_clean_room_ids_for(room_ids)
+        room_settings = self.coordinator.room_clean_settings_for_rooms(selected_room_ids)
+        try:
+            self.coordinator.compatible_room_clean_work_mode(room_settings)
+        except ValueError:
+            return False
+        return True
+
+    @staticmethod
+    def _known_room_ids(state: Any) -> list[int] | None:
+        """Return currently cached cleanable room IDs."""
+        map_data = getattr(state, "map_data", None)
+        if map_data is None:
+            return None
+        return [room.room_id for room in map_data.rooms if room.room_id > 0]
 
     def _fan_speed_available(self, state: Any) -> bool:
         """Return True when HA should expose the native fan speed control."""
@@ -347,9 +373,6 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 resp = await self.coordinator.client.resume(timeout=self._ACTION_TIMEOUT)
                 _raise_if_command_failed(resp, "resume")
                 return
-            await self._validate_clean_start()
-            if not can_start_cleaning(self.coordinator.client.state):
-                raise HomeAssistantError("Narwal clean cannot be started right now")
 
             # The HA vacuum start command uses integration-owned room selections:
             # selected rooms when any are on, otherwise all rooms.
@@ -363,6 +386,9 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 self.coordinator.compatible_room_clean_work_mode(room_settings)
             except ValueError as err:
                 raise HomeAssistantError(str(err)) from err
+            await self._validate_clean_start()
+            if not can_start_cleaning(self.coordinator.client.state):
+                raise HomeAssistantError("Narwal clean cannot be started right now")
             resp = await self.coordinator.client.start_rooms(
                 room_ids,
                 work_mode=settings.work_mode,
@@ -404,15 +430,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             state = self.coordinator.data
         if state and state.map_data:
             return [r.room_id for r in state.map_data.rooms if r.room_id > 0]
-        # Map still unavailable — reuse the HA segment cache (Segment.id == str(room_id)).
-        cached = getattr(self, "last_seen_segments", None) or []
-        ids: list[int] = []
-        for seg in cached:
-            try:
-                ids.append(int(seg.id))
-            except (ValueError, AttributeError, TypeError):
-                continue
-        return ids
+        return []
 
     async def async_stop(self, **kwargs) -> None:
         """Stop cleaning."""
@@ -583,7 +601,6 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             raise HomeAssistantError("Narwal segment IDs must be positive")
 
         async with self.coordinator.dock_action_lock:
-            await self._validate_clean_start()
             state = self.coordinator.data
             known_ids: set[int] = set()
             if state is None or state.map_data is None:
@@ -595,12 +612,6 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             if state is not None and state.map_data is not None:
                 known_ids = {
                     room.room_id for room in state.map_data.rooms if room.room_id > 0
-                }
-            else:
-                known_ids = {
-                    int(segment.id)
-                    for segment in (getattr(self, "last_seen_segments", None) or [])
-                    if str(segment.id).isdigit() and int(segment.id) > 0
                 }
             if not known_ids:
                 raise HomeAssistantError("Narwal map is not available")
@@ -616,6 +627,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 self.coordinator.compatible_room_clean_work_mode(room_settings)
             except ValueError as err:
                 raise HomeAssistantError(str(err)) from err
+            await self._validate_clean_start()
             _LOGGER.info(
                 "Starting room-specific clean: rooms=%s mode=%s fan=%s water=%s "
                 "mop_strength=%s passes=%s route=%s",

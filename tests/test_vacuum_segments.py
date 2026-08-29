@@ -321,6 +321,40 @@ class TestVacuumSupportedFeatures:
         assert features & VacuumEntityFeature.START
         assert features & VacuumEntityFeature.CLEAN_AREA
 
+    def test_mixed_selected_room_profiles_hide_start_feature(self) -> None:
+        """Native START is hidden when current room profiles cannot dispatch."""
+        state = _docked_state()
+        state.map_data = MapData(
+            map_id=2,
+            rooms=[RoomInfo(room_id=11), RoomInfo(room_id=12)],
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.room_clean_settings_for_rooms = MagicMock(
+            return_value={
+                11: RoomCleanSettings(work_mode=WorkMode.MOP),
+                12: RoomCleanSettings(work_mode=WorkMode.VACUUM),
+            }
+        )
+        vac.coordinator.compatible_room_clean_work_mode = MagicMock(
+            side_effect=ValueError("Mixed Narwal room clean modes are not supported")
+        )
+
+        features = vac.supported_features
+
+        assert not features & VacuumEntityFeature.START
+        assert features & VacuumEntityFeature.CLEAN_AREA
+
+    def test_empty_cached_map_hides_start_feature(self) -> None:
+        """Native START is hidden when the cached map has no cleanable rooms."""
+        state = _docked_state()
+        state.map_data = MapData(map_id=2, rooms=[RoomInfo(room_id=0)])
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert not features & VacuumEntityFeature.START
+        assert features & VacuumEntityFeature.CLEAN_AREA
+
     def test_recent_clean_with_unstoppable_dock_task_hides_stop(self) -> None:
         """Retained clean metrics must not expose generic stop over dry dust-bin."""
         state = NarwalState(working_status=WorkingStatus.CHARGED)
@@ -502,6 +536,7 @@ class TestAsyncCleanSegments:
     async def test_rejects_room_clean_when_start_planner_fails(self) -> None:
         """Room clean requests are blocked when the start planner fails closed."""
         state = _docked_state()
+        state.map_data = MapData(map_id=2, rooms=[RoomInfo(room_id=11)])
         state.station_activity = 1
         vac = _make_vacuum(state=state)
         vac.coordinator.async_prepare_clean_start = AsyncMock(return_value=False)
@@ -553,6 +588,60 @@ class TestAsyncCleanSegments:
         with pytest.raises(HomeAssistantError, match="Mixed Narwal room clean modes"):
             await vac.async_clean_segments(["11", "12"])
 
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+
+    async def test_mixed_segment_modes_fail_before_dock_prepare(self) -> None:
+        """Invalid segment profiles are rejected before a dock task is stopped."""
+        state = _docked_state()
+        state.map_data = MapData(
+            map_id=2,
+            rooms=[RoomInfo(room_id=11), RoomInfo(room_id=12)],
+        )
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.room_clean_settings_for_rooms = MagicMock(
+            return_value={
+                11: RoomCleanSettings(work_mode=WorkMode.MOP),
+                12: RoomCleanSettings(work_mode=WorkMode.VACUUM),
+            }
+        )
+        vac.coordinator.compatible_room_clean_work_mode = MagicMock(
+            side_effect=ValueError("Mixed Narwal room clean modes are not supported")
+        )
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="Mixed Narwal room clean modes"):
+            await vac.async_clean_segments(["11", "12"])
+
+        vac.coordinator.async_prepare_clean_start.assert_not_awaited()
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+
+    async def test_segment_clean_without_map_fails_before_dock_prepare(self) -> None:
+        """Segment commands do not use stale HA segment cache as command input."""
+        state = _docked_state()
+        state.map_data = None
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.last_seen_segments = [Segment(id="11", name="Bathroom")]
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.get_map = AsyncMock()
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="Narwal map is not available"):
+            await vac.async_clean_segments(["11"])
+
+        vac.coordinator.async_prepare_clean_start.assert_not_awaited()
         vac.coordinator.client.start_rooms.assert_not_awaited()
 
     async def test_rejected_room_clean_raises_service_error(self) -> None:
@@ -927,6 +1016,7 @@ class TestAsyncStartWholeHouse:
         """With no map rooms available, no ambiguous start command is sent."""
         state = _docked_state()  # no map_data
         vac = _make_vacuum(state=state)
+        vac.last_seen_segments = [Segment(id="1", name="Bedroom")]
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.get_map = AsyncMock()  # does not populate map_data
         vac.coordinator.client.start = AsyncMock(
@@ -939,6 +1029,7 @@ class TestAsyncStartWholeHouse:
 
         vac.coordinator.client.start.assert_not_awaited()
         vac.coordinator.client.start_rooms.assert_not_called()
+        vac.coordinator.async_prepare_clean_start.assert_not_awaited()
 
     async def test_rejected_whole_house_start_raises_service_error(self) -> None:
         """Rejected whole-house starts fail the HA service call."""
@@ -952,6 +1043,38 @@ class TestAsyncStartWholeHouse:
 
         with pytest.raises(HomeAssistantError, match="Narwal start command failed"):
             await vac.async_start()
+
+    async def test_mixed_whole_house_modes_fail_before_dock_prepare(self) -> None:
+        """Invalid all-room profiles are rejected before a dock task is stopped."""
+        state = _docked_state()
+        state.map_data = MapData(
+            map_id=2,
+            rooms=[RoomInfo(room_id=11), RoomInfo(room_id=12)],
+        )
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.room_clean_settings_for_rooms = MagicMock(
+            return_value={
+                11: RoomCleanSettings(work_mode=WorkMode.MOP),
+                12: RoomCleanSettings(work_mode=WorkMode.VACUUM),
+            }
+        )
+        vac.coordinator.compatible_room_clean_work_mode = MagicMock(
+            side_effect=ValueError("Mixed Narwal room clean modes are not supported")
+        )
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="Mixed Narwal room clean modes"):
+            await vac.async_start()
+
+        vac.coordinator.async_prepare_clean_start.assert_not_awaited()
+        vac.coordinator.client.start_rooms.assert_not_awaited()
 
 
 class TestAsyncStop:
