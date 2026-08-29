@@ -29,6 +29,10 @@ _DOCK_DRYING_STATUS_TTL = 180.0
 _DOCK_TASK_ASSUME_TTL = 30.0
 # clean/start_clean can be accepted long before working_status metrics arrive.
 _ROBOT_START_ASSUME_TTL = 180.0
+# Live hardware has taken about 50 seconds to leave a stale docked status after
+# accepting a room clean. After this handoff window, repeated idle dock
+# telemetry is stronger evidence than the accepted-command reservation.
+_ROBOT_START_DOCKED_HANDOFF_GRACE = 60.0
 _KNOWN_DOCK_ACTIVITY_VALUES = {0, 2, 3, 4, 6}
 
 DOCK_TASK_EMPTY_DUSTBIN = "empty_dustbin"
@@ -1162,8 +1166,14 @@ class NarwalState:
         if self.working_status == WorkingStatus.TASK_COMPLETED:
             self.clear_assumed_robot_clean()
             return
+        handoff_ends = (
+            self.assumed_robot_clean_until
+            - _ROBOT_START_ASSUME_TTL
+            + _ROBOT_START_DOCKED_HANDOFF_GRACE
+        )
         if (
             not is_paused
+            and time.monotonic() >= handoff_ends
             and self.working_status
             in (
                 WorkingStatus.STANDBY,

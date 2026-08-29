@@ -454,12 +454,24 @@ class TestNarwalState:
 
         assert state.has_assumed_robot_clean
 
-    def test_assumed_robot_clean_clears_on_docked_base_status(self) -> None:
-        """Authoritative idle dock status ends an accepted-start reservation."""
+    def test_assumed_robot_clean_ignores_previous_docked_base_status(self) -> None:
+        """A stale dock status cannot erase an accepted start during handoff."""
         state = NarwalState()
-        state.assume_robot_clean()
+        with patch("narwal_client.models.time.monotonic", return_value=1000.0):
+            state.assume_robot_clean()
 
-        state.update_from_base_status({"3": {"1": 10, "10": 1}, "11": 2})
+        with patch("narwal_client.models.time.monotonic", return_value=1059.0):
+            state.update_from_base_status({"3": {"1": 10, "10": 1}, "11": 2})
+            assert state.has_assumed_robot_clean
+
+    def test_assumed_robot_clean_clears_after_docked_handoff_grace(self) -> None:
+        """Current idle dock telemetry wins if an accepted start never begins."""
+        state = NarwalState()
+        with patch("narwal_client.models.time.monotonic", return_value=1000.0):
+            state.assume_robot_clean()
+
+        with patch("narwal_client.models.time.monotonic", return_value=1061.0):
+            state.update_from_base_status({"3": {"1": 10, "10": 1}, "11": 2})
 
         assert not state.has_assumed_robot_clean
 
