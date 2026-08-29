@@ -434,6 +434,35 @@ class TestNarwalState:
         assert not state.has_assumed_robot_clean
         assert state.is_cleaning
 
+    def test_assumed_robot_clean_covers_slow_status_handoff(self) -> None:
+        """Accepted room starts may take over 30s to publish task telemetry."""
+        state = NarwalState()
+
+        with patch("narwal_client.models.time.monotonic", return_value=1000.0):
+            state.assume_robot_clean()
+        with patch("narwal_client.models.time.monotonic", return_value=1179.0):
+            assert state.has_assumed_robot_clean
+        with patch("narwal_client.models.time.monotonic", return_value=1181.0):
+            assert not state.has_assumed_robot_clean
+
+    def test_assumed_robot_clean_ignores_unknown_off_dock_handoff(self) -> None:
+        """UNKNOWN/off-dock base status can appear before task telemetry arrives."""
+        state = NarwalState()
+        state.assume_robot_clean()
+
+        state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
+
+        assert state.has_assumed_robot_clean
+
+    def test_assumed_robot_clean_clears_on_docked_base_status(self) -> None:
+        """Authoritative idle dock status ends an accepted-start reservation."""
+        state = NarwalState()
+        state.assume_robot_clean()
+
+        state.update_from_base_status({"3": {"1": 10, "10": 1}, "11": 2})
+
+        assert not state.has_assumed_robot_clean
+
     def test_assumed_robot_clean_clears_previous_display_map(self) -> None:
         """A newly accepted clean should not render the previous task's route."""
         state = NarwalState()

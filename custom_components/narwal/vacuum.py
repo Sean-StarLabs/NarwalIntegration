@@ -31,6 +31,7 @@ from .coordinator import (
     can_edit_pending_clean_settings,
     can_locate_robot,
     can_pause_cleaning,
+    can_prepare_clean_start,
     can_resume_cleaning,
     can_return_home,
     can_start_cleaning,
@@ -39,7 +40,6 @@ from .coordinator import (
     is_live_clean_setting_available,
 )
 from .dock_tasks import (
-    can_start_robot_clean,
     can_stop_dock_task,
     dock_task_blocks_robot_return,
     is_clean_session_context,
@@ -86,6 +86,7 @@ def _task_status(state: Any) -> str:
     """Return a compact active-task status for dashboards and automations."""
     is_cleaning_state = (
         state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.has_assumed_robot_clean
         or state.has_recent_active_working_status
         or state.has_paused_clean_task_context
     )
@@ -97,7 +98,7 @@ def _task_status(state: Any) -> str:
         return "paused"
     if state.is_returning:
         return "returning"
-    if state.is_cleaning:
+    if state.is_cleaning or state.has_assumed_robot_clean:
         return "cleaning"
     if state.is_station_active:
         return "station_active"
@@ -117,6 +118,7 @@ def _has_active_cleaning_metrics(state: Any) -> bool:
     """Return true while live clean-progress details are current."""
     return (
         state.is_cleaning
+        or state.has_assumed_robot_clean
         or state.has_recent_active_working_status
         or state.has_paused_clean_task_context
     )
@@ -145,6 +147,7 @@ def _has_live_robot_stop_context(state: Any) -> bool:
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
         or state.working_status == WorkingStatus.REMAPPING
+        or state.has_assumed_robot_clean
         or state.has_paused_clean_task_context
         or state.is_returning
     )
@@ -211,7 +214,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         if state is None or not self.available:
             return features
 
-        if can_start_cleaning(state) or can_resume_cleaning(state):
+        if can_prepare_clean_start(state) or can_resume_cleaning(state):
             features |= VacuumEntityFeature.START
         if _can_stop_vacuum(state):
             features |= VacuumEntityFeature.STOP
@@ -223,7 +226,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             features |= VacuumEntityFeature.LOCATE
         if self._fan_speed_available(state):
             features |= VacuumEntityFeature.FAN_SPEED
-        if Segment is not None and can_start_cleaning(state):
+        if Segment is not None and can_prepare_clean_start(state):
             features |= VacuumEntityFeature.CLEAN_AREA
         return features
 
@@ -251,6 +254,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             return VacuumActivity.IDLE
         is_cleaning_state = (
             state.working_status in ACTIVE_CLEANING_STATUSES
+            or state.has_assumed_robot_clean
             or state.has_recent_active_working_status
             or state.has_paused_clean_task_context
         )
@@ -265,7 +269,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         # while navigating back to dock (field 3.7=1 indicates returning)
         if state.is_returning:
             return VacuumActivity.RETURNING
-        if state.is_cleaning:
+        if state.is_cleaning or state.has_assumed_robot_clean:
             return VacuumActivity.CLEANING
         if _is_dock_side(state):
             return VacuumActivity.DOCKED
@@ -323,11 +327,9 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             await client.wake(timeout=10.0)
 
     async def _validate_clean_start(self) -> None:
-        """Refresh dock state and reject starts that conflict with dock work."""
-        if not await self.coordinator.async_refresh_dock_status():
-            raise HomeAssistantError("Narwal status could not be refreshed")
-        if not can_start_robot_clean(self.coordinator.client.state):
-            raise HomeAssistantError("Narwal dock task is active")
+        """Refresh dock state and clear safe dock blockers before clean start."""
+        if not await self.coordinator.async_prepare_clean_start():
+            raise HomeAssistantError("Narwal clean cannot be started right now")
 
     async def _state_after_wake(self):
         """Wake the robot and return the freshest client state."""

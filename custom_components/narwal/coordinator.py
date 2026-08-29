@@ -27,7 +27,11 @@ from .const import (
     NO_BROADCAST_PRODUCT_KEYS,
     configured_cloud_product_id,
 )
-from .dock_tasks import can_start_robot_clean, dock_task_blocks_robot_return
+from .dock_tasks import (
+    can_start_robot_clean,
+    can_stop_dock_task,
+    dock_task_blocks_robot_return,
+)
 from .narwal_client import (
     CleaningRoute,
     CommandResponse,
@@ -229,6 +233,42 @@ def can_start_cleaning(state: NarwalState | None) -> bool:
         and not is_clean_session_context(state)
         and can_start_robot_clean(state)
     )
+
+
+def _can_start_cleaning_from_idle(state: NarwalState | None) -> bool:
+    """Return True when refreshed state is idle enough to send a clean start."""
+    return (
+        can_start_cleaning(state)
+        and not state.active_dock_task_keys
+        and not state.is_station_active
+        and not state.has_unmapped_active_dock_task
+        and state.assumed_active_dock_task is None
+    )
+
+
+def can_prepare_clean_start(
+    state: NarwalState | None,
+    *,
+    allow_dock_stop: bool = True,
+) -> bool:
+    """Return True when a clean start can run now or after a safe dock stop."""
+    if state is None:
+        return False
+    active_tasks = state.active_dock_task_keys
+    if _can_start_cleaning_from_idle(state):
+        return True
+    if not allow_dock_stop:
+        return False
+    if (
+        has_blocking_error(state)
+        or not state.is_docked
+        or is_clean_session_context(state)
+        or state.has_unmapped_active_dock_task
+        or state.assumed_active_dock_task is not None
+    ):
+        return False
+
+    return len(active_tasks) == 1 and can_stop_dock_task(state, active_tasks[0])
 
 
 def can_pause_cleaning(state: NarwalState | None) -> bool:
@@ -1224,6 +1264,39 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._sync_active_clean_context(self.client.state)
         self.async_set_updated_data(self.client.state)
         return True
+
+    async def async_prepare_clean_start(self, *, allow_dock_stop: bool = True) -> bool:
+        """Stop safe dock-side blockers before starting a robot clean."""
+        if not await self.async_refresh_dock_status():
+            return False
+        state = self.client.state
+        active_tasks = state.active_dock_task_keys
+        if _can_start_cleaning_from_idle(state):
+            return True
+        if not allow_dock_stop:
+            return False
+        if (
+            has_blocking_error(state)
+            or not state.is_docked
+            or is_clean_session_context(state)
+            or state.has_unmapped_active_dock_task
+            or state.assumed_active_dock_task is not None
+            or len(active_tasks) != 1
+        ):
+            return False
+
+        blocker = active_tasks[0]
+        if not can_stop_dock_task(state, blocker):
+            return False
+        response = await self.client.stop_dock_task(blocker)
+        if not response.accepted:
+            return False
+        self._sync_active_clean_context(self.client.state)
+        self.async_set_updated_data(self.client.state)
+
+        if not await self.async_refresh_dock_status():
+            return False
+        return _can_start_cleaning_from_idle(self.client.state)
 
     async def async_refresh_action_status(self) -> bool:
         """Refresh state for a robot action without clobbering live task telemetry."""

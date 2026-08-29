@@ -233,6 +233,34 @@ async def test_active_dry_dust_bin_switch_stops_with_scoped_command() -> None:
     coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
 
 
+async def test_switch_refreshes_before_stop_validation() -> None:
+    """A stale local status cannot reject a typed stop before refresh."""
+    state = _docked_state()
+    state.working_status = WorkingStatus.UNKNOWN
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DUST_BIN,
+        elapsed=61,
+        target=180,
+        fields=("10", "11"),
+    )
+    coordinator = _coordinator(state)
+
+    async def refresh_dock_status() -> bool:
+        state.working_status = WorkingStatus.DOCKED
+        return True
+
+    coordinator.async_refresh_dock_status = AsyncMock(side_effect=refresh_dock_status)
+    coordinator.client.stop_dock_task = AsyncMock(
+        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+    )
+    switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[3])
+
+    await switch.async_turn_off()
+
+    coordinator.async_refresh_dock_status.assert_awaited()
+    coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
+
+
 def test_multiple_tasks_only_allow_scoped_stop() -> None:
     """Generic stop is unavailable for ambiguous multi-task dock activity."""
     state = _docked_state()

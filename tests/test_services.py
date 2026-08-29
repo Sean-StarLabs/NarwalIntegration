@@ -40,6 +40,7 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     RoomInfo,
     WorkMode,
 )
+from custom_components.narwal.narwal_client.models import DOCK_TASK_DRY_MOP  # noqa: E402
 
 
 def _coordinator(
@@ -60,6 +61,13 @@ def _coordinator(
         return_value=CommandResponse(result_code=result_code)
     )
     coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+
+    async def prepare_clean_start(*, allow_dock_stop: bool = True) -> bool:
+        return coordinator.client.state.is_docked and (
+            allow_dock_stop or not coordinator.client.state.active_dock_task_keys
+        )
+
+    coordinator.async_prepare_clean_start = AsyncMock(side_effect=prepare_clean_start)
     coordinator.dock_action_lock = asyncio.Lock()
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.data = {"product_key": product_key}
@@ -126,13 +134,39 @@ async def test_clean_rooms_service_starts_requested_rooms() -> None:
         await handler(call)
 
     extract_entity_ids.assert_awaited_once()
-    assert extract_entity_ids.await_args.args[1] is call
+    assert extract_entity_ids.await_args.args[0] is call
     coordinator.client.start_rooms.assert_awaited_once()
     assert coordinator.client.start_rooms.await_args.args[0] == [4, 7]
     assert coordinator.client.state.has_assumed_robot_clean
     assert coordinator.active_clean_work_mode == WorkMode.VACUUM_AND_MOP
     assert not can_start_cleaning(coordinator.client.state)
     coordinator.async_set_updated_data.assert_called_once_with(coordinator.client.state)
+
+
+async def test_clean_rooms_service_supports_legacy_entity_extractor() -> None:
+    """Target extraction remains compatible with older HA helper signatures."""
+    coordinator = _coordinator()
+    handler, registry = _register_clean_rooms_handler(coordinator)
+    call = _clean_rooms_call()
+
+    with (
+        patch(
+            "custom_components.narwal.service.async_extract_entity_ids",
+            new_callable=AsyncMock,
+            side_effect=[
+                TypeError("missing required positional argument: service_call"),
+                ["vacuum.downstairs_narwal"],
+            ],
+        ) as extract_entity_ids,
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+    ):
+        await handler(call)
+
+    assert len(extract_entity_ids.await_args_list) == 2
+    assert extract_entity_ids.await_args_list[0].args == (call,)
+    assert len(extract_entity_ids.await_args_list[1].args) == 2
+    assert extract_entity_ids.await_args_list[1].args[1] is call
+    coordinator.client.start_rooms.assert_awaited_once()
 
 
 async def test_clean_rooms_service_accepts_async_accepted_response() -> None:
@@ -368,6 +402,106 @@ async def test_clean_rooms_service_preflights_all_targets_before_starting() -> N
         await handler(_clean_rooms_call())
 
     first.client.wake.assert_awaited_once_with(timeout=10.0)
+    first.client.start_rooms.assert_not_awaited()
+    second.client.start_rooms.assert_not_awaited()
+
+
+async def test_clean_rooms_service_rejects_multi_target_dock_stop_preparation() -> None:
+    """Multi-target requests must not stop a dock task during preflight."""
+    first = _coordinator()
+    first.client.state.set_dock_drying_task(
+        DOCK_TASK_DRY_MOP,
+        elapsed=60,
+        target=180,
+        fields=("8", "9"),
+    )
+    first.client.stop_dock_task = AsyncMock()
+    second = _coordinator()
+
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"entry-1": first, "entry-2": second}}
+    hass.services.has_service.return_value = False
+    handlers = {}
+
+    def register_service(domain: str, service_name: str, handler, **kwargs) -> None:
+        handlers[(domain, service_name)] = handler
+
+    hass.services.async_register.side_effect = register_service
+    registry = MagicMock()
+    registry.async_get.side_effect = lambda entity_id: {
+        "vacuum.first_narwal": SimpleNamespace(
+            config_entry_id="entry-1",
+            platform=DOMAIN,
+        ),
+        "vacuum.second_narwal": SimpleNamespace(
+            config_entry_id="entry-2",
+            platform=DOMAIN,
+        ),
+    }[entity_id]
+    _async_register_services(hass)
+    handler = handlers[(DOMAIN, SERVICE_CLEAN_ROOMS)]
+
+    with (
+        patch(
+            "custom_components.narwal.service.async_extract_entity_ids",
+            new_callable=AsyncMock,
+            return_value=["vacuum.first_narwal", "vacuum.second_narwal"],
+        ),
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+        pytest.raises(Exception, match="multi-target room clean cannot stop dock tasks"),
+    ):
+        await handler(_clean_rooms_call())
+
+    first.async_prepare_clean_start.assert_not_awaited()
+    second.async_prepare_clean_start.assert_not_awaited()
+    first.client.stop_dock_task.assert_not_awaited()
+    first.client.start_rooms.assert_not_awaited()
+    second.client.start_rooms.assert_not_awaited()
+
+
+async def test_clean_rooms_service_uses_no_stop_prepare_for_multi_target() -> None:
+    """The execution preflight for multi-target calls must remain side-effect-free."""
+    first = _coordinator()
+    first.async_prepare_clean_start = AsyncMock(return_value=True)
+    second = _coordinator()
+    second.async_prepare_clean_start = AsyncMock(return_value=False)
+
+    hass = MagicMock()
+    hass.data = {DOMAIN: {"entry-1": first, "entry-2": second}}
+    hass.services.has_service.return_value = False
+    handlers = {}
+
+    def register_service(domain: str, service_name: str, handler, **kwargs) -> None:
+        handlers[(domain, service_name)] = handler
+
+    hass.services.async_register.side_effect = register_service
+    registry = MagicMock()
+    registry.async_get.side_effect = lambda entity_id: {
+        "vacuum.first_narwal": SimpleNamespace(
+            config_entry_id="entry-1",
+            platform=DOMAIN,
+        ),
+        "vacuum.second_narwal": SimpleNamespace(
+            config_entry_id="entry-2",
+            platform=DOMAIN,
+        ),
+    }[entity_id]
+    _async_register_services(hass)
+    handler = handlers[(DOMAIN, SERVICE_CLEAN_ROOMS)]
+
+    with (
+        patch(
+            "custom_components.narwal.service.async_extract_entity_ids",
+            new_callable=AsyncMock,
+            return_value=["vacuum.first_narwal", "vacuum.second_narwal"],
+        ),
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+        pytest.raises(Exception, match="cannot be started"),
+    ):
+        await handler(_clean_rooms_call())
+
+    first.async_prepare_clean_start.assert_awaited_once_with(allow_dock_stop=False)
+    second.async_prepare_clean_start.assert_awaited_once_with(allow_dock_stop=False)
     first.client.start_rooms.assert_not_awaited()
     second.client.start_rooms.assert_not_awaited()
 

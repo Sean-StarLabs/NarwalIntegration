@@ -37,7 +37,7 @@ from .const import (
     configured_model_name,
     fan_speed_map_for,
 )
-from .coordinator import NarwalCoordinator, can_start_cleaning
+from .coordinator import NarwalCoordinator, can_prepare_clean_start
 from .narwal_client import (
     CleaningRoute,
     CommandResult,
@@ -344,8 +344,16 @@ def _async_register_services(hass: HomeAssistant) -> None:
     if hass.services.has_service(DOMAIN, SERVICE_CLEAN_ROOMS):
         return
 
+    async def _async_extract_entity_ids(call: ServiceCall) -> list[str]:
+        """Extract target entity IDs across supported HA helper signatures."""
+        try:
+            entity_ids = await service.async_extract_entity_ids(call)
+        except TypeError:
+            entity_ids = await service.async_extract_entity_ids(hass, call)
+        return list(entity_ids)
+
     async def async_clean_rooms(call: ServiceCall) -> None:
-        entity_ids = list(await service.async_extract_entity_ids(hass, call))
+        entity_ids = await _async_extract_entity_ids(call)
         if not entity_ids and any(
             key in call.data for key in (ATTR_ENTITY_ID, ATTR_DEVICE_ID, ATTR_AREA_ID)
         ):
@@ -404,10 +412,29 @@ def _async_register_services(hass: HomeAssistant) -> None:
             for coordinator in sorted(coordinators, key=id):
                 await stack.enter_async_context(coordinator.dock_action_lock)
 
+            allow_dock_stop = len(plans) == 1
             for coordinator, _, _, _ in plans:
                 if not await coordinator.async_refresh_dock_status():
                     raise HomeAssistantError("Narwal status could not be refreshed")
-                if not can_start_cleaning(coordinator.client.state):
+                if not can_prepare_clean_start(
+                    coordinator.client.state,
+                    allow_dock_stop=allow_dock_stop,
+                ):
+                    if (
+                        not allow_dock_stop
+                        and coordinator.client.state.active_dock_task_keys
+                    ):
+                        raise HomeAssistantError(
+                            "Narwal multi-target room clean cannot stop dock tasks safely"
+                        )
+                    raise HomeAssistantError(
+                        "Narwal room clean cannot be started right now"
+                    )
+
+            for coordinator, _, _, _ in plans:
+                if not await coordinator.async_prepare_clean_start(
+                    allow_dock_stop=allow_dock_stop,
+                ):
                     raise HomeAssistantError(
                         "Narwal room clean cannot be started right now"
                     )

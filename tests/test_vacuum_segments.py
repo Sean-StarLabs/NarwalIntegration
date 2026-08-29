@@ -20,7 +20,10 @@ tests.ha_stubs.install()
 
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 
-from custom_components.narwal.coordinator import CleanSettings  # noqa: E402
+from custom_components.narwal.coordinator import (  # noqa: E402
+    CleanSettings,
+    can_prepare_clean_start,
+)
 from custom_components.narwal.vacuum import NarwalVacuum  # noqa: E402
 from narwal_client import RoomCleanSettings  # noqa: E402
 from narwal_client.const import (  # noqa: E402
@@ -59,6 +62,7 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     coordinator.clean_settings = CleanSettings()
     coordinator.active_clean_work_mode = None
     coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+    coordinator.async_prepare_clean_start = AsyncMock(return_value=True)
     coordinator.async_refresh_action_status = AsyncMock(return_value=True)
     coordinator.async_clear_map_display_cache = AsyncMock()
     coordinator.dock_action_lock = asyncio.Lock()
@@ -175,6 +179,23 @@ class TestVacuumActivity:
         assert vac.activity == VacuumActivity.IDLE
         assert vac.extra_state_attributes["task_status"] == "unknown"
 
+    def test_assumed_clean_reports_active_during_start_handoff(self) -> None:
+        """An accepted start remains visible until native task telemetry arrives."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 0}, "11": 1, "47": 2})
+        state.assume_robot_clean()
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+        attrs = vac.extra_state_attributes
+
+        assert vac.activity == VacuumActivity.CLEANING
+        assert attrs["task_status"] == "cleaning"
+        assert attrs["status_summary"] == "Cleaning"
+        assert "progress" not in attrs
+        assert "current_room" not in attrs
+        assert features & VacuumEntityFeature.STOP
+
     def test_station_activity_alone_does_not_report_robot_docked(self) -> None:
         state = NarwalState(working_status=WorkingStatus.STANDBY)
         state.dock_presence = 2
@@ -282,6 +303,23 @@ class TestVacuumSupportedFeatures:
         features = vac.supported_features
 
         assert not features & VacuumEntityFeature.RETURN_HOME
+
+    def test_stoppable_dock_task_exposes_start_features(self) -> None:
+        """Start stays exposed when it can first clear a safe dock blocker."""
+        state = _docked_state()
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert can_prepare_clean_start(state)
+        assert features & VacuumEntityFeature.START
+        assert features & VacuumEntityFeature.CLEAN_AREA
 
     def test_recent_clean_with_unstoppable_dock_task_hides_stop(self) -> None:
         """Retained clean metrics must not expose generic stop over dry dust-bin."""
@@ -461,11 +499,12 @@ class TestAsyncCleanSegments:
 
         assert "Room clean failed" not in caplog.text
 
-    async def test_rejects_room_clean_when_dock_task_is_active(self) -> None:
-        """Room clean requests are blocked before dispatch during dock work."""
+    async def test_rejects_room_clean_when_start_planner_fails(self) -> None:
+        """Room clean requests are blocked when the start planner fails closed."""
         state = _docked_state()
         state.station_activity = 1
         vac = _make_vacuum(state=state)
+        vac.coordinator.async_prepare_clean_start = AsyncMock(return_value=False)
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.start_rooms = AsyncMock()
 
@@ -473,6 +512,7 @@ class TestAsyncCleanSegments:
             await vac.async_clean_segments(["11"])
 
         vac.coordinator.client.start_rooms.assert_not_awaited()
+        vac.coordinator.async_prepare_clean_start.assert_awaited_once()
 
     async def test_accepted_room_clean_reserves_robot_start_context(self) -> None:
         """Accepted room-start commands block immediate dock starts."""

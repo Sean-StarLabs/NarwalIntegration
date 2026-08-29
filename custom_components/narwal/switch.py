@@ -194,14 +194,14 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
         async with self.coordinator.dock_action_lock:
             if self.is_on:
                 return
-            if not self.available:
-                raise HomeAssistantError("Narwal dock task cannot be started right now")
 
             client = self.coordinator.client
             if not client.robot_awake:
                 await client.wake(timeout=10.0)
             if not await self.coordinator.async_refresh_dock_status():
                 raise HomeAssistantError("Narwal dock status could not be refreshed")
+            if self.is_on:
+                return
             if not can_start_dock_task(client.state, self.entity_description.key):
                 raise HomeAssistantError("Narwal dock task cannot be started right now")
 
@@ -217,16 +217,13 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
     async def async_turn_off(self, **kwargs) -> None:
         """Stop this dock task."""
         async with self.coordinator.dock_action_lock:
-            if not self.is_on:
-                return
-            if not can_stop_dock_task(self.coordinator.data, self.entity_description.key):
-                raise HomeAssistantError("Narwal dock task cannot be stopped right now")
-
             client = self.coordinator.client
             if not client.robot_awake:
                 await client.wake(timeout=10.0)
             if not await self.coordinator.async_refresh_dock_status():
                 raise HomeAssistantError("Narwal dock status could not be refreshed")
+            if self.entity_description.key not in client.state.active_dock_task_keys:
+                return
             if not can_stop_dock_task(client.state, self.entity_description.key):
                 raise HomeAssistantError("Narwal dock task cannot be stopped right now")
 

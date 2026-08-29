@@ -27,7 +27,8 @@ _WARNED_WORKING_STATUS: set[Any] = set()
 _ACTIVE_WORKING_STATUS_TTL = 15.0
 _DOCK_DRYING_STATUS_TTL = 180.0
 _DOCK_TASK_ASSUME_TTL = 30.0
-_ROBOT_START_ASSUME_TTL = 30.0
+# clean/start_clean can be accepted long before working_status metrics arrive.
+_ROBOT_START_ASSUME_TTL = 180.0
 _KNOWN_DOCK_ACTIVITY_VALUES = {0, 2, 3, 4, 6}
 
 DOCK_TASK_EMPTY_DUSTBIN = "empty_dustbin"
@@ -1147,6 +1148,33 @@ class NarwalState:
         """Clear the local robot-clean command reservation."""
         self.assumed_robot_clean_until = 0.0
 
+    def _clear_assumed_robot_clean_on_terminal_base_status(
+        self,
+        *,
+        is_paused: bool,
+    ) -> None:
+        """Clear accepted-start context once base status proves it is terminal."""
+        if not self.has_assumed_robot_clean:
+            return
+        if self.has_error or self.working_status == WorkingStatus.ERROR:
+            self.clear_assumed_robot_clean()
+            return
+        if self.working_status == WorkingStatus.TASK_COMPLETED:
+            self.clear_assumed_robot_clean()
+            return
+        if (
+            not is_paused
+            and self.working_status
+            in (
+                WorkingStatus.STANDBY,
+                WorkingStatus.DOCKED,
+                WorkingStatus.CHARGED,
+                WorkingStatus.DOCKED_V2,
+            )
+            and self.is_docked
+        ):
+            self.clear_assumed_robot_clean()
+
     def dock_task_timer(self, task: str) -> DockTaskTimer | None:
         """Return timer details for one active dock task."""
         timer = self.dock_drying_tasks.get(task)
@@ -1489,6 +1517,9 @@ class NarwalState:
                 type(field3).__name__, field3,
             )
         self._update_consumables(decoded)
+        self._clear_assumed_robot_clean_on_terminal_base_status(
+            is_paused=bool(isinstance(field3, dict) and field3.get("2"))
+        )
         if "13" in decoded:
             raw = decoded["13"]
             if isinstance(raw, bytes):
