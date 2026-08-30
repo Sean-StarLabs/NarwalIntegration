@@ -32,6 +32,9 @@ KNOWN_PRODUCT_KEYS = [
     # CX7 answers addressed local queries but emits no broadcasts.
     "hEA7OEshlx",   # CX7/J5 — Freo Z Ultra (confirmed local WebSocket)
     "BYWBPqSxeC",   # Previously attributed to CX7; retained for discovery coverage
+    # JX key contributed by @ciaoly (#42); local WebSocket confirmed by
+    # @Smiorld 2026-08-30 — port 9002 open, auto-detect connects, map loads.
+    "CGjuB6dzq7",   # JX — Narwal JX (confirmed local WebSocket)
     # Confirmed cloud-only (ZeroMQ port 6789, no WebSocket)
     "LnugwMG9ss",   # AX18 — Freo X Ultra (cloud-only, confirmed by @ManivannanBA)
     "5OMbqk58Sc",   # AX19 — Freo X Ultra
@@ -51,7 +54,6 @@ KNOWN_PRODUCT_KEYS = [
     "pcbfh2ldvx",   # X31
     "EHf6cRNRGT",   # J4 / J4Pure (APK, contributed by @northwestsupra)
     "6NjIDYxBXb",   # J4Lite (APK, contributed by @northwestsupra)
-    "CGjuB6dzq7",   # JX — Narwal JX (APK, contributed by @ciaoly, #42)
     "cUlfJN5JYP",   # Unknown model (APK, contributed by @northwestsupra)
 ]
 

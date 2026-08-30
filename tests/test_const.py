@@ -69,3 +69,13 @@ def test_configured_model_name_uses_selected_cx7_model() -> None:
 def test_configured_model_name_preserves_legacy_flow_name() -> None:
     """Existing Flow entries retain their hardware model identifier."""
     assert configured_model_name({CONF_MODEL: "Narwal Flow"}) == "Flow (AX12)"
+
+
+def test_jx_is_a_selectable_model_and_broadcasts() -> None:
+    """JX local control confirmed by @Smiorld (#42): selectable, broadcast-capable."""
+    product_key = NARWAL_MODELS["Narwal JX"]
+    assert product_key == "CGjuB6dzq7"
+    assert product_key not in NO_BROADCAST_PRODUCT_KEYS
+    assert configured_model_name(
+        {CONF_MODEL: "Narwal JX", CONF_PRODUCT_KEY: product_key}
+    ) == "JX"

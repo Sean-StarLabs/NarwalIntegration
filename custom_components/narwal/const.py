@@ -28,6 +28,7 @@ NARWAL_MODELS: dict[str, str] = {
     "Narwal Freo Z10 Pro / Turbo": "qV6BujoYLz",
     "Narwal Freo X10 Pro": "CNbforyZWI",
     "Narwal Freo Z Ultra (CX7)": "hEA7OEshlx",
+    "Narwal JX": "CGjuB6dzq7",
     "Other / Auto-detect": "auto",
 }
 
