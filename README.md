@@ -2,7 +2,7 @@
 
 A fully **local, cloud-independent** [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Communicates directly with your vacuum over your local network via WebSocket — no cloud account or internet connection required.
 
-> **Latest release: [v1.0.4](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.4)** (HACS) — **consumable alerts never worked before this release** and always reported "no problem"; check those two entities after upgrading ([notes](docs/RELEASE-NOTES-v1.0.4.md)). Adds Freo Z Ultra (CX7) support and renames the fan tiers to Quiet/Standard/Strong/Super/Ultra. **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first.**
+> **Latest release: [v1.0.5](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.5)** (HACS) — **robots are now discovered automatically** (mDNS + DHCP), the Narwal JX is confirmed working, and a log flood that was 29% of some users' HA logs is gone ([notes](docs/RELEASE-NOTES-v1.0.5.md)). **No breaking changes.** **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first**, then the [v1.0.4 notes](docs/RELEASE-NOTES-v1.0.4.md) — your consumable alerts were wrong before that release.
 
 > ### ✅ Room cleaning is fixed — shipped in v1.0.2, verified on hardware in v1.0.3
 >
@@ -368,9 +368,17 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 ## Project Status
 
-**Where things stand — updated 2026-08-17, at the v1.0.4 release.**
+**Where things stand — updated 2026-08-30, at the v1.0.5 release.**
 
-**v1.0.4 is released** — everything below is shipped to HACS. 255 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. **Open PRs: [#78](https://github.com/sjmotew/NarwalIntegration/pull/78) (network discovery, awaiting review) and [#35](https://github.com/sjmotew/NarwalIntegration/pull/35).**
+**v1.0.5 is released** — everything below is shipped to HACS. 270 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. **Open PRs: [#85](https://github.com/sjmotew/NarwalIntegration/pull/85)-[#89](https://github.com/sjmotew/NarwalIntegration/pull/89) (@Sean-StarLabs — dock tasks, per-room clean profiles, live task state on the vacuum entity, native map trails; all drafts).**
+
+| Merged in v1.0.5 | What it does |
+|---|---|
+| [#78](https://github.com/sjmotew/NarwalIntegration/pull/78) | **Automatic discovery** via mDNS (`_narwal_sweeper._tcp.local.`) and DHCP (`narwal_*`) — no more hunting for the robot's IP. From @StratoGh0st99 |
+| [#82](https://github.com/sjmotew/NarwalIntegration/pull/82) | **Log flood fixed** — two wake/sleep INFO lines were 29% of a live install's log. From @hyeok-yoo. The wake bursts underneath are [#90](https://github.com/sjmotew/NarwalIntegration/issues/90), still open |
+| [#42](https://github.com/sjmotew/NarwalIntegration/issues/42) | **Narwal JX confirmed working** and added to the model selector, after the first successful report |
+| [#35](https://github.com/sjmotew/NarwalIntegration/pull/35) | **Capture tooling published** under `tools/` — app-traffic capture guide, session recorder, coverage probe. From @StratoGh0st99 |
+| — | Docs: VLAN/SNAT cause pinned ([#81](https://github.com/sjmotew/NarwalIntegration/issues/81)), a complete scheduled multi-room automation ([#83](https://github.com/sjmotew/NarwalIntegration/issues/83)), the HACS domain collision ([#84](https://github.com/sjmotew/NarwalIntegration/issues/84)) |
 
 | Merged in v1.0.4 | What it does |
 |---|---|
