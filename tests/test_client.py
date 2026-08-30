@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ from narwal_client.const import (
     WorkingStatus,
 )
 from narwal_client.models import CommandResponse, MapData, RoomInfo
+from narwal_client.protocol import build_frame
 
 
 class TestNarwalClientInit:
@@ -330,3 +332,50 @@ class TestWholeHouseStart:
         mock_send.assert_awaited_once()
         assert mock_send.await_args.args[0] == TOPIC_CMD_PLAN_START
         assert result.result_code == CommandResult.SUCCESS
+
+
+class TestBroadcastDumpLogging:
+    """The DUMP debug line is a parsing contract for tools/, not decoration.
+
+    tools/narwal_capture.py and tools/coverage_probe.py recover the decoded
+    payload by scraping "DUMP <topic>: <payload>" out of `ha core logs`. The
+    line was dropped once already, which silently reduced both tools to
+    producing nothing. These tests fail loudly if that happens again.
+    """
+
+    def _client_with_broadcast(self) -> tuple[NarwalClient, bytes]:
+        client = NarwalClient("10.0.0.1")
+        client.device_id = "abc123"
+        frame = build_frame("/QoEsI5qYXO/abc123/status/working_status", b"\x08\x04")
+        return client, frame
+
+    @pytest.mark.asyncio
+    async def test_broadcast_logs_dump_line_with_decoded_payload(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A decoded broadcast emits DUMP <short_topic>: <payload> at DEBUG."""
+        client, frame = self._client_with_broadcast()
+
+        with caplog.at_level(logging.DEBUG, logger="narwal_client.client"):
+            with patch.object(
+                client, "_decode_protobuf", return_value={"1": 4}
+            ):
+                await client._handle_message(frame)
+
+        dumps = [r.getMessage() for r in caplog.records if "DUMP " in r.getMessage()]
+        assert dumps, "no DUMP line emitted — tools/ capture scripts rely on it"
+        assert dumps[0].startswith("DUMP status/working_status: ")
+        assert "{'1': 4}" in dumps[0]
+
+    @pytest.mark.asyncio
+    async def test_dump_line_is_debug_only(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """DUMP must not reach INFO — it fires on every broadcast."""
+        client, frame = self._client_with_broadcast()
+
+        with caplog.at_level(logging.INFO, logger="narwal_client.client"):
+            with patch.object(client, "_decode_protobuf", return_value={"1": 4}):
+                await client._handle_message(frame)
+
+        assert not [r for r in caplog.records if "DUMP " in r.getMessage()]

@@ -498,6 +498,13 @@ class NarwalClient:
             _LOGGER.debug("Failed to decode protobuf for topic %s", short_topic)
             return
 
+        # Full decoded payload, DEBUG only. tools/narwal_capture.py and
+        # tools/coverage_probe.py parse exactly this "DUMP <topic>: <payload>"
+        # shape out of `ha core logs`, so the prefix is a contract — see
+        # tools/CAPTURE_GUIDE.md. %r is formatted lazily, so a non-debug
+        # install pays nothing for it.
+        _LOGGER.debug("DUMP %s: %r", short_topic, decoded)
+
         if short_topic == "status/working_status":
             self._update_from_working_status_broadcast(decoded)
         elif short_topic == "status/robot_base_status":
