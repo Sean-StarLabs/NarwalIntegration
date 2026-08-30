@@ -232,6 +232,84 @@ Room names come from the robot's map — rooms you named in the Narwal app keep 
 
 > **Remapping resets this.** A fresh full-house map in the Narwal app renumbers segments, which invalidates the mapping. The integration detects the change and raises a Home Assistant repair issue so you know to redo it.
 
+#### Example: scheduled multi-room clean with settings
+
+Clean settings are read **at the moment the job is dispatched**, so an automation
+sets the entities first and calls `vacuum.clean_area` last. Requested on
+[#83](https://github.com/sjmotew/NarwalIntegration/issues/83).
+
+```yaml
+alias: Narwal — weekday morning clean
+description: Kitchen then hallway, vacuum + mop, two passes
+triggers:
+  - trigger: time
+    at: "09:30:00"
+conditions:
+  - condition: time
+    weekday: [mon, tue, wed, thu, fri]
+  # Don't start if the robot is already busy or has a fault
+  - condition: state
+    entity_id: vacuum.narwal_flow_vacuum
+    state: docked
+actions:
+  # 1. Settings first — these are read when the job is dispatched
+  - action: select.select_option
+    target:
+      entity_id: select.narwal_flow_clean_mode
+    data:
+      option: Vacuum and mop
+
+  - action: select.select_option
+    target:
+      entity_id: select.narwal_flow_mopping_humidity
+    data:
+      option: Slightly wet
+
+  - action: select.select_option
+    target:
+      entity_id: select.narwal_flow_mop_strength
+    data:
+      option: High
+
+  - action: number.set_value
+    target:
+      entity_id: number.narwal_flow_cleaning_passes
+    data:
+      value: 2
+
+  - action: vacuum.set_fan_speed
+    target:
+      entity_id: vacuum.narwal_flow_vacuum
+    data:
+      fan_speed: Strong
+
+  # 2. Then dispatch the rooms, in the order you want them cleaned
+  - action: vacuum.clean_area
+    target:
+      entity_id: vacuum.narwal_flow_vacuum
+    data:
+      cleaning_area_id:
+        - kitchen
+        - hallway
+mode: single
+```
+
+Notes:
+
+- **Substitute your own entity ids.** They are derived from your device name, so
+  yours will differ — check Settings → Devices & Services → Entities.
+- `cleaning_area_id` takes **HA area ids**, not robot room names, and the
+  segment-to-area mapping above must exist first.
+- The clean-settings entities apply to the *next* job. Changing them mid-clean
+  does not alter the job in progress.
+- `select.select_option` takes the **displayed** option (`Vacuum and mop`), not
+  the underlying key (`vacuum_and_mop`).
+- Fan speed is a separate call because it lives on the vacuum entity rather than
+  in the clean-settings block.
+- Omit the settings steps you don't care about — whatever you leave alone keeps
+  its current value.
+
+
 ## Requirements
 
 - Narwal vacuum on the same local network as Home Assistant
