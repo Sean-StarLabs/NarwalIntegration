@@ -39,7 +39,12 @@ htmlcov/
 .env.local
 
 # --- Reverse engineering artifacts (kept locally, not in repo) ---
-tools/
+tools/*
+# ...except the capture tooling, which is meant to be shared (#35, #79).
+!tools/probe_shortcuts.py
+!tools/narwal_capture.py
+!tools/coverage_probe.py
+!tools/CAPTURE_GUIDE.md
 captures/
 proto/
 apk/
