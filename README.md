@@ -105,6 +105,14 @@ Shipped in v1.0.2 ([#50](https://github.com/sjmotew/NarwalIntegration/pull/50)) 
 1. Copy `custom_components/narwal/` to your HA `config/custom_components/` directory
 2. **Restart Home Assistant**
 
+> **Only one Narwal integration at a time.** A separate project,
+> [nadavbau/narwal-integration](https://github.com/nadavbau/narwal-integration), also
+> installs to `custom_components/narwal`, so HACS cannot hold both — installing one
+> replaces the other. Neither project can rename without orphaning its users' existing
+> config entries and entity ids, so this is expected rather than a bug you can work
+> around. Pick whichever suits your hardware. See
+> [#84](https://github.com/sjmotew/NarwalIntegration/issues/84).
+
 ### Setup
 
 Home Assistant discovers Narwal robots on the local network, so in most cases the
