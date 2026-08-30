@@ -152,12 +152,18 @@ Failed to connect to ws://<robot-ip>:9002: timed out during opening handshake
 with an address on the robot's own subnet. This is confirmed working by a user running
 Home Assistant on a separate VLAN from an IoT network ([#81]).
 
-The underlying cause is not yet pinned down — it is either the robot filtering by
-source subnet, or the robot ignoring the default gateway it was handed by DHCP and so
-having no route back. If you can capture on the robot's own switch port and tell us
-whether the robot *replies* to an off-subnet SYN, that distinguishes the two, and in
-the second case a static route on the robot's side would be a cleaner fix than SNAT.
-Please add what you find to [#81].
+**Why SNAT is the fix and not just a workaround.** Two causes could produce this: the
+robot filtering by source subnet, or the robot ignoring its DHCP-supplied default
+gateway and so having no route back. Packet captures in [#81] point at the first. The
+robot demonstrably has a working default route — it reaches Narwal's cloud servers and
+their SYN-ACKs are visible outbound — yet a capture on the router's IoT interface, which
+any reply to an off-subnet host must traverse, shows **no SYN-ACK** coming back. The
+robot receives the connection and declines to answer it rather than failing to route the
+reply. ICMP being dropped the same way is consistent with a source-address rule rather
+than anything specific to 9002.
+
+That rules out a static route as a cleaner alternative: there is no reply to route.
+Rewriting the source address is the only approach that gets an answer.
 
 Note that mDNS discovery is separately affected: most networks do not forward
 multicast between VLANs, so the robot will usually need to be added by IP in this
