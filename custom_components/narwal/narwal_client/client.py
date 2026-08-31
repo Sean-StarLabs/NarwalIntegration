@@ -733,6 +733,27 @@ class NarwalClient:
     # wake handler via a fresh TCP connection.
     _WAKE_RECONNECT_THRESHOLD = 2
 
+    async def _renew_topic_subscription(self) -> bool:
+        """Re-send active_robot_publish. True if it went out.
+
+        Kept separate from the wake burst because the two are different acts:
+        this only says "keep sending me broadcasts", while a burst tries to
+        rouse a sleeping robot. Letting the subscription lapse is what freezes
+        the entity at `docked` (#73), so it has to happen on its own schedule
+        even when we are deliberately not waking the robot (#90).
+        """
+        if not self._ws:
+            return False
+        try:
+            payload = self._build_topic_subscription(self._TOPIC_SUB_DURATION)
+            frame = build_frame(self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload)
+            await self._ws.send(frame)
+            _LOGGER.debug("Topic subscription renewed")
+            return True
+        except Exception:
+            _LOGGER.debug("Topic re-subscribe failed")
+            return False
+
     async def _keepalive_loop(self) -> None:
         """Periodically send wake/heartbeat commands to prevent robot from sleeping.
 
@@ -776,23 +797,17 @@ class NarwalClient:
                     self._robot_awake = False
                     consecutive_wake_failures = 0
 
+                # Renew the broadcast subscription on its own schedule,
+                # whether or not the robot is currently broadcasting. This used
+                # to ride inside the awake branch and on every wake burst; now
+                # that a docked robot is left alone, it has to stand on its own
+                # or the subscription lapses and the entity freezes (#73).
+                if time.monotonic() - last_resub_time > self._TOPIC_RESUB_INTERVAL:
+                    if await self._renew_topic_subscription():
+                        last_resub_time = time.monotonic()
+
                 if self._robot_awake:
                     consecutive_wake_failures = 0
-                    # Re-subscribe to topics before the subscription expires
-                    if time.monotonic() - last_resub_time > self._TOPIC_RESUB_INTERVAL:
-                        try:
-                            payload = self._build_topic_subscription(
-                                self._TOPIC_SUB_DURATION
-                            )
-                            frame = build_frame(
-                                self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload
-                            )
-                            await self._ws.send(frame)
-                            last_resub_time = time.monotonic()
-                            _LOGGER.debug("Topic subscription renewed")
-                        except Exception:
-                            _LOGGER.debug("Topic re-subscribe failed")
-
                     # Send lightweight heartbeat to keep robot awake.
                     # The Narwal app sends this continuously regardless of
                     # robot state — it's safe during cleaning.
@@ -806,9 +821,30 @@ class NarwalClient:
                     except Exception:
                         _LOGGER.debug("Keepalive send failed")
                         break
+                elif self.state.is_docked:
+                    # Silence from a docked robot is normal, not a fault.
+                    #
+                    # Measured on a Flow (AX12, v01.08.03.07) over 775s with
+                    # every wake burst suppressed: the robot broadcasts for
+                    # 30.0s or 45.5s, goes quiet for 60-124s, and comes back
+                    # on its own. Six windows, five unprompted restarts, no
+                    # bursts sent. BROADCAST_STALE_TIMEOUT is 15s, so treating
+                    # that silence as sleep fired a full wake burst roughly
+                    # every 46s -- about 1,900 a day at an idle docked robot,
+                    # measured independently by @hyeok-yoo (#82, #90).
+                    #
+                    # Docked state stays fresh through the 60s poll, and
+                    # commands still rouse the robot via wake() from
+                    # _ensure_awake, so nothing here needs to nag it.
+                    consecutive_wake_failures = 0
+                    _LOGGER.debug(
+                        "Docked and quiet for %.0fs — leaving the robot alone",
+                        time.monotonic() - self._last_broadcast_time,
+                    )
+
                 else:
-                    # Robot appears asleep — send full wake burst
-                    # (wake burst includes topic subscription)
+                    # Not docked and not broadcasting — a genuine dropout
+                    # (mid-clean stall, deep sleep off the dock, dead socket).
                     consecutive_wake_failures += 1
                     _LOGGER.debug(
                         "Robot not awake, sending wake burst "

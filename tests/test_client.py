@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -379,3 +380,98 @@ class TestBroadcastDumpLogging:
                 await client._handle_message(frame)
 
         assert not [r for r in caplog.records if "DUMP " in r.getMessage()]
+
+
+class TestDockedRobotIsLeftAlone:
+    """A docked robot's silence is its duty cycle, not sleep (#90).
+
+    Measured on a Flow (AX12, v01.08.03.07) with wake bursts suppressed: the
+    robot broadcasts for 30.0s or 45.5s, goes quiet for 60-124s, and resumes
+    unprompted. BROADCAST_STALE_TIMEOUT is 15s, so before this the keepalive
+    read every one of those gaps as sleep and fired a full wake burst -- about
+    1,900 a day at an idle docked robot.
+    """
+
+    def _quiet_client(self, *, docked: bool) -> NarwalClient:
+        """A connected client whose broadcasts went stale long ago."""
+        client = NarwalClient("10.0.0.1")
+        client.device_id = "abc123"
+        client._ws = AsyncMock()
+        client._connected.set()
+        client._robot_awake = True
+        # Well past BROADCAST_STALE_TIMEOUT, so the stale check trips.
+        client._last_broadcast_time = time.monotonic() - 600
+        client.state.working_status = (
+            WorkingStatus.DOCKED if docked else WorkingStatus.CLEANING
+        )
+        if not docked:
+            # Keep is_docked False without tripping the recent-activity path.
+            client.state.last_active_working_status_time = 0.0
+        return client
+
+    async def _run_one_tick(self, client: NarwalClient) -> None:
+        """Drive _keepalive_loop through a tick or two, then stop it."""
+        with patch("narwal_client.client.KEEPALIVE_INTERVAL", 0.01):
+            task = asyncio.ensure_future(client._keepalive_loop())
+            await asyncio.sleep(0.15)
+            client._connected.clear()
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+    @pytest.mark.asyncio
+    async def test_docked_and_quiet_sends_no_wake_burst(self) -> None:
+        """The bug: this fired a burst every ~46s, forever."""
+        client = self._quiet_client(docked=True)
+        assert client.state.is_docked
+
+        with patch.object(client, "_send_wake_burst", AsyncMock()) as burst:
+            await self._run_one_tick(client)
+
+        burst.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_undocked_and_quiet_still_wakes(self) -> None:
+        """Off the dock, silence is still a real dropout — don't over-fix."""
+        client = self._quiet_client(docked=False)
+        assert not client.state.is_docked
+
+        with patch.object(client, "_send_wake_burst", AsyncMock()) as burst:
+            await self._run_one_tick(client)
+
+        assert burst.await_count >= 1
+
+    @pytest.mark.asyncio
+    async def test_subscription_is_renewed_while_docked_and_quiet(self) -> None:
+        """#73 guard: renewal used to ride on the wake burst.
+
+        With bursts no longer fired at a docked robot, renewal has to stand on
+        its own — otherwise active_robot_publish expires after 600s, broadcasts
+        stop for real, and the entity freezes at `docked`.
+        """
+        client = self._quiet_client(docked=True)
+
+        with patch.object(client, "_send_wake_burst", AsyncMock()) as burst:
+            with patch.object(
+                client, "_renew_topic_subscription", AsyncMock(return_value=True)
+            ) as renew:
+                await self._run_one_tick(client)
+
+        burst.assert_not_awaited()
+        renew.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_renewal_does_not_depend_on_being_awake(self) -> None:
+        """Renewal is scheduled, not conditional on broadcasts flowing."""
+        client = self._quiet_client(docked=True)
+        client._robot_awake = False
+
+        with patch.object(
+            client, "_renew_topic_subscription", AsyncMock(return_value=True)
+        ) as renew:
+            with patch.object(client, "_send_wake_burst", AsyncMock()):
+                await self._run_one_tick(client)
+
+        renew.assert_awaited()
