@@ -13,11 +13,11 @@ from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
 from . import NarwalConfigEntry
 from .const import (
+    CONF_MAP_ROTATION,
+    CONF_MAP_ZOOM,
     CONF_SHOW_FURNITURE,
     CONF_SHOW_FURNITURE_LABELS,
     CONF_SHOW_ROOM_LABELS,
-    CONF_MAP_ROTATION,
-    CONF_MAP_ZOOM,
     MAP_OPTION_DEFAULTS,
     MAP_ROTATION_DEFAULT,
     MAP_ZOOM_DEFAULT,
@@ -45,6 +45,15 @@ _DEBUG_VIEW = False
 _DEBUG_CANVAS_SIZE = 600  # pixels
 _DEBUG_TRAIL_MAX = _TRAIL_MAX_POINTS
 _DEBUG_RECORD_INTERVAL = _TRAIL_RECORD_INTERVAL
+
+_CLEANING_TRAIL_STATUSES = frozenset(
+    {
+        WorkingStatus.CLEANING_V2,
+        WorkingStatus.CLEANING,
+        WorkingStatus.CLEANING_ALT,
+        WorkingStatus.CUSTOM_CLEANING,
+    }
+)
 
 
 async def async_setup_entry(
@@ -280,12 +289,8 @@ class NarwalMapCamera(NarwalEntity, Camera):
 
         # Detect cleaning session transitions — clear trail on new session
         current_status = state.working_status
-        was_cleaning = self._last_cleaning_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
-        )
-        is_cleaning = current_status in (
-            WorkingStatus.CLEANING, WorkingStatus.CLEANING_ALT,
-        )
+        was_cleaning = self._last_cleaning_status in _CLEANING_TRAIL_STATUSES
+        is_cleaning = current_status in _CLEANING_TRAIL_STATUSES
         if is_cleaning and not was_cleaning:
             _LOGGER.info("New cleaning session — clearing trail and vision obstacles")
             self._reset_trail()
