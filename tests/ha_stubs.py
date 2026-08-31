@@ -165,6 +165,9 @@ def install() -> None:
         def _handle_coordinator_update(self) -> None:
             pass
 
+        async def async_will_remove_from_hass(self) -> None:
+            pass
+
     ha_uc.CoordinatorEntity = _CoordinatorEntity  # type: ignore[attr-defined]
 
     ha_storage = _mod("homeassistant.helpers.storage", ha_helpers)
