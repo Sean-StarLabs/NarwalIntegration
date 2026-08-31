@@ -1,0 +1,68 @@
+clean_rooms:
+  name: Clean rooms
+  description: Start a room clean using Narwal's local clean/start_clean command.
+  target:
+    entity:
+      integration: narwal
+      domain: vacuum
+  fields:
+    rooms:
+      name: Rooms
+      description: Narwal room IDs to clean, in order, or "all" for all current map rooms.
+      required: true
+      selector:
+        object:
+    mode:
+      name: Mode
+      default: vacuum_and_mop
+      selector:
+        select:
+          options:
+            - vacuum
+            - mop
+            - vacuum_then_mop
+            - vacuum_and_mop
+    suction:
+      name: Suction
+      default: standard
+      selector:
+        select:
+          options:
+            - ai
+            - quiet
+            - standard
+            - strong
+            - super
+            - ultra
+    water:
+      name: Water
+      default: normal
+      selector:
+        select:
+          options:
+            - dry
+            - normal
+            - wet
+    mop_strength:
+      name: Mop strength
+      default: normal
+      selector:
+        select:
+          options:
+            - normal
+            - high
+    passes:
+      name: Passes
+      default: 1
+      selector:
+        number:
+          min: 1
+          max: 3
+          mode: box
+    route:
+      name: Route
+      selector:
+        select:
+          options:
+            - standard
+            - meticulous
