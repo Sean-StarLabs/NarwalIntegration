@@ -77,6 +77,7 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
     coordinator.async_prepare_clean_start = AsyncMock(return_value=True)
     coordinator.async_refresh_action_status = AsyncMock(return_value=True)
+    coordinator.async_clear_map_display_cache = AsyncMock()
     coordinator.dock_action_lock = asyncio.Lock()
     coordinator.room_clean_settings_for_rooms = MagicMock(
         side_effect=lambda room_ids, **_kwargs: {
