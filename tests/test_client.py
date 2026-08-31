@@ -392,6 +392,11 @@ class TestDockedRobotIsLeftAlone:
     1,900 a day at an idle docked robot.
     """
 
+    # A frozen clock. time.monotonic() is system uptime on Linux, so anything
+    # derived from the real one is a coin flip on a freshly booted CI runner --
+    # which is exactly how the first version of these tests failed there.
+    FAKE_NOW = 1_000_000.0
+
     def _quiet_client(self, *, docked: bool) -> NarwalClient:
         """A connected client whose broadcasts went stale long ago."""
         client = NarwalClient("10.0.0.1")
@@ -400,7 +405,7 @@ class TestDockedRobotIsLeftAlone:
         client._connected.set()
         client._robot_awake = True
         # Well past BROADCAST_STALE_TIMEOUT, so the stale check trips.
-        client._last_broadcast_time = time.monotonic() - 600
+        client._last_broadcast_time = self.FAKE_NOW - 600
         client.state.working_status = (
             WorkingStatus.DOCKED if docked else WorkingStatus.CLEANING
         )
@@ -426,8 +431,9 @@ class TestDockedRobotIsLeftAlone:
                 client._connected.clear()  # loop breaks after this sleep
             await real_sleep(0)
 
-        with patch("narwal_client.client.asyncio.sleep", fake_sleep):
-            await client._keepalive_loop()
+        with patch("narwal_client.client.time.monotonic", return_value=self.FAKE_NOW):
+            with patch("narwal_client.client.asyncio.sleep", fake_sleep):
+                await client._keepalive_loop()
         return seen["n"]
 
     @pytest.mark.asyncio
@@ -491,5 +497,38 @@ class TestDockedRobotIsLeftAlone:
         ) as renew:
             with patch.object(client, "_send_wake_burst", AsyncMock()):
                 await self._run_ticks(client)
+
+        renew.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_first_subscription_fires_on_a_freshly_booted_host(self) -> None:
+        """Renewal must not depend on time.monotonic() being a large number.
+
+        monotonic() is only guaranteed monotonic; on Linux it is system uptime.
+        `last_resub_time` used to start at 0.0 and compare
+        `monotonic() - 0.0 > _TOPIC_RESUB_INTERVAL`, so on a host up for less
+        than 8 minutes the first subscription was silently deferred. Caught by
+        CI, where the runner's uptime is genuinely that low.
+        """
+        client = self._quiet_client(docked=True)
+        client._last_broadcast_time = 20.0  # stale against the clock below
+
+        seen = {"n": 0}
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(delay: float, *args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] > 2:
+                client._connected.clear()
+            await real_sleep(0)
+
+        with patch.object(
+            client, "_renew_topic_subscription", AsyncMock(return_value=True)
+        ) as renew:
+            with patch.object(client, "_send_wake_burst", AsyncMock()):
+                # 90s of uptime — far below _TOPIC_RESUB_INTERVAL (480).
+                with patch("narwal_client.client.time.monotonic", return_value=90.0):
+                    with patch("narwal_client.client.asyncio.sleep", fake_sleep):
+                        await client._keepalive_loop()
 
         renew.assert_awaited()

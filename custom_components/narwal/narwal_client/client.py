@@ -769,10 +769,15 @@ class NarwalClient:
         If wake bursts fail repeatedly, forces a WebSocket reconnect by
         closing the connection (the listener loop handles reconnection).
         """
-        # Start at 0 so the first keepalive tick sends the subscription
-        # immediately. This handles the case where the robot is already
-        # broadcasting (e.g. mid-cleaning) and wake() skips the burst.
-        last_resub_time = 0.0
+        # None means "never sent", so the first tick always subscribes. This
+        # used to be 0.0 and rely on time.monotonic() being larger than
+        # _TOPIC_RESUB_INTERVAL, which is not guaranteed: monotonic() is only
+        # promised to be monotonic, and on Linux it is system uptime. On a host
+        # that booted less than 8 minutes ago the first subscription was
+        # silently deferred. That was masked while the wake burst also carried
+        # a subscription; now that a docked robot gets no burst (#90), a slow
+        # first subscribe would mean no broadcasts at all until it fired (#73).
+        last_resub_time: float | None = None
         consecutive_wake_failures = 0
         try:
             while self.connected:
@@ -802,7 +807,11 @@ class NarwalClient:
                 # to ride inside the awake branch and on every wake burst; now
                 # that a docked robot is left alone, it has to stand on its own
                 # or the subscription lapses and the entity freezes (#73).
-                if time.monotonic() - last_resub_time > self._TOPIC_RESUB_INTERVAL:
+                if (
+                    last_resub_time is None
+                    or time.monotonic() - last_resub_time
+                    > self._TOPIC_RESUB_INTERVAL
+                ):
                     if await self._renew_topic_subscription():
                         last_resub_time = time.monotonic()
 
