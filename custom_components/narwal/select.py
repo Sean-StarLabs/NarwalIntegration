@@ -42,6 +42,7 @@ from .narwal_client import (
     MopStrengthLevel,
     WorkMode,
 )
+from .narwal_client.const import fan_level_for_live_command
 
 
 def _raise_if_command_failed(response, action: str) -> None:
@@ -1098,16 +1099,16 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             raise HomeAssistantError("This Narwal setting cannot be changed right now")
         if key == "suction" and option == "AI" and live_available and not setup_available:
             raise HomeAssistantError("AI suction cannot be selected mid-clean")
-
         response = None
+        live_value = None
         if live_available and live_applies and not setup_available:
             if key == "suction":
-                response = await self.coordinator.client.set_fan_speed(
-                    self._suction_map[option]
-                )
+                live_value = fan_level_for_live_command(self._suction_map[option])
+                response = await self.coordinator.client.set_fan_speed(live_value)
             elif key == "water":
+                live_value = LEGACY_WATER_MAP[option]
                 response = await self.coordinator.client.set_mop_humidity(
-                    LEGACY_WATER_MAP[option]
+                    live_value
                 )
 
         if response is not None and not response.accepted:
@@ -1121,12 +1122,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
 
         if response is not None:
             attr = "fan" if key == "suction" else "water"
-            value = (
-                self._suction_map[option]
-                if key == "suction"
-                else LEGACY_WATER_MAP[option]
-            )
-            self.coordinator.set_active_clean_setting(attr, value)
+            self.coordinator.set_active_clean_setting(attr, live_value)
 
         if not has_selected_rooms:
             self._apply_option(option)

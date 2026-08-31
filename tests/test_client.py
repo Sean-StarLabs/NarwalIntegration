@@ -21,6 +21,7 @@ from narwal_client.const import (
     TOPIC_CMD_FORCE_END,
     TOPIC_CMD_GET_BASE_STATUS,
     TOPIC_CMD_GET_MAP,
+    TOPIC_CMD_SET_FAN_LEVEL,
     TOPIC_CMD_WASH_MOP,
     AmbientLightCtrlType,
     CleaningRoute,
@@ -260,6 +261,40 @@ class TestNarwalClientInit:
         mock_send.assert_awaited_once_with(
             "supply/ambient_light_ctrl",
             payload=b"\x08\x01",
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_fan_speed_sends_supported_live_level(self) -> None:
+        client = NarwalClient("10.0.0.1")
+        accepted = CommandResponse(result_code=CommandResult.SUCCESS)
+
+        with patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send:
+            mock_send.return_value = accepted
+            result = await client.set_fan_speed(FanLevel.DEEP)
+
+        assert result is accepted
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_SET_FAN_LEVEL,
+            b"\x08\x04",
+        )
+
+    @pytest.mark.asyncio
+    async def test_set_fan_speed_clamps_super_to_deep(self) -> None:
+        client = NarwalClient("10.0.0.1")
+        accepted = CommandResponse(result_code=CommandResult.SUCCESS)
+
+        with patch.object(
+            client, "send_command", new_callable=AsyncMock
+        ) as mock_send:
+            mock_send.return_value = accepted
+            result = await client.set_fan_speed(FanLevel.SUPER)
+
+        assert result is accepted
+        mock_send.assert_awaited_once_with(
+            TOPIC_CMD_SET_FAN_LEVEL,
+            b"\x08\x04",
         )
 
     @pytest.mark.asyncio

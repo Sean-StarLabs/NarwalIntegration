@@ -665,14 +665,21 @@ device in a known-bad state**, since anything that returns empty looks correct o
 
 Concrete, and each one is answerable with a capture rather than an argument:
 
-**How many suction levels exist — partly answered.** The APK proto carries five (`MUTE`,
-`NORMAL`, `STRONG`, `DEEP`, `SUPER`, values 1–5). AX26 captures show the app's highest tier
-sending tag 2 = **4** (`DEEP`), with the tier below it sending 3 (`STRONG`), so the five-value
-reading is correct and `SUPER` (5) is simply unreachable from that app's UI
-([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)). Still open: whether any model
-exposes 5, or whether `SUPER` exists only on the task path. Note that the live
-`clean/set_fan_level` enum (`SweepFanLevel`) has no `SUPER` at all and the app maps it down to
-`STRONG` there.
+**How many suction levels exist — answered.** The app 2.7.92 proto carries five (`MUTE`,
+`NORMAL`, `STRONG`, `DEEP`, `SUPER`, values 1–5). Its English resources label those values
+Quiet, Standard, Strong, Super Powerful and Ultra Powerful. AX26 captures show its highest
+available tier sending tag 2 = **4** (`DEEP`), with the tier below it sending 3 (`STRONG`), so
+`SUPER` (5) is unreachable from that model's app UI
+([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)). A Flow 2 accepted a room-clean
+payload containing tag 2 = **5** for every room and reported the same value from
+`clean/current_clean_task` while cleaning, confirming that `SUPER` is a real device-supported
+tier. The app's ordinary picker still presents values 1–4 and adds value 5 through a separate
+optional `enableSuperLevel` path. The live `clean/set_fan_level` enum (`SweepFanLevel`) has no
+`SUPER`; the app maps 5 down to `STRONG` there. The integration instead clamps a live level-5
+request to `DEEP` (4), the highest tier that endpoint can represent, while retaining level 5
+as the pending setting for the next task. Home Assistant select entities also advertise the
+previous `Ultra` spelling beside `Ultra Powerful`: the select service validates options before
+entity-level alias normalization, so keeping that option is required for existing automations.
 
 **The error state.** No `WorkingStatus` value for a fault has ever been observed. Until one is,
 a robot error cannot be represented at all.
