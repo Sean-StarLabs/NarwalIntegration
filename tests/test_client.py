@@ -405,21 +405,30 @@ class TestDockedRobotIsLeftAlone:
             WorkingStatus.DOCKED if docked else WorkingStatus.CLEANING
         )
         if not docked:
-            # Keep is_docked False without tripping the recent-activity path.
             client.state.last_active_working_status_time = 0.0
         return client
 
-    async def _run_one_tick(self, client: NarwalClient) -> None:
-        """Drive _keepalive_loop through a tick or two, then stop it."""
-        with patch("narwal_client.client.KEEPALIVE_INTERVAL", 0.01):
-            task = asyncio.ensure_future(client._keepalive_loop())
-            await asyncio.sleep(0.15)
-            client._connected.clear()
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
+    async def _run_ticks(self, client: NarwalClient, ticks: int = 2) -> int:
+        """Drive _keepalive_loop through exactly `ticks` iterations.
+
+        The loop paces itself with asyncio.sleep(KEEPALIVE_INTERVAL); replacing
+        that with a counter makes the test independent of wall-clock timing.
+        An earlier version slept for a fixed 0.15s and hoped enough ticks fit,
+        which flaked on CI -- and worse, made the "no wake burst" assertion
+        pass for free whenever the loop had not run at all.
+        """
+        seen = {"n": 0}
+        real_sleep = asyncio.sleep
+
+        async def fake_sleep(delay: float, *args, **kwargs):
+            seen["n"] += 1
+            if seen["n"] > ticks:
+                client._connected.clear()  # loop breaks after this sleep
+            await real_sleep(0)
+
+        with patch("narwal_client.client.asyncio.sleep", fake_sleep):
+            await client._keepalive_loop()
+        return seen["n"]
 
     @pytest.mark.asyncio
     async def test_docked_and_quiet_sends_no_wake_burst(self) -> None:
@@ -428,9 +437,15 @@ class TestDockedRobotIsLeftAlone:
         assert client.state.is_docked
 
         with patch.object(client, "_send_wake_burst", AsyncMock()) as burst:
-            await self._run_one_tick(client)
+            with patch.object(
+                client, "_renew_topic_subscription", AsyncMock(return_value=True)
+            ) as renew:
+                ticks = await self._run_ticks(client)
 
+        assert ticks >= 2, "loop did not run — the assertion below would be vacuous"
+        renew.assert_awaited()  # positive proof the loop reached the branch
         burst.assert_not_awaited()
+        assert not client._robot_awake
 
     @pytest.mark.asyncio
     async def test_undocked_and_quiet_still_wakes(self) -> None:
@@ -439,7 +454,10 @@ class TestDockedRobotIsLeftAlone:
         assert not client.state.is_docked
 
         with patch.object(client, "_send_wake_burst", AsyncMock()) as burst:
-            await self._run_one_tick(client)
+            with patch.object(
+                client, "_renew_topic_subscription", AsyncMock(return_value=True)
+            ):
+                await self._run_ticks(client)
 
         assert burst.await_count >= 1
 
@@ -457,7 +475,7 @@ class TestDockedRobotIsLeftAlone:
             with patch.object(
                 client, "_renew_topic_subscription", AsyncMock(return_value=True)
             ) as renew:
-                await self._run_one_tick(client)
+                await self._run_ticks(client)
 
         burst.assert_not_awaited()
         renew.assert_awaited()
@@ -472,6 +490,6 @@ class TestDockedRobotIsLeftAlone:
             client, "_renew_topic_subscription", AsyncMock(return_value=True)
         ) as renew:
             with patch.object(client, "_send_wake_burst", AsyncMock()):
-                await self._run_one_tick(client)
+                await self._run_ticks(client)
 
         renew.assert_awaited()
