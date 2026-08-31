@@ -1207,6 +1207,11 @@ class NarwalState:
                     self.working_status = WorkingStatus.UNKNOWN
                 if self.working_status not in ACTIVE_CLEANING_STATUSES:
                     self.last_active_working_status_time = 0.0
+                if self.working_status in {
+                    WorkingStatus.TASK_COMPLETED,
+                    WorkingStatus.ERROR,
+                }:
+                    self.clear_assumed_robot_clean()
             # Sub-field 2: paused overlay (0 or absent = not paused, 1 = paused)
             self.is_paused = bool(field3.get("2"))
             # Sub-field 7: returning to dock on old FW (value 1 = returning).
