@@ -162,20 +162,26 @@ Home Assistant on a separate VLAN from an IoT network ([#81]).
 
 **Why SNAT is the fix and not just a workaround.** Two causes could produce this: the
 robot filtering by source subnet, or the robot ignoring its DHCP-supplied default
-gateway and so having no route back. Packet captures in [#81] point at the first. The
-robot demonstrably has a working default route — it reaches Narwal's cloud servers and
-their SYN-ACKs are visible outbound — yet a capture on the router's IoT interface, which
-any reply to an off-subnet host must traverse, shows **no SYN-ACK** coming back. The
-robot receives the connection and declines to answer it rather than failing to route the
-reply. ICMP being dropped the same way is consistent with a source-address rule rather
-than anything specific to 9002.
+gateway and so having no route back. Packet captures in [#81] settle it as the first.
+On the router's IoT interface — which every packet in this exchange must cross — the
+inbound SYN **is** visible arriving at the robot, and **no SYN-ACK** comes back. The
+robot also demonstrably has a working default route, since it reaches Narwal's cloud
+servers and those SYN-ACKs are visible outbound. So it receives the connection and
+declines to answer, rather than answering into a black hole. ICMP being dropped the
+same way fits a rule about the source address rather than anything specific to 9002.
 
-That rules out a static route as a cleaner alternative: there is no reply to route.
+That rules out a static route as a cleaner alternative: **there is no reply to route.**
 Rewriting the source address is the only approach that gets an answer.
 
-Note that mDNS discovery is separately affected: most networks do not forward
-multicast between VLANs, so the robot will usually need to be added by IP in this
-setup regardless.
+**Discovery across VLANs.** mDNS is multicast and most networks do not forward it
+between VLANs, so by default the robot will not be discovered from another VLAN and
+you add it by IP. If your router reflects or proxies mDNS across VLANs, discovery
+does work — reported end-to-end on v1.0.5 with a reflector plus the SNAT above ([#81]).
+
+Note the asymmetry if you are in that position: the robot is happy to *announce*
+itself over multicast, and still refuses inbound unicast from a foreign subnet. So
+discovery finding the robot and the connection then failing without SNAT is a normal
+combination, not a contradiction.
 
 [#81]: https://github.com/sjmotew/NarwalIntegration/issues/81
 

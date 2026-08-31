@@ -13,15 +13,17 @@
       },
       "device_id": {
         "title": "Enter Device ID",
-        "description": "Automatic discovery is unavailable. Enter the vacuum's 32-character cloud-assigned Device ID. See the integration documentation for retrieval options.",
+        "description": "Automatic discovery is unavailable. Enter the vacuum's 32-character cloud-assigned Device ID, or tick the box to retry automatic detection — useful if the robot was asleep on the first attempt. See the integration documentation for retrieval options.",
         "data": {
-          "device_id": "Device ID"
+          "device_id": "Device ID",
+          "retry_auto_detect": "Try automatic detection again"
         }
       }
     },
     "error": {
       "cannot_connect": "Unable to connect to the vacuum. Check the IP address and ensure the vacuum is powered on.",
-      "unknown": "An unexpected error occurred."
+      "unknown": "An unexpected error occurred.",
+      "device_id_required": "Enter a Device ID, or tick “Try automatic detection again”."
     },
     "abort": {
       "already_configured": "This vacuum is already configured."

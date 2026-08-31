@@ -13,15 +13,17 @@
       },
       "device_id": {
         "title": "Saisir l’identifiant de l’appareil",
-        "description": "La découverte automatique n’est pas disponible. Saisissez l’identifiant de 32 caractères attribué à l’aspirateur dans le cloud. Consultez la documentation de l’intégration pour savoir comment l’obtenir.",
+        "description": "La découverte automatique n'est pas disponible. Saisissez l'identifiant d'appareil de 32 caractères attribué par le cloud, ou cochez la case pour relancer la détection automatique — utile si le robot était en veille lors de la première tentative. Consultez la documentation de l'intégration.",
         "data": {
-          "device_id": "Identifiant de l’appareil"
+          "device_id": "Identifiant de l'appareil",
+          "retry_auto_detect": "Réessayer la détection automatique"
         }
       }
     },
     "error": {
       "cannot_connect": "Impossible de se connecter à l’aspirateur. Vérifiez l’adresse IP et assurez-vous que l’aspirateur est allumé.",
-      "unknown": "Une erreur inattendue s’est produite."
+      "unknown": "Une erreur inattendue s’est produite.",
+      "device_id_required": "Saisissez un identifiant d'appareil, ou cochez « Réessayer la détection automatique »."
     },
     "abort": {
       "already_configured": "Cet aspirateur est déjà configuré."

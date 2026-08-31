@@ -18,6 +18,7 @@ from .const import (
     DEFAULT_PORT,
     DOMAIN,
     NARWAL_MODELS,
+    model_label_for_product_key,
     NO_BROADCAST_PRODUCT_KEYS,
 )
 from .narwal_client import NarwalClient
@@ -39,7 +40,17 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     }
 )
 
-STEP_DEVICE_ID_DATA_SCHEMA = vol.Schema({vol.Required(CONF_DEVICE_ID): str})
+CONF_RETRY_AUTO_DETECT = "retry_auto_detect"
+
+# device_id is Optional so the retry checkbox can be submitted on its own. A
+# blank id with retry unticked is rejected below rather than by the schema, so
+# the user gets a translated error instead of a raw voluptuous message.
+STEP_DEVICE_ID_DATA_SCHEMA = vol.Schema(
+    {
+        vol.Optional(CONF_DEVICE_ID, default=""): str,
+        vol.Optional(CONF_RETRY_AUTO_DETECT, default=False): bool,
+    }
+)
 
 
 class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -196,7 +207,23 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         errors: dict[str, str] = {}
 
         if user_input is not None:
-            device_id = user_input[CONF_DEVICE_ID].strip()
+            if user_input.get(CONF_RETRY_AUTO_DETECT):
+                # Automatic discovery can fail transiently — a robot in deep
+                # sleep, or a first attempt that lands mid-reconnect. Without
+                # this the step could only ever re-show itself, and because
+                # Home Assistant resumes an in-progress discovery flow at its
+                # current step, starting the flow again came straight back
+                # here. Restarting Home Assistant was the only way out (#81).
+                return await self.async_step_user()
+
+            device_id = user_input.get(CONF_DEVICE_ID, "").strip()
+            if not device_id:
+                return self.async_show_form(
+                    step_id=step_id,
+                    data_schema=STEP_DEVICE_ID_DATA_SCHEMA,
+                    errors={"base": "device_id_required"},
+                )
+
             setup = self._pending_user_input
             product_key = self._pending_product_key
             topic_prefix = None if product_key == "auto" else f"/{product_key}"
@@ -235,8 +262,19 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         product_key = self._pending_product_key
         resolved_key = client.topic_prefix.lstrip("/")
         model_label = setup[CONF_MODEL]
+        if product_key == "auto":
+            # Auto-detect learns the real product key over the WebSocket, so a
+            # recognised robot gets its model name instead of a raw key (#81).
+            # An unknown key keeps the key in the title — it is the only
+            # identifying thing we have, and it is what a bug report needs.
+            resolved_label = model_label_for_product_key(resolved_key)
+            title = resolved_label or f"Narwal {resolved_key}"
+            if resolved_label:
+                model_label = resolved_label
+        else:
+            title = model_label
         return self.async_create_entry(
-            title=model_label if product_key != "auto" else f"Narwal {resolved_key}",
+            title=title,
             data={
                 "host": setup["host"],
                 "port": setup.get("port", DEFAULT_PORT),

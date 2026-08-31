@@ -32,6 +32,22 @@ NARWAL_MODELS: dict[str, str] = {
     "Other / Auto-detect": "auto",
 }
 
+# Reverse of NARWAL_MODELS, for naming an entry added through Other / Auto-detect.
+# Auto-detect resolves the real product key over the WebSocket, so an entry that
+# would otherwise be titled "Narwal CGjuB6dzq7" can carry the model's own name
+# (#81). First label wins if two ever share a key.
+PRODUCT_KEY_TO_MODEL: dict[str, str] = {
+    key: label
+    for label, key in reversed(list(NARWAL_MODELS.items()))
+    if key != "auto"
+}
+
+
+def model_label_for_product_key(product_key: str | None) -> str | None:
+    """Model selector label for a resolved product key, or None if unknown."""
+    return PRODUCT_KEY_TO_MODEL.get(product_key or "")
+
+
 CONF_DEVICE_ID = "device_id"
 CONF_MODEL = "model"
 CONF_PRODUCT_KEY = "product_key"

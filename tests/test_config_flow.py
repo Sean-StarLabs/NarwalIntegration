@@ -18,6 +18,7 @@ tests.ha_stubs.install()
 
 from custom_components.narwal.config_flow import NarwalConfigFlow  # noqa: E402
 from custom_components.narwal.const import (  # noqa: E402
+    CONF_MODEL,
     NARWAL_MODELS,
     NO_BROADCAST_PRODUCT_KEYS,
 )
@@ -168,7 +169,103 @@ class TestNarwalConfigFlow:
         flow.async_create_entry.assert_called_once()
         entry_kwargs = flow.async_create_entry.call_args.kwargs
         assert entry_kwargs["data"]["product_key"] == "DrzDKQ0MU8"
-        assert "Narwal DrzDKQ0MU8" in entry_kwargs["title"]
+        # DrzDKQ0MU8 is a model we know, so the entry is named after it rather
+        # than after the raw key it was discovered by (#81).
+        assert entry_kwargs["title"] == "Narwal Freo Z10 Ultra"
+        assert entry_kwargs["data"][CONF_MODEL] == "Narwal Freo Z10 Ultra"
+
+    async def test_auto_detect_unknown_key_keeps_the_key_in_the_title(self) -> None:
+        """An unrecognised product key stays visible — it is all we know."""
+        flow = self._make_flow()
+
+        mock_client = AsyncMock()
+        mock_client.topic_prefix = "/zzzzUNKNOWN"
+        mock_device_info = MagicMock()
+        mock_device_info.device_id = "auto_device_789"
+        mock_client.get_device_info.return_value = mock_device_info
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient",
+            return_value=mock_client,
+        ):
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.50",
+                    "port": 9002,
+                    "model": "Other / Auto-detect",
+                },
+            )
+
+        entry_kwargs = flow.async_create_entry.call_args.kwargs
+        assert entry_kwargs["title"] == "Narwal zzzzUNKNOWN"
+        assert entry_kwargs["data"][CONF_MODEL] == "Other / Auto-detect"
+
+    async def test_explicit_model_choice_is_not_overridden(self) -> None:
+        """A model the user picked survives a differing resolved key."""
+        flow = self._make_flow()
+
+        mock_client = AsyncMock()
+        mock_client.topic_prefix = "/DrzDKQ0MU8"
+        mock_device_info = MagicMock()
+        mock_device_info.device_id = "explicit_device"
+        mock_client.get_device_info.return_value = mock_device_info
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient",
+            return_value=mock_client,
+        ):
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.50",
+                    "port": 9002,
+                    "model": "Narwal Flow",
+                },
+            )
+
+        entry_kwargs = flow.async_create_entry.call_args.kwargs
+        assert entry_kwargs["title"] == "Narwal Flow"
+        assert entry_kwargs["data"][CONF_MODEL] == "Narwal Flow"
+
+    async def test_device_id_step_can_retry_auto_detection(self) -> None:
+        """The manual step is not a dead end — it can hand back to auto-detect.
+
+        Home Assistant resumes an in-progress discovery flow at its current
+        step, so before this the only escape was restarting Home Assistant.
+        """
+        flow = self._make_flow()
+        flow._pending_user_input = {"host": "10.0.0.50", "port": 9002,
+                                    CONF_MODEL: "Other / Auto-detect"}
+        flow._pending_product_key = "auto"
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient"
+        ) as client_class:
+            await flow.async_step_device_id(
+                user_input={"device_id": "", "retry_auto_detect": True}
+            )
+
+        # Hands back to the user form rather than connecting with a blank id.
+        client_class.assert_not_called()
+        assert flow.async_show_form.call_args.kwargs["step_id"] == "user"
+
+    async def test_blank_device_id_is_rejected_without_connecting(self) -> None:
+        """A blank id with retry unticked is a translated error, not a crash."""
+        flow = self._make_flow()
+        flow._pending_user_input = {"host": "10.0.0.50", "port": 9002,
+                                    CONF_MODEL: "Other / Auto-detect"}
+        flow._pending_product_key = "auto"
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient"
+        ) as client_class:
+            await flow.async_step_device_id(
+                user_input={"device_id": "   ", "retry_auto_detect": False}
+            )
+
+        client_class.assert_not_called()
+        call_kwargs = flow.async_show_form.call_args.kwargs
+        assert call_kwargs["step_id"] == "device_id"
+        assert call_kwargs["errors"] == {"base": "device_id_required"}
 
     async def test_non_broadcast_model_opens_device_id_step(self) -> None:
         """A non-broadcast model requests its identity without connecting."""
