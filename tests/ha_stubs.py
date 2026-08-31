@@ -137,6 +137,25 @@ def install() -> None:
 
     ha_uc.CoordinatorEntity = _CoordinatorEntity  # type: ignore[attr-defined]
 
+    ha_storage = _mod("homeassistant.helpers.storage", ha_helpers)
+
+    class _Store:
+        """Stub for Home Assistant Store helper."""
+
+        def __init__(self, hass: object, version: int, key: str) -> None:
+            self.hass = hass
+            self.version = version
+            self.key = key
+            self.data: object | None = None
+
+        async def async_load(self) -> object | None:
+            return self.data
+
+        async def async_save(self, data: object) -> None:
+            self.data = data
+
+    ha_storage.Store = _Store  # type: ignore[attr-defined]
+
     ha_dr = _mod("homeassistant.helpers.device_registry", ha_helpers)
     ha_dr.DeviceInfo = dict  # type: ignore[attr-defined]
 
