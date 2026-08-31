@@ -47,6 +47,18 @@ Nothing, except less noise. Docked state still updates on the 60-second poll, an
 
 One subtlety worth recording: the broadcast subscription used to be renewed as a side effect of those wake bursts. With the bursts gone it now runs on its own schedule, because letting it lapse is what causes [#73](https://github.com/sjmotew/NarwalIntegration/issues/73) — the vacuum entity freezing at `docked` while the sensors keep updating.
 
+### A second bug fell out of the first
+
+Making the subscription stand on its own exposed something that had been hiding behind the wake bursts.
+
+The "renew every 8 minutes" timer started from zero and asked `monotonic() - 0 > 480`. `time.monotonic()` is only guaranteed to be *monotonic* — on Linux it is system uptime. On a host that had been up for less than eight minutes that comparison is false, so **the very first broadcast subscription was silently deferred**.
+
+That never mattered while every wake burst also carried a subscription. With bursts no longer fired at a docked robot it matters a great deal: no subscription means no broadcasts at all, which is [#73](https://github.com/sjmotew/NarwalIntegration/issues/73), the vacuum entity frozen at `docked`. A Raspberry Pi starting Home Assistant at boot is exactly the affected case.
+
+Fixed by tracking "never sent" explicitly rather than inferring it from a clock whose origin is not defined.
+
+It was CI that caught this — the test runner's uptime is genuinely under eight minutes, so it reproduced the condition that a developer machine, up for days, never will.
+
 ---
 
 ## Setup fixes
@@ -72,4 +84,4 @@ That page now carries a **"Try automatic detection again"** checkbox. Since the 
 
 [@hyeok-yoo](https://github.com/hyeok-yoo), who reported a log-noise annoyance and then measured it into a mechanism — 52 intervals, a 0.417 s standard deviation, and a decomposition that predicted the loop's behaviour to within 0.2 s. [@DeNo64](https://github.com/DeNo64), for four findings across two releases, all from packet captures rather than guesses, two of which corrected things written down here wrongly.
 
-278 tests, CI green, deployed to a live Home Assistant instance and verified against real hardware before tagging. The four tests covering the wake fix were each checked against a deliberate mutation of the line they cover, so they are known to fail when the fix is absent.
+279 tests, CI green, deployed to a live Home Assistant instance and verified against real hardware before tagging. The four tests covering the wake fix were each checked against a deliberate mutation of the line they cover, so they are known to fail when the fix is absent.
