@@ -8,7 +8,7 @@ Covers MAP-04 (post-cleaning map refresh) validation gaps:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Install HA stubs before any custom_components import
 import tests.ha_stubs  # noqa: E402
@@ -50,6 +50,14 @@ class TestCoordinatorMapRefresh:
         coordinator._prev_working_status = WorkingStatus.UNKNOWN
         coordinator.active_clean_work_mode = None
         coordinator.active_room_clean_settings = {}
+        coordinator._map_display_cache_store = MagicMock()
+        coordinator._map_display_cache_store.async_save = AsyncMock()
+        coordinator._map_display_cache_signature = ()
+        coordinator._pending_map_display_cache_snapshot = None
+        coordinator._pending_map_display_cache_restore = None
+        coordinator._map_display_cache_save_task = None
+        coordinator._map_display_cache_last_save = 0.0
+        coordinator._map_display_cache_restored = False
         coordinator.update_interval = None
         coordinator.async_set_updated_data = MagicMock()
         def _close_background_task(*args: object) -> None:
