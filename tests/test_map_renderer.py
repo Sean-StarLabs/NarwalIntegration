@@ -13,15 +13,13 @@ import zlib
 
 from narwal_client.map_renderer import (
     MAP_RENDER_SCALE,
-    render_base_map,
-    render_overlay,
-    decompress_map,
-    _decode_packed_varints,
-    _scaled_coord,
-    OBSTACLE_COLORS,
     OBSTACLE_COLOR_DEFAULT,
-    render_map_png,
+    OBSTACLE_COLORS,
+    _scaled_coord,
     _transform_point,
+    render_base_map,
+    render_map_png,
+    render_overlay,
 )
 from narwal_client.models import ObstacleInfo
 
@@ -161,7 +159,7 @@ class TestRenderOverlay:
         assert result[:8] == b"\x89PNG\r\n\x1a\n"
 
     def test_with_trail(self) -> None:
-        """render_overlay draws trail positions as line segments."""
+        """render_overlay draws native trajectory positions as line segments."""
         base = self._make_base_image(width=50, height=50)
         trail = [(10.0, 10.0), (20.0, 20.0), (30.0, 30.0)]
 
@@ -188,7 +186,6 @@ class TestRenderOverlay:
 
     def test_does_not_modify_base(self) -> None:
         """render_overlay does not mutate the base image."""
-        from PIL import Image
         base = self._make_base_image()
         # Save original pixel for comparison
         original_pixel = base.getpixel((15, 15))
@@ -284,8 +281,6 @@ class TestObstacleRendering:
 
     def test_empty_obstacles_same_as_no_obstacles(self) -> None:
         """render_base_map with empty obstacles list produces same output as without."""
-        from PIL import Image
-
         width, height = 20, 20
         compressed = _make_room_grid(width, height, room_id=1)
 
@@ -317,15 +312,22 @@ class TestObstacleRendering:
 
     def test_obstacle_modifies_image(self) -> None:
         """An in-bounds obstacle should change some pixels compared to no-obstacle render."""
-        from PIL import Image
-
         width, height = 40, 40
         compressed = _make_room_grid(width, height, room_id=1)
 
         result_without = render_base_map(compressed, width, height)
         result_with = render_base_map(
             compressed, width, height,
-            obstacles=[ObstacleInfo(id=1, type_id=2, center_x=20.0, center_y=20.0, width=10.0, height=10.0)],
+            obstacles=[
+                ObstacleInfo(
+                    id=1,
+                    type_id=2,
+                    center_x=20.0,
+                    center_y=20.0,
+                    width=10.0,
+                    height=10.0,
+                )
+            ],
             origin_x=0, origin_y=0,
         )
 
