@@ -177,6 +177,16 @@ def fan_speed_list_for(data: dict) -> list[str]:
     return FAN_SPEED_LIST
 
 
+def normalize_fan_level_for_model(data: dict, fan: FanLevel) -> FanLevel:
+    """Return a persisted fan level supported by the configured model."""
+    if (
+        fan == FanLevel.SUPER
+        and data.get(CONF_PRODUCT_KEY) in NO_ULTRA_FAN_PRODUCT_KEYS
+    ):
+        return FanLevel.DEEP
+    return fan
+
+
 # FAN_SPEED_MAP also accepts the "… powerful" labels shipped through v1.0.3 and the
 # short "Super" label used by this stack, and the original lowercase fan_speed
 # values (quiet/normal/strong/max) so existing automations keep working; these
