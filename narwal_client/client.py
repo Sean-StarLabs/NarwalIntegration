@@ -351,6 +351,17 @@ class NarwalClient:
 
         self.state.update_from_base_status(decoded)
 
+    def _update_from_display_map_broadcast(self, decoded: dict[str, Any]) -> None:
+        """Apply a display-map broadcast and mark the trajectory as fresh."""
+        self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
+        self._last_display_map_time = time.monotonic()
+        _LOGGER.debug(
+            "display_map received: robot=(%.2f, %.2f) ts=%d",
+            self.state.map_display_data.robot_x,
+            self.state.map_display_data.robot_y,
+            self.state.map_display_data.timestamp,
+        )
+
     async def connect(self) -> None:
         """Establish WebSocket connection to the vacuum.
 
@@ -646,14 +657,7 @@ class NarwalClient:
         elif short_topic == "status/download_status":
             self.state.update_from_download_status(decoded)
         elif short_topic == "map/display_map":
-            self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
-            self._last_display_map_time = time.monotonic()
-            _LOGGER.debug(
-                "display_map received: robot=(%.2f, %.2f) ts=%d",
-                self.state.map_display_data.robot_x,
-                self.state.map_display_data.robot_y,
-                self.state.map_display_data.timestamp,
-            )
+            self._update_from_display_map_broadcast(decoded)
         if self.on_state_update:
             self.on_state_update(self.state)
 
@@ -706,7 +710,7 @@ class NarwalClient:
         """Encode a protobuf string field."""
         return cls._encode_bytes_field(field_num, text.encode("utf-8"))
 
-    # All broadcast topics the robot can send — used for active_robot_publish
+    # Broadcast topics needed for state, maps and diagnostics.
     _ALL_BROADCAST_TOPICS = [
         "status/robot_base_status",
         "status/working_status",
@@ -714,8 +718,6 @@ class NarwalClient:
         "status/download_status",
         "map/display_map",
         "status/time_line_status",
-        "status/point_navi_plan_traj",
-        "developer/planning_debug_info",
     ]
 
     def _build_topic_subscription(self, duration: int = 600) -> bytes:
@@ -1142,7 +1144,7 @@ class NarwalClient:
             elif short_topic == "status/download_status":
                 self.state.update_from_download_status(decoded)
             elif short_topic == "map/display_map":
-                self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
+                self._update_from_display_map_broadcast(decoded)
 
         raise NarwalCommandError(
             f"No field5 response within {timeout}s"
