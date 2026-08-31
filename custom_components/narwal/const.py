@@ -145,15 +145,14 @@ DOCK_LIGHT_MODE_NAMES: dict[int, str] = {
 }
 
 # HA fan_speed labels -> FanLevel, from the app's user-visible suction names
-# (sentence case, as HA shows fan_speed values directly). The enum members keep
-# the app's internal identifiers, so DEEP surfaces as "Super Powerful" and
-# SUPER as "Ultra".
+# (sentence case, as HA shows fan_speed values directly). The app's internal
+# DEEP and SUPER identifiers surface as "Super Powerful" and "Ultra Powerful".
 _FAN_SPEED_CANONICAL: dict[str, FanLevel] = {
     "Quiet": FanLevel.MUTE,
     "Standard": FanLevel.NORMAL,
     "Strong": FanLevel.STRONG,
     "Super Powerful": FanLevel.DEEP,
-    "Ultra": FanLevel.SUPER,
+    "Ultra Powerful": FanLevel.SUPER,
 }
 
 FAN_SPEED_LIST: list[str] = list(_FAN_SPEED_CANONICAL)
@@ -174,6 +173,7 @@ _FAN_SPEED_NO_LEVEL_5: dict[str, FanLevel] = {
 _FAN_SPEED_ALIASES: dict[str, FanLevel] = {
     "Super": FanLevel.DEEP,
     "Super powerful": FanLevel.DEEP,
+    "Ultra": FanLevel.SUPER,
     "Ultra powerful": FanLevel.SUPER,
     "quiet": FanLevel.MUTE,
     "normal": FanLevel.NORMAL,
@@ -211,7 +211,14 @@ _FAN_SPEED_NO_LEVEL_5_ALIASES: dict[str, FanLevel] = {
 
 def fan_speed_list_for(data: dict) -> list[str]:
     """Return visible fan_speed options for this configured model."""
-    return list(fan_speed_map_for(data, include_aliases=False))
+    options = list(fan_speed_map_for(data, include_aliases=False))
+    # HA validates service values before the entity can normalize aliases.
+    # Keep the previously advertised level-4 label available to automations.
+    options.insert(options.index("Super Powerful"), "Super")
+    if data.get(CONF_PRODUCT_KEY) not in NO_LEVEL_5_FAN_PRODUCT_KEYS:
+        # Keep the previously advertised level-5 label visible for automations.
+        options.insert(-1, "Ultra")
+    return options
 
 
 def fan_speed_map_for(
@@ -247,8 +254,9 @@ def normalize_fan_level_for_model(data: dict, fan: FanLevel) -> FanLevel:
 
 # FAN_SPEED_MAP also accepts the short "Super" label shipped through this stack
 # and v1.0.3's "… powerful" labels, plus the original lowercase fan_speed values
-# (quiet/normal/strong/max) so existing automations keep working; these aliases
-# are not offered in FAN_SPEED_LIST.
+# (quiet/normal/strong/max) so existing automations keep working. Select entities
+# must additionally advertise the prior "Ultra" option because HA validates
+# service values before calling the entity; other aliases remain input-only.
 FAN_SPEED_MAP: dict[str, FanLevel] = _FAN_SPEED_CANONICAL | _FAN_SPEED_ALIASES
 
 # Backwards-compatible name for existing imports/tests.

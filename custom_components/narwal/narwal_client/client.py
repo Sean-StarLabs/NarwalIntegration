@@ -65,6 +65,7 @@ from .const import (
     MopStrengthLevel,
     WorkingStatus,
     WorkMode,
+    fan_level_for_live_command,
 )
 from .models import (
     DOCK_TASK_DRY_DOCK_BAG,
@@ -1716,11 +1717,10 @@ class NarwalClient:
     async def set_fan_speed(self, level: FanLevel | int) -> CommandResponse:
         """Set suction fan speed live (clean/set_fan_level, field 1 = SweepFanLevel).
 
-        The live command's enum is SweepFanLevel, which has no SUPER — the app maps
-        FanLevel.SUPER -> STRONG here. Ints otherwise match FanLevel (MUTE 1, NORMAL 2,
-        STRONG 3, DEEP 4).
+        The live command's enum is SweepFanLevel, which has no SUPER. A SUPER request
+        is clamped to its highest supported tier, DEEP.
         """
-        live = FanLevel.STRONG if int(level) == FanLevel.SUPER else int(level)
+        live = int(fan_level_for_live_command(level))
         payload = b"\x08" + bytes([live & 0x7F])
         return await self.send_command(TOPIC_CMD_SET_FAN_LEVEL, payload)
 

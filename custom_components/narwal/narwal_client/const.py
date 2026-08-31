@@ -246,6 +246,12 @@ class FanLevel(IntEnum):
     SUPER = 5
 
 
+def fan_level_for_live_command(level: FanLevel | int) -> FanLevel:
+    """Return the closest level supported by clean/set_fan_level."""
+    requested = FanLevel(int(level))
+    return FanLevel.DEEP if requested is FanLevel.SUPER else requested
+
+
 class MopHumidity(IntEnum):
     """Water volume shared by CleanParam tag 4 and live set_mop_humidity."""
 

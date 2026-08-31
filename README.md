@@ -22,7 +22,7 @@ A fully **local, cloud-independent** [Home Assistant](https://www.home-assistant
 > Full notes: [`docs/RELEASE-NOTES-v1.0.2.md`](docs/RELEASE-NOTES-v1.0.2.md). Read this before upgrading:
 >
 > - **Room names changed** ([#48](https://github.com/sjmotew/NarwalIntegration/pull/48)). The room-type table was wrong for every model. If you built automations or scripts on the old (incorrect) names, expect to redo those mappings.
-> - **Fan speed values and tiers changed** ([#49](https://github.com/sjmotew/NarwalIntegration/pull/49)). The suction scale was off by one tier for this project's entire history. The list is now the app's own tiers — Quiet, Standard, Strong, Super, Ultra. Your existing `quiet` / `normal` / `strong` / `max` automations keep working as aliases, but they now map to the correct tier, so **actual suction may differ from what you were getting**. (v1.0.2 and v1.0.3 spelled the top two "Super powerful" / "Ultra powerful"; both spellings are still accepted.)
+> - **Fan speed values and tiers changed** ([#49](https://github.com/sjmotew/NarwalIntegration/pull/49)). The suction scale was off by one tier for this project's entire history. The list is now the app's own tiers — Quiet, Standard, Strong, Super Powerful, Ultra Powerful. Your existing `quiet` / `normal` / `strong` / `max` automations keep working as aliases, but they now map to the correct tier, so **actual suction may differ from what you were getting**. Earlier releases used shorter or differently capitalized labels; those spellings are still accepted.
 > - **`vacuum.start` now requires the dock** ([#69](https://github.com/sjmotew/NarwalIntegration/issues/69)). Whole-house start goes through `clean/start_clean` and cleans every room instead of re-running the robot's saved plan. That command only works from the dock, so starting off-dock now returns `NOT_READY` instead of appearing to succeed — a real failure surfacing, since the old path was not starting the clean either.
 >
 > You will also see **many more entities** — 28 on a Flow, up from 9 — as clean settings, consumable alerts, map options and the dock light become HA entities. Verified on hardware (AX12, v01.08.03.07).
@@ -56,7 +56,7 @@ Models marked **Not Compatible** use a different protocol or are cloud-only. Thi
 ### Vacuum Control
 - **Start / Stop / Pause / Resume** — validated on hardware (see the note above for `start` on newer Flow firmware)
 - **Return to dock** / **Locate** (robot announces "Robot is here")
-- **Fan speed** — Quiet, Standard, Strong, Super, Ultra (set-only; robot doesn't broadcast current level). Ultra is not offered on the Freo Z10 Pro / Turbo (AX26), where the app's own top tier is Super and value 5 is unreachable ([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)). On v1.0.1 these are `quiet` / `normal` / `strong` / `max` and are off by one tier — see the breaking-change note above
+- **Fan speed** — Quiet, Standard, Strong, Super Powerful, Ultra Powerful (set-only; robot doesn't broadcast current level). The prior `Ultra` level-5 label remains selectable for automation compatibility. Ultra Powerful is not offered on the Freo Z10 Pro / Turbo (AX26), where the app's own top tier is Super Powerful and value 5 is unreachable ([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)). On v1.0.1 these are `quiet` / `normal` / `strong` / `max` and are off by one tier — see the breaking-change note above
 - **Room-specific cleaning** — exposed in the HA UI (requires HA 2026.3+ and a segment-to-area mapping, see Known Limitations). **Fixed in v1.0.2** ([#49](https://github.com/sjmotew/NarwalIntegration/pull/49)); broken in v1.0.1 and earlier
 
 ### Clean Settings
@@ -429,7 +429,7 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 ### Open protocol questions — help wanted
 
-- ~~**Is there a fifth suction tier?**~~ **Answered** ([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)) — the AX26 app's top tier sends `4` (`DEEP`), so the five-value enum is right and `SUPER` (5) is unreachable there. Ultra is now withheld on that model. Still unknown whether any model exposes 5.
+- ~~**Is there a fifth suction tier?**~~ **Answered** ([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)) — the AX26 app's top tier sends `4` (`DEEP`), while a Flow 2 accepted and actively reported a clean configured with `5` (`SUPER`). Ultra Powerful is withheld only on models known not to support it.
 - **What is `CleanParam` tag 8?** The Narwal app sends `8 = 2`; we never send it and cleaning works without it. The best current candidate is the app's two-value coverage-precision toggle ([#25](https://github.com/sjmotew/NarwalIntegration/issues/25)).
 - **The complete `WorkingStatus` enum.** Values have been discovered one user bug report at a time. Anyone holding an APK `BuilderInfo` decode can end that ([#46](https://github.com/sjmotew/NarwalIntegration/issues/46)).
 - **Narwal JX confirmation.** The product key is known; no working report yet ([#42](https://github.com/sjmotew/NarwalIntegration/issues/42)).

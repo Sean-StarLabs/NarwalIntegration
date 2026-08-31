@@ -25,7 +25,7 @@ def test_canonical_labels_are_the_offered_list() -> None:
         "Standard",
         "Strong",
         "Super Powerful",
-        "Ultra",
+        "Ultra Powerful",
     ]
 
 
@@ -36,12 +36,13 @@ def test_canonical_labels_map_to_the_proto_enum() -> None:
     assert FAN_SPEED_MAP["Strong"] is FanLevel.STRONG
     assert FAN_SPEED_MAP["Super Powerful"] is FanLevel.DEEP
     assert int(FAN_SPEED_MAP["Super Powerful"]) == 4
-    assert FAN_SPEED_MAP["Ultra"] is FanLevel.SUPER
+    assert FAN_SPEED_MAP["Ultra Powerful"] is FanLevel.SUPER
 
 
 def test_pre_rename_labels_still_resolve() -> None:
     """Labels shipped through v1.0.3 keep working in existing automations."""
     assert FAN_SPEED_MAP["Super"] is FanLevel.DEEP
+    assert FAN_SPEED_MAP["Ultra"] is FanLevel.SUPER
     assert FAN_SPEED_MAP["Ultra powerful"] is FanLevel.SUPER
     assert FAN_SPEED_MAP["Super powerful"] is FanLevel.DEEP
 
@@ -55,7 +56,7 @@ def test_lowercase_aliases_still_resolve() -> None:
 
 
 def test_aliases_are_not_offered_as_options() -> None:
-    """Back-compat spellings are accepted but never shown in the picker."""
+    """Input-only compatibility spellings stay out of the canonical list."""
     for alias in ("Super", "Super powerful", "Ultra powerful", "quiet", "max"):
         assert alias not in FAN_SPEED_LIST
 
@@ -66,22 +67,36 @@ def test_every_offered_label_is_resolvable() -> None:
         assert label in FAN_SPEED_MAP
 
 
-def test_ultra_withheld_where_the_app_cannot_reach_it() -> None:
-    """AX26's app exposes four tiers, so "Ultra" (5) is not offered there (#70)."""
+def test_ultra_powerful_withheld_where_the_app_cannot_reach_it() -> None:
+    """AX26's app exposes four tiers, so level 5 is not offered there (#70)."""
     assert fan_speed_list_for({CONF_PRODUCT_KEY: AX26}) == [
         "Quiet",
         "Standard",
         "Strong",
+        "Super",
         "Super Powerful",
     ]
 
 
 def test_other_models_keep_all_five_tiers() -> None:
-    """Gating is per-model — untested models are left alone."""
-    assert fan_speed_list_for({CONF_PRODUCT_KEY: FLOW_2}) == FAN_SPEED_LIST
+    """Five-tier models also advertise the previous level-5 service value."""
+    assert fan_speed_list_for({CONF_PRODUCT_KEY: FLOW_2}) == [
+        *FAN_SPEED_LIST[:-2],
+        "Super",
+        *FAN_SPEED_LIST[-2:-1],
+        "Ultra",
+        FAN_SPEED_LIST[-1],
+    ]
 
 
 def test_unknown_or_missing_product_key_keeps_all_five_tiers() -> None:
     """Entries created before product_key persistence must not lose a tier."""
-    assert fan_speed_list_for({}) == FAN_SPEED_LIST
-    assert fan_speed_list_for({CONF_PRODUCT_KEY: None}) == FAN_SPEED_LIST
+    expected = [
+        *FAN_SPEED_LIST[:-2],
+        "Super",
+        *FAN_SPEED_LIST[-2:-1],
+        "Ultra",
+        FAN_SPEED_LIST[-1],
+    ]
+    assert fan_speed_list_for({}) == expected
+    assert fan_speed_list_for({CONF_PRODUCT_KEY: None}) == expected
