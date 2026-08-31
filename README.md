@@ -2,7 +2,7 @@
 
 A fully **local, cloud-independent** [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Communicates directly with your vacuum over your local network via WebSocket — no cloud account or internet connection required.
 
-> **Latest release: [v1.0.5](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.5)** (HACS) — **robots are now discovered automatically** (mDNS + DHCP), the Narwal JX is confirmed working, and a log flood that was 29% of some users' HA logs is gone ([notes](docs/RELEASE-NOTES-v1.0.5.md)). **No breaking changes.** **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first**, then the [v1.0.4 notes](docs/RELEASE-NOTES-v1.0.4.md) — your consumable alerts were wrong before that release.
+> **Latest release: [v1.0.6](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.6)** (HACS) — **the integration was waking your docked robot ~1,900 times a day**; it now leaves a quiet docked robot alone ([notes](docs/RELEASE-NOTES-v1.0.6.md)). Also fixes two v1.0.5 setup problems: auto-detected robots are named after their model, and a failed Device ID lookup is no longer a dead end. **No breaking changes.** **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first**, then the [v1.0.4 notes](docs/RELEASE-NOTES-v1.0.4.md) — your consumable alerts were wrong before that release.
 
 > ### ✅ Room cleaning is fixed — shipped in v1.0.2, verified on hardware in v1.0.3
 >
@@ -374,9 +374,15 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 ## Project Status
 
-**Where things stand — updated 2026-08-30, at the v1.0.5 release.**
+**Where things stand — updated 2026-08-31, at the v1.0.6 release.**
 
-**v1.0.5 is released** — everything below is shipped to HACS. 270 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. **Open PRs: [#85](https://github.com/sjmotew/NarwalIntegration/pull/85)-[#89](https://github.com/sjmotew/NarwalIntegration/pull/89) (@Sean-StarLabs — dock tasks, per-room clean profiles, live task state on the vacuum entity, native map trails; all drafts).**
+**v1.0.6 is released** — everything below is shipped to HACS. 278 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. **Open PRs: [#85](https://github.com/sjmotew/NarwalIntegration/pull/85)-[#89](https://github.com/sjmotew/NarwalIntegration/pull/89) (@Sean-StarLabs — dock tasks, per-room clean profiles, live task state, native map trails; all drafts).**
+
+| Merged in v1.0.6 | What it does |
+|---|---|
+| [#90](https://github.com/sjmotew/NarwalIntegration/issues/90) | **Stops waking a docked robot that is merely quiet.** A docked Narwal has a duty cycle — 30-45s of broadcasts, then 60-124s of silence — and a 15s staleness threshold read every gap as sleep, firing ~1,900 wake bursts a day |
+| [#81](https://github.com/sjmotew/NarwalIntegration/issues/81) | **Auto-detected robots are named after their model** instead of a raw product key, and the Device ID step is no longer a dead end when auto-detection fails |
+| — | Docs: VLAN cause settled as source filtering; mDNS does cross VLANs with a multicast reflector |
 
 | Merged in v1.0.5 | What it does |
 |---|---|
