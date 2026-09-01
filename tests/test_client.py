@@ -892,7 +892,7 @@ class TestDockTaskCommands:
             timeout=15.0,
         )
         mock_status.assert_awaited_once_with(full_update=True)
-        assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is not None
+        assert DOCK_TASK_DRY_DOCK_BAG not in client.state.dock_drying_tasks
 
     @pytest.mark.asyncio
     async def test_stop_dry_station_bag_allows_unmapped_coarse_activity(self) -> None:
@@ -1211,7 +1211,7 @@ class TestDockTaskCommands:
             timeout=15.0,
         )
         mock_status.assert_awaited_once_with(full_update=True)
-        assert client.state.dock_task_timer(DOCK_TASK_DRY_DUST_BIN) is None
+        assert DOCK_TASK_DRY_DUST_BIN not in client.state.dock_drying_tasks
 
     @pytest.mark.asyncio
     async def test_unscoped_stop_dry_dust_bag_uses_scoped_force_end(self) -> None:

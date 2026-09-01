@@ -1668,7 +1668,12 @@ class NarwalClient:
             refreshed = await self._refresh_after_dock_stop()
             if _accepted_response(response):
                 self.state.clear_assumed_dock_task(active_task)
-                if refreshed and _dock_status_confirms_idle(self.state):
+                # Scoped force-end acknowledges the exact drying task. Clear its
+                # cached timer after a fresh dock response instead of waiting for
+                # the old timer snapshot to expire.
+                if refreshed and (
+                    payload is not None or _dock_status_confirms_idle(self.state)
+                ):
                     self.state.clear_dock_drying_task(active_task)
             return response
 
