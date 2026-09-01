@@ -16,6 +16,7 @@ from .const import (
     BROADCAST_STALE_TIMEOUT,
     COMMAND_RESPONSE_TIMEOUT,
     DEFAULT_PORT,
+    DEFAULT_TOPIC_PREFIX,
     HEARTBEAT_INTERVAL,
     KEEPALIVE_INTERVAL,
     KNOWN_PRODUCT_KEYS,
@@ -23,9 +24,10 @@ from .const import (
     RECONNECT_INITIAL_DELAY,
     RECONNECT_MAX_DELAY,
     TOPIC_CMD_ACTIVE_ROBOT,
-    TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_AMBIENT_LIGHT_CTRL,
+    TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_CANCEL,
+    TOPIC_CMD_CLEAN_TASK,
     TOPIC_CMD_DRY_MOP,
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_EASY_CLEAN,
@@ -34,32 +36,29 @@ from .const import (
     TOPIC_CMD_GET_BASE_STATUS,
     TOPIC_CMD_GET_CONSUMABLE_INFO,
     TOPIC_CMD_GET_CURRENT_TASK,
+    TOPIC_CMD_GET_DEBUG_IMAGE,
     TOPIC_CMD_GET_DEVICE_INFO,
     TOPIC_CMD_GET_FEATURE_LIST,
     TOPIC_CMD_GET_MAP,
     TOPIC_CMD_NOTIFY_APP_EVENT,
     TOPIC_CMD_PAUSE,
-    TOPIC_CMD_PING,
+    TOPIC_CMD_PLAN_START,
     TOPIC_CMD_RECALL,
     TOPIC_CMD_RESUME,
     TOPIC_CMD_SET_FAN_LEVEL,
-    TOPIC_CMD_SET_MOP_HUMIDITY,
-    TOPIC_CMD_PLAN_START,
-    TOPIC_CMD_CLEAN_TASK,
-    TOPIC_CMD_TAKE_PICTURE,
-    TOPIC_CMD_GET_DEBUG_IMAGE,
     TOPIC_CMD_SET_LED,
+    TOPIC_CMD_SET_MOP_HUMIDITY,
+    TOPIC_CMD_TAKE_PICTURE,
     TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_YELL,
-    DEFAULT_TOPIC_PREFIX,
     WAKE_TIMEOUT,
     AmbientLightCtrlType,
     CommandResult,
     FanLevel,
     MopHumidity,
     MopStrengthLevel,
-    WorkMode,
     WorkingStatus,
+    WorkMode,
 )
 from .models import CommandResponse, DeviceInfo, MapData, MapDisplayData, NarwalState
 from .protocol import (
@@ -180,6 +179,13 @@ class NarwalClient:
     def _full_topic(self, short_topic: str) -> str:
         """Build the full topic path."""
         return f"{self.topic_prefix}/{self.device_id}/{short_topic}"
+
+    def _update_topic_prefix_from_topic(self, topic: str, source: str) -> None:
+        """Preserve the product-key prefix from a robot response topic."""
+        parts = topic.split("/")
+        if len(parts) >= 2 and parts[0] == "" and parts[1]:
+            self.topic_prefix = f"/{parts[1]}"
+            _LOGGER.info("Topic prefix from %s: %s", source, self.topic_prefix)
 
     @property
     def connected(self) -> bool:
@@ -332,12 +338,29 @@ class NarwalClient:
             if msg.field_tag == PROTOBUF_FIELD5_TAG and msg.payload:
                 try:
                     decoded = self._decode_protobuf(msg.payload)
+                    raw_product_key = decoded.get("1", b"")
+                    if isinstance(raw_product_key, bytes):
+                        product_key = raw_product_key.decode(
+                            "utf-8", errors="replace"
+                        ).strip()
+                    elif isinstance(raw_product_key, str):
+                        product_key = raw_product_key.strip()
+                    else:
+                        product_key = ""
                     raw_id = decoded.get("2", b"")
                     if isinstance(raw_id, bytes):
                         raw_id = raw_id.decode("utf-8", errors="replace").strip()
                     else:
                         raw_id = str(raw_id).strip()
                     if raw_id:
+                        if product_key:
+                            self.topic_prefix = f"/{product_key}"
+                            _LOGGER.info(
+                                "Topic prefix from response payload: %s",
+                                self.topic_prefix,
+                            )
+                        else:
+                            self._update_topic_prefix_from_topic(msg.topic, "response")
                         self.device_id = raw_id
                         _LOGGER.info("Discovered device_id from response: %s", self.device_id)
                         return self.device_id
@@ -350,9 +373,7 @@ class NarwalClient:
                 # Topic format: /{product_key}/{device_id}/{category}/{type}
                 if len(parts) >= 4 and parts[2]:
                     # Extract product_key from topic to set correct prefix
-                    if parts[1]:
-                        self.topic_prefix = f"/{parts[1]}"
-                        _LOGGER.info("Topic prefix from broadcast: %s", self.topic_prefix)
+                    self._update_topic_prefix_from_topic(msg.topic, "broadcast")
                     self.device_id = parts[2]
                     _LOGGER.info("Discovered device_id from broadcast: %s", self.device_id)
                     return self.device_id
@@ -374,7 +395,7 @@ class NarwalClient:
         drained = 0
         while True:
             try:
-                data = await asyncio.wait_for(self._ws.recv(), timeout=0.05)
+                await asyncio.wait_for(self._ws.recv(), timeout=0.05)
                 drained += 1
             except asyncio.TimeoutError:
                 break
