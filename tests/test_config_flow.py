@@ -200,14 +200,52 @@ class TestNarwalConfigFlow:
         assert entry_kwargs["title"] == "Narwal zzzzUNKNOWN"
         assert entry_kwargs["data"][CONF_MODEL] == "Other / Auto-detect"
 
-    async def test_explicit_model_choice_is_not_overridden(self) -> None:
-        """A model the user picked survives a differing resolved key."""
+    async def test_model_label_follows_the_key_the_robot_reported(self) -> None:
+        """@DeNo64's case (#81): a Flow 2 accepted at the "Narwal Flow" default.
+
+        The selector defaults to the first option and discovery cannot
+        pre-select anything, so accepting the default is the common path.
+        CONF_PRODUCT_KEY is already taken from the robot rather than the user,
+        so letting the label disagree stored the Flow 2 key under the name
+        "Narwal Flow" — a correctly configured robot, mislabelled.
+
+        This replaces an earlier test asserting the opposite. Respecting the
+        selected label while overriding the selected key is the inconsistency
+        that caused the bug, not a feature worth protecting.
+        """
         flow = self._make_flow()
 
         mock_client = AsyncMock()
-        mock_client.topic_prefix = "/DrzDKQ0MU8"
+        mock_client.topic_prefix = "/QxMSPG6VSO"  # Narwal Flow 2
         mock_device_info = MagicMock()
-        mock_device_info.device_id = "explicit_device"
+        mock_device_info.device_id = "flow2_device"
+        mock_client.get_device_info.return_value = mock_device_info
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient",
+            return_value=mock_client,
+        ):
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.50",
+                    "port": 9002,
+                    "model": "Narwal Flow",  # the default, left unchanged
+                }
+            )
+
+        entry_kwargs = flow.async_create_entry.call_args.kwargs
+        assert entry_kwargs["data"]["product_key"] == "QxMSPG6VSO"
+        assert entry_kwargs["data"][CONF_MODEL] == "Narwal Flow 2"
+        assert entry_kwargs["title"] == "Narwal Flow 2"
+
+    async def test_unknown_key_keeps_the_model_the_user_chose(self) -> None:
+        """Nothing to correct with, so the user's choice stands."""
+        flow = self._make_flow()
+
+        mock_client = AsyncMock()
+        mock_client.topic_prefix = "/zzzzUNKNOWN"
+        mock_device_info = MagicMock()
+        mock_device_info.device_id = "unknown_device"
         mock_client.get_device_info.return_value = mock_device_info
 
         with patch(
@@ -219,12 +257,12 @@ class TestNarwalConfigFlow:
                     "host": "10.0.0.50",
                     "port": 9002,
                     "model": "Narwal Flow",
-                },
+                }
             )
 
         entry_kwargs = flow.async_create_entry.call_args.kwargs
-        assert entry_kwargs["title"] == "Narwal Flow"
         assert entry_kwargs["data"][CONF_MODEL] == "Narwal Flow"
+        assert entry_kwargs["title"] == "Narwal Flow"
 
     async def test_device_id_step_can_retry_auto_detection(self) -> None:
         """The manual step is not a dead end — it can hand back to auto-detect.

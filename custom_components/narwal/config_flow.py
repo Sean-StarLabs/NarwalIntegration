@@ -261,16 +261,25 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         setup = self._pending_user_input
         product_key = self._pending_product_key
         resolved_key = client.topic_prefix.lstrip("/")
-        model_label = setup[CONF_MODEL]
-        if product_key == "auto":
-            # Auto-detect learns the real product key over the WebSocket, so a
-            # recognised robot gets its model name instead of a raw key (#81).
-            # An unknown key keeps the key in the title — it is the only
-            # identifying thing we have, and it is what a bug report needs.
-            resolved_label = model_label_for_product_key(resolved_key)
-            title = resolved_label or f"Narwal {resolved_key}"
-            if resolved_label:
-                model_label = resolved_label
+        # The model label always describes the key the robot actually reported.
+        #
+        # CONF_PRODUCT_KEY below is `resolved_key` — read off the robot's own
+        # topic — regardless of what was selected, so the stored key already
+        # overrides the user. Letting the label disagree with it produced
+        # entries carrying the Flow 2 key under the name "Narwal Flow" (#81):
+        # the model selector defaults to the first option, discovery cannot
+        # pre-select anything, and accepting that default silently mislabelled
+        # a correctly configured robot.
+        #
+        # An unrecognised key keeps whatever the user chose, and auto-detect
+        # falls back to showing the raw key — it is the only identifying thing
+        # we have then, and it is what a bug report needs.
+        resolved_label = model_label_for_product_key(resolved_key)
+        model_label = resolved_label or setup[CONF_MODEL]
+        if resolved_label:
+            title = resolved_label
+        elif product_key == "auto":
+            title = f"Narwal {resolved_key}"
         else:
             title = model_label
         return self.async_create_entry(
