@@ -7,7 +7,9 @@ on the NarwalVacuum entity using HA stubs.
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, MagicMock, patch
+import logging
+import sys
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -16,28 +18,40 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from narwal_client.models import MapData, NarwalState, RoomInfo  # noqa: E402
+from homeassistant.components.vacuum import VacuumEntityFeature  # noqa: E402
+from homeassistant.exceptions import HomeAssistantError  # noqa: E402
+
 from custom_components.narwal.coordinator import CleanSettings  # noqa: E402
 from custom_components.narwal.vacuum import NarwalVacuum  # noqa: E402
-
-# Grab Segment class from stubs for assertions
-import sys
+from narwal_client.const import CommandResult, WorkingStatus  # noqa: E402
+from narwal_client.models import (  # noqa: E402
+    DOCK_TASK_DRY_DOCK_BAG,
+    DOCK_TASK_DRY_MOP,
+    CommandResponse,
+    MapData,
+    NarwalState,
+    RoomInfo,
+)
 
 Segment = sys.modules["homeassistant.components.vacuum"].Segment
 
 
 def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     """Create a NarwalVacuum with mocked coordinator."""
+    client_state = state or NarwalState()
     coordinator = MagicMock()
     coordinator.data = state
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.data = {"device_id": "test_dev_001"}
     coordinator.config_entry.title = "Narwal Test"
     coordinator.client = MagicMock()
-    coordinator.client.state = MagicMock()
+    coordinator.client.state = client_state
     coordinator.client.state.firmware_version = "1.0.0"
+    coordinator.client.get_map = AsyncMock(return_value=client_state.map_data)
     coordinator.last_update_success = True
     coordinator.clean_settings = CleanSettings()
+    coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+    coordinator.dock_action_lock = asyncio.Lock()
 
     vac = NarwalVacuum.__new__(NarwalVacuum)
     vac.coordinator = coordinator
@@ -50,6 +64,14 @@ def _make_vacuum(state: NarwalState | None = None) -> NarwalVacuum:
     vac.async_write_ha_state = MagicMock()
 
     return vac
+
+
+def _docked_state() -> NarwalState:
+    """Return a state whose reported status is idle on the dock."""
+    state = NarwalState(working_status=WorkingStatus.DOCKED)
+    state.dock_presence = 6
+    state.dock_field11 = 2
+    return state
 
 
 class TestAsyncGetSegments:
@@ -168,11 +190,12 @@ class TestAsyncCleanSegments:
 
     async def test_converts_string_ids_and_calls_start_rooms(self) -> None:
         """Converts string segment IDs to int and calls start_rooms with the settings."""
-        state = NarwalState()
+        state = _docked_state()
+        state.map_data = MapData(rooms=[RoomInfo(room_id=11), RoomInfo(room_id=9)])
         vac = _make_vacuum(state=state)
         settings = vac.coordinator.clean_settings
         vac.coordinator.client.start_rooms = AsyncMock(
-            return_value=MagicMock(result_code=0, success=True)
+            return_value=CommandResponse(result_code=0)
         )
         # Mock wake so it's a no-op
         vac.coordinator.client.robot_awake = True
@@ -188,6 +211,188 @@ class TestAsyncCleanSegments:
             mop_strength=settings.mop_strength,
             passes=settings.passes,
         )
+
+    async def test_segment_clean_accepted_response_does_not_warn(self, caplog) -> None:
+        """Accepted async start responses are not room-clean failures."""
+        state = _docked_state()
+        state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+
+        with caplog.at_level(logging.WARNING, logger="custom_components.narwal.vacuum"):
+            await vac.async_clean_segments(["11"])
+
+        assert "Room clean failed" not in caplog.text
+
+    async def test_rejects_room_clean_when_dock_task_is_active(self) -> None:
+        """Room clean requests are blocked before dispatch during dock work."""
+        state = _docked_state()
+        state.station_activity = 1
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(HomeAssistantError):
+            await vac.async_clean_segments(["11"])
+
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+
+    async def test_accepted_room_clean_reserves_robot_start_context(self) -> None:
+        """Accepted room-start commands block immediate dock starts."""
+        state = _docked_state()
+        state.map_data = MapData(map_id=2, rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+
+        await vac.async_clean_segments(["11"])
+
+        assert state.has_assumed_robot_clean
+
+    async def test_rejected_room_clean_raises_service_error(self) -> None:
+        """Rejected clean/start_clean responses fail the HA service call."""
+        state = _docked_state()
+        state.map_data = MapData(map_id=2, rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+        )
+
+        with pytest.raises(HomeAssistantError, match="Narwal room clean failed"):
+            await vac.async_clean_segments(["11"])
+
+    async def test_room_clean_waits_for_dock_action_lock(self) -> None:
+        """Robot starts cannot validate against the same idle snapshot as dock tasks."""
+        state = _docked_state()
+        state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=MagicMock(result_code=0, success=True)
+        )
+        await vac.coordinator.dock_action_lock.acquire()
+
+        task = asyncio.create_task(vac.async_clean_segments(["11"]))
+        await asyncio.sleep(0)
+
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+        vac.coordinator.dock_action_lock.release()
+        await task
+        vac.coordinator.client.start_rooms.assert_awaited_once()
+
+    async def test_non_numeric_segment_id_raises(self) -> None:
+        state = _docked_state()
+        state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(Exception, match="numeric"):
+            await vac.async_clean_segments(["kitchen"])
+
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+
+    async def test_unknown_segment_id_raises(self) -> None:
+        state = _docked_state()
+        state.map_data = MapData(rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(Exception, match="Unknown Narwal room ID"):
+            await vac.async_clean_segments(["99"])
+
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+
+    async def test_segment_validation_refreshes_a_stale_room_map(self) -> None:
+        """A room added since startup is validated against a fresh map."""
+        state = _docked_state()
+        state.map_data = MapData(map_id=2, rooms=[RoomInfo(room_id=11)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+
+        async def refresh_map() -> MapData:
+            state.map_data = MapData(map_id=2, rooms=[RoomInfo(room_id=12)])
+            return state.map_data
+
+        vac.coordinator.client.get_map = AsyncMock(side_effect=refresh_map)
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        await vac.async_clean_segments(["12"])
+
+        vac.coordinator.client.get_map.assert_awaited_once()
+        vac.coordinator.client.start_rooms.assert_awaited_once()
+
+    async def test_empty_cached_room_table_defers_validation_to_client(self) -> None:
+        """A payloadless cached map must not reject every known HA segment."""
+        state = _docked_state()
+        state.map_data = MapData()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        await vac.async_clean_segments(["11"])
+
+        vac.coordinator.client.start_rooms.assert_awaited_once()
+
+
+class TestDockTaskRobotActionGates:
+    """Dock work must not leak unsafe robot controls through the vacuum."""
+
+    @staticmethod
+    def _active_dock_vacuum() -> NarwalVacuum:
+        state = _docked_state()
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        vac = _make_vacuum(state)
+        vac.coordinator.client.robot_awake = True
+        return vac
+
+    def test_active_dock_task_hides_robot_actions(self) -> None:
+        vac = self._active_dock_vacuum()
+
+        assert not vac.supported_features & VacuumEntityFeature.START
+        assert not vac.supported_features & VacuumEntityFeature.STOP
+        assert not vac.supported_features & VacuumEntityFeature.PAUSE
+        assert not vac.supported_features & VacuumEntityFeature.RETURN_HOME
+        assert not vac.supported_features & VacuumEntityFeature.LOCATE
+        assert not vac.supported_features & VacuumEntityFeature.CLEAN_AREA
+
+    @pytest.mark.parametrize(
+        ("method_name", "client_method"),
+        (
+            ("async_pause", "pause"),
+            ("async_return_to_base", "return_to_base"),
+            ("async_locate", "locate"),
+        ),
+    )
+    async def test_active_dock_task_rejects_direct_robot_action(
+        self,
+        method_name: str,
+        client_method: str,
+    ) -> None:
+        vac = self._active_dock_vacuum()
+        command = AsyncMock()
+        setattr(vac.coordinator.client, client_method, command)
+
+        with pytest.raises(HomeAssistantError, match="Narwal dock task is active"):
+            await getattr(vac, method_name)()
+
+        command.assert_not_awaited()
 
 
 class TestCheckSegmentChanges:
@@ -256,33 +461,36 @@ class TestCheckSegmentChanges:
 class TestAsyncStartWholeHouse:
     """async_start runs a whole-house clean via start_rooms(all rooms), not the saved plan."""
 
-    async def test_enumerates_all_rooms(self) -> None:
+    async def test_enumerates_all_rooms(self, caplog) -> None:
         """Whole-house start passes every room id to clean/start_clean, skipping plan/start."""
-        state = NarwalState()
+        state = _docked_state()
         state.map_data = MapData(map_id=2, rooms=[
             RoomInfo(room_id=1), RoomInfo(room_id=2), RoomInfo(room_id=0),  # 0 filtered
         ])
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.start_rooms = AsyncMock(
-            return_value=MagicMock(result_code=1, success=True)
+            return_value=CommandResponse(result_code=0)
         )
         vac.coordinator.client.start = AsyncMock()
 
-        await vac.async_start()
+        with caplog.at_level(logging.WARNING, logger="custom_components.narwal.vacuum"):
+            await vac.async_start()
 
         vac.coordinator.client.start_rooms.assert_awaited_once()
         assert vac.coordinator.client.start_rooms.await_args.args[0] == [1, 2]
         vac.coordinator.client.start.assert_not_called()
+        assert "Start command was rejected" not in caplog.text
+        assert state.has_assumed_robot_clean
 
     async def test_falls_back_to_saved_plan_without_map(self) -> None:
         """With no map rooms available, falls back to the saved-plan start()."""
-        state = NarwalState()  # no map_data
+        state = _docked_state()  # no map_data
         vac = _make_vacuum(state=state)
         vac.coordinator.client.robot_awake = True
         vac.coordinator.client.get_map = AsyncMock()  # does not populate map_data
         vac.coordinator.client.start = AsyncMock(
-            return_value=MagicMock(result_code=1, success=True)
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
         )
         vac.coordinator.client.start_rooms = AsyncMock()
 
@@ -290,3 +498,83 @@ class TestAsyncStartWholeHouse:
 
         vac.coordinator.client.start.assert_awaited_once()
         vac.coordinator.client.start_rooms.assert_not_called()
+
+    async def test_rejected_whole_house_start_raises_service_error(self) -> None:
+        """Rejected whole-house starts fail the HA service call."""
+        state = _docked_state()
+        state.map_data = MapData(map_id=2, rooms=[RoomInfo(room_id=1)])
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+        )
+
+        with pytest.raises(HomeAssistantError, match="Narwal start command failed"):
+            await vac.async_start()
+
+
+class TestAsyncStop:
+    """Tests for stop routing between robot and dock task contexts."""
+
+    async def test_stop_routes_dock_only_task_through_dock_policy(self) -> None:
+        state = NarwalState(working_status=WorkingStatus.DOCKED)
+        state.dock_presence = 6
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+
+        await vac.async_stop()
+
+        vac.coordinator.client.stop.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_awaited_once_with()
+
+    async def test_stop_rejects_ambiguous_dock_only_task(self) -> None:
+        state = NarwalState(working_status=WorkingStatus.DOCKED)
+        state.dock_presence = 6
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock()
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        with pytest.raises(HomeAssistantError, match="cannot be stopped safely"):
+            await vac.async_stop()
+
+        vac.coordinator.client.stop.assert_not_awaited()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_stop_preserves_robot_stop_during_unmapped_dock_activity(self) -> None:
+        """An unmapped dock phase must not hide stop for a real robot clean."""
+        state = NarwalState(working_status=WorkingStatus.CLEANING)
+        state.dock_activity = 99
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.stop = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+        vac.coordinator.client.stop_dock_task = AsyncMock()
+
+        await vac.async_stop()
+
+        vac.coordinator.client.stop.assert_awaited_once()
+        vac.coordinator.client.stop_dock_task.assert_not_awaited()

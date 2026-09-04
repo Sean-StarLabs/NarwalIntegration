@@ -8,6 +8,18 @@ on:
 
 permissions: {}
 
+# Supersede in-flight runs when a pull request is pushed again. A contributor
+# rebasing a stacked series re-pushes every branch in it, which previously ran
+# the full matrix to completion for each intermediate state -- 38 runs across
+# five branches in one morning, and a notification for every one.
+#
+# Scoped to pull_request only. Pushes to master are never cancelled, because
+# releases are gated on an observed successful run for the exact commit being
+# tagged, and a cancelled run would break that check.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   validate-hacs:
     name: HACS Validation

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import random
 import time
@@ -13,6 +14,7 @@ import websockets
 import websockets.exceptions
 
 from .const import (
+    ACTIVE_CLEANING_STATUSES,
     BROADCAST_STALE_TIMEOUT,
     COMMAND_RESPONSE_TIMEOUT,
     DEFAULT_PORT,
@@ -28,7 +30,9 @@ from .const import (
     TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_CANCEL,
     TOPIC_CMD_CLEAN_TASK,
+    TOPIC_CMD_DRY_DUST_BAG,
     TOPIC_CMD_DRY_MOP,
+    TOPIC_CMD_DRY_STATION_BAG,
     TOPIC_CMD_DUST_GATHERING,
     TOPIC_CMD_EASY_CLEAN,
     TOPIC_CMD_FORCE_END,
@@ -50,6 +54,7 @@ from .const import (
     TOPIC_CMD_SET_MOP_HUMIDITY,
     TOPIC_CMD_TAKE_PICTURE,
     TOPIC_CMD_WASH_MOP,
+    TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
     WAKE_TIMEOUT,
     AmbientLightCtrlType,
@@ -60,7 +65,18 @@ from .const import (
     WorkingStatus,
     WorkMode,
 )
-from .models import CommandResponse, DeviceInfo, MapData, MapDisplayData, NarwalState
+from .models import (
+    DOCK_TASK_DRY_DOCK_BAG,
+    DOCK_TASK_DRY_DUST_BIN,
+    DOCK_TASK_DRY_MOP,
+    DOCK_TASK_EMPTY_DUSTBIN,
+    DOCK_TASK_WASH_MOP,
+    CommandResponse,
+    DeviceInfo,
+    MapData,
+    MapDisplayData,
+    NarwalState,
+)
 from .protocol import (
     PROTOBUF_FIELD5_TAG,
     NarwalMessage,
@@ -78,6 +94,61 @@ _STALE_DOCK_BASE_STATUSES = {
     WorkingStatus.CHARGED,
     WorkingStatus.DOCKED_V2,
 }
+
+_DOCK_TASK_REFRESH_DELAY = 6.0
+_DOCK_TASK_IDENTIFY_ATTEMPTS = 4
+_DOCK_TASK_IDENTIFY_DELAY = 1.5
+_DOCK_TASK_FORCE_END_PAYLOADS = {
+    # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
+    # with ParallelTaskType.DRY_STATION_BAG to stop dock-bag drying.
+    DOCK_TASK_DRY_DOCK_BAG: b"\x08\x01",
+    # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
+    # with ParallelTaskType.DRY_BAG to stop robot dust-bin drying.
+    DOCK_TASK_DRY_DUST_BIN: b"\x08\x05",
+}
+
+
+def _accepted_response(response: CommandResponse) -> bool:
+    """Return true for response codes that mean the robot accepted a command."""
+    return response.accepted
+
+
+def _clean_session_context(state: NarwalState) -> bool:
+    """Return true while robot-side work or its accepted-command guard is active."""
+    return (
+        state.is_cleaning
+        or state.has_assumed_robot_clean
+        or state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.working_status == WorkingStatus.TASK_COMPLETED
+        or state.has_recent_active_working_status
+        or state.is_returning
+    )
+
+
+def _robot_work_blocks_generic_dock_stop(state: NarwalState) -> bool:
+    """Return true when generic force-end could target robot work, not dock work."""
+    return (
+        state.is_cleaning
+        or state.has_assumed_robot_clean
+        or state.working_status in ACTIVE_CLEANING_STATUSES
+        or state.has_recent_active_working_status
+        or state.is_returning
+    )
+
+
+def _robot_start_blocked(state: NarwalState) -> bool:
+    """Return true when a private guard or dock task blocks a start."""
+    return state.has_assumed_robot_clean or state.blocks_robot_start_for_dock_task
+
+
+def _can_force_end_scoped_dock_task(state: NarwalState, task: str | None) -> bool:
+    """Return true when a typed force-end can safely target a known task."""
+    return task in _DOCK_TASK_FORCE_END_PAYLOADS and task in state.telemetry_dock_task_keys
+
+
+def _has_generic_dock_stop_proof(state: NarwalState) -> bool:
+    """Return true when generic force-end can only target dock-side work."""
+    return state.is_docked and state.has_dock_presence_signal
 
 
 def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStatus | None:
@@ -119,6 +190,49 @@ def _base_status_confirms_docked(
         or int_field(field3, "3") in (1, 6)
         or int_field(field3, "10") == 1
         or int_field(field3, "12") > 0
+    )
+
+
+def _base_status_payload(response: CommandResponse) -> dict[str, Any] | None:
+    """Return the decoded robot_base_status payload from a command response."""
+    if not isinstance(response.data, dict):
+        return None
+    status_data = response.data.get("2")
+    if isinstance(status_data, dict) and status_data:
+        return status_data
+    return None
+
+
+def _has_dock_status_payload(response: CommandResponse) -> bool:
+    """Return true when a response carries the dock/base status submessage."""
+    if not response.accepted:
+        return False
+    status_data = _base_status_payload(response)
+    if status_data is None:
+        return False
+    field3 = status_data.get("3")
+    if isinstance(field3, list):
+        field3 = field3[0] if field3 else None
+    if not isinstance(field3, dict):
+        return False
+    return bool({"1", "2", "3", "7", "10", "12", "18"}.intersection(field3))
+
+
+def _dock_status_confirms_idle(state: NarwalState) -> bool:
+    """Return true when fresh dock status reports no active station task."""
+    return (
+        state.station_activity <= 0
+        and state.dock_activity in (0, 2, 6)
+        and state.has_dock_presence_signal
+        and state.working_status
+        in (
+            WorkingStatus.UNKNOWN,
+            WorkingStatus.STANDBY,
+            WorkingStatus.DOCKED,
+            WorkingStatus.CHARGED,
+            WorkingStatus.DOCKED_V2,
+            WorkingStatus.TASK_COMPLETED,
+        )
     )
 
 
@@ -175,6 +289,12 @@ class NarwalClient:
         self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
         # Lock to prevent concurrent send_command calls from racing on the queue
         self._command_lock = asyncio.Lock()
+        # Lock high-level action preflight through accepted-command reservation.
+        # The lower command lock only serializes wire traffic; this prevents
+        # direct robot and dock commands from validating the same idle snapshot.
+        self._action_lock = asyncio.Lock()
+        self._dock_task_lock = self._action_lock
+        self._robot_start_lock = self._action_lock
 
     def _full_topic(self, short_topic: str) -> str:
         """Build the full topic path."""
@@ -316,7 +436,7 @@ class NarwalClient:
                 data = await asyncio.wait_for(
                     self._ws.recv(), timeout=min(remaining, 2.0)
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 # Re-send wake commands, cycling through prefixes
                 try:
                     await self._ws.send(wake_frames[wake_index % len(wake_frames)])
@@ -397,7 +517,7 @@ class NarwalClient:
             try:
                 await asyncio.wait_for(self._ws.recv(), timeout=0.05)
                 drained += 1
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 break
             except Exception:
                 break
@@ -414,10 +534,8 @@ class NarwalClient:
         for task in (self._heartbeat_task, self._keepalive_task, self._listen_task):
             if task and not task.done():
                 task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError):
                     await task
-                except asyncio.CancelledError:
-                    pass
 
         if self._ws:
             await self._ws.close()
@@ -955,7 +1073,7 @@ class NarwalClient:
                     msg = await asyncio.wait_for(
                         self._response_queue.get(), timeout=timeout
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     raise NarwalCommandError(
                         f"No response for command '{short_topic}' within {timeout}s"
                     ) from None
@@ -1001,7 +1119,7 @@ class NarwalClient:
                 data = await asyncio.wait_for(
                     self._ws.recv(), timeout=min(remaining, 1.0)
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
 
             if not isinstance(data, bytes) or len(data) < 4:
@@ -1098,11 +1216,21 @@ class NarwalClient:
             "start(): no map rooms available; falling back to clean/plan/start, "
             "which re-runs the robot's saved plan rather than cleaning every room"
         )
-        return await self.send_command(
-            TOPIC_CMD_PLAN_START,
-            payload=self._DEFAULT_CLEAN_PAYLOAD,
-            timeout=10.0,
-        )
+        async with self._robot_start_lock:
+            if _robot_start_blocked(self.state):
+                _LOGGER.warning(
+                    "start(): robot or dock guard active (%s); not starting saved plan",
+                    self.state.active_dock_task_keys or "private",
+                )
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            response = await self.send_command(
+                TOPIC_CMD_PLAN_START,
+                payload=self._DEFAULT_CLEAN_PAYLOAD,
+                timeout=10.0,
+            )
+            if _accepted_response(response):
+                self.state.assume_robot_clean()
+            return response
 
     async def start(
         self,
@@ -1125,6 +1253,12 @@ class NarwalClient:
         plan-runner that discards payloads (#66), so it survives only as a
         last-resort fallback when no map rooms are known.
         """
+        if _robot_start_blocked(self.state):
+            _LOGGER.warning(
+                "start: robot or dock task active (%s); not starting whole-house clean",
+                self.state.active_dock_task_keys or "unmapped",
+            )
+            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
         room_ids = await self._all_room_ids()
         if not room_ids:
             return await self._start_saved_plan()
@@ -1349,44 +1483,63 @@ class NarwalClient:
             # No rooms selected — do not call start(), which would resolve the
             # full room list and come straight back here.
             return await self._start_saved_plan()
-
-        map_data = self.state.map_data
-        if not map_data or not map_data.map_id:
-            map_data = await self.get_map()
-        map_id = map_data.map_id if map_data else 0
-        if not map_id:
-            _LOGGER.warning(
-                "start_rooms: no active map id available; cannot start room clean"
-            )
-            return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
-
-        payload = self._build_start_clean_payload(
-            room_ids, map_id, work_mode=work_mode, fan=fan, water=water,
-            mop_strength=mop_strength, passes=passes,
-        )
-        resp = await self.send_command(
-            TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,
-        )
-        for _ in range(3):
-            if resp.result_code != CommandResult.NOT_READY:
-                break
-            if not self.state.is_docked:
+        async with self._robot_start_lock:
+            if _robot_start_blocked(self.state):
                 _LOGGER.warning(
-                    "start_rooms: robot not docked (status=%s); clean/start_clean "
-                    "requires the robot on the dock",
-                    self.state.working_status.name,
+                    "start_rooms: robot or dock guard active (%s); not starting room clean",
+                    self.state.active_dock_task_keys or "private",
                 )
-                break
-            _LOGGER.info("start_rooms: robot docking/settling, retrying clean/start_clean")
-            await asyncio.sleep(3.0)
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+
+            map_data = self.state.map_data
+            if not map_data or not map_data.map_id:
+                map_data = await self.get_map()
+            map_id = map_data.map_id if map_data else 0
+            if not map_id:
+                _LOGGER.warning(
+                    "start_rooms: no active map id available; cannot start room clean"
+                )
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+
+            payload = self._build_start_clean_payload(
+                room_ids, map_id, work_mode=work_mode, fan=fan, water=water,
+                mop_strength=mop_strength, passes=passes,
+            )
             resp = await self.send_command(
                 TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,
             )
-        return resp
+            for _ in range(3):
+                if resp.result_code != CommandResult.NOT_READY:
+                    break
+                if not self.state.is_docked:
+                    _LOGGER.warning(
+                        "start_rooms: robot not docked (status=%s); clean/start_clean "
+                        "requires the robot on the dock",
+                        self.state.working_status.name,
+                    )
+                    break
+                _LOGGER.info("start_rooms: robot docking/settling, retrying clean/start_clean")
+                await asyncio.sleep(3.0)
+                resp = await self.send_command(
+                    TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,
+                )
+            if _accepted_response(resp):
+                self.state.assume_robot_clean()
+            return resp
 
     async def start_easy_clean(self) -> CommandResponse:
         """Start quick/easy clean."""
-        return await self.send_command(TOPIC_CMD_EASY_CLEAN)
+        async with self._robot_start_lock:
+            if _robot_start_blocked(self.state):
+                _LOGGER.warning(
+                    "start_easy_clean: robot or dock guard active (%s); not starting quick clean",
+                    self.state.active_dock_task_keys or "private",
+                )
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            response = await self.send_command(TOPIC_CMD_EASY_CLEAN)
+            if _accepted_response(response):
+                self.state.assume_robot_clean()
+            return response
 
     async def pause(self) -> CommandResponse:
         """Pause current task."""
@@ -1407,6 +1560,122 @@ class NarwalClient:
     async def cancel(self) -> CommandResponse:
         """Cancel current task."""
         return await self.send_command(TOPIC_CMD_CANCEL)
+
+    async def _refresh_after_dock_stop(self) -> bool:
+        """Refresh robot state after a dock stop command."""
+        try:
+            response = await self.get_status(
+                full_update=not self.state.has_recent_active_working_status
+            )
+        except (NarwalCommandError, NarwalConnectionError) as err:
+            _LOGGER.debug("Status refresh after dock stop failed: %s", err)
+            return False
+        return _has_dock_status_payload(response)
+
+    def _should_wait_for_scoped_dock_task(self, task: str | None) -> bool:
+        """Return true when a typed scoped-stop target may still be settling."""
+        if task not in _DOCK_TASK_FORCE_END_PAYLOADS:
+            return False
+        if task in self.state.telemetry_dock_task_keys:
+            return False
+        if task == self.state.assumed_active_dock_task:
+            return True
+        if self.state.has_unmapped_active_dock_task:
+            return True
+        if task == DOCK_TASK_DRY_DUST_BIN and self.state.dock_activity == 6:
+            return True
+        return self.state.station_activity == 4 and not self.state.active_dock_drying_tasks
+
+    async def _refresh_before_dock_stop(
+        self,
+        task: str | None,
+    ) -> CommandResponse:
+        """Refresh dock state, allowing typed scoped-stop telemetry to settle."""
+        response = await self.get_status(
+            full_update=not self.state.has_recent_active_working_status
+        )
+        if not response.accepted or not _has_dock_status_payload(response):
+            return response
+        if not self._should_wait_for_scoped_dock_task(task):
+            return response
+
+        for _ in range(_DOCK_TASK_IDENTIFY_ATTEMPTS):
+            await asyncio.sleep(_DOCK_TASK_IDENTIFY_DELAY)
+            response = await self.get_status(
+                full_update=not self.state.has_recent_active_working_status
+            )
+            if not response.accepted or not _has_dock_status_payload(response):
+                return response
+            if not self._should_wait_for_scoped_dock_task(task):
+                return response
+        return response
+
+    async def stop_dock_task(self, task: str | None = None) -> CommandResponse:
+        """Stop the active dock task without targeting a different task."""
+        async with self._dock_task_lock:
+            if (
+                self.state.has_unmapped_active_dock_task
+                and task not in _DOCK_TASK_FORCE_END_PAYLOADS
+                and not _can_force_end_scoped_dock_task(self.state, task)
+            ):
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            refresh = await self._refresh_before_dock_stop(task)
+            if not refresh.accepted:
+                return refresh
+            if not _has_dock_status_payload(refresh):
+                return CommandResponse(
+                    result_code=CommandResult.NOT_READY,
+                    data=refresh.data,
+                    raw_payload=refresh.raw_payload,
+                )
+            if self.state.has_unmapped_active_dock_task and not (
+                _can_force_end_scoped_dock_task(self.state, task)
+            ):
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            active_tasks = self.state.active_dock_task_keys
+            if task is not None and task not in active_tasks:
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            if task is None and len(active_tasks) != 1:
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            active_task = task or (active_tasks[0] if active_tasks else None)
+            if active_task is None:
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            if (
+                _robot_work_blocks_generic_dock_stop(self.state)
+                and active_task not in _DOCK_TASK_FORCE_END_PAYLOADS
+            ):
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+
+            payload = _DOCK_TASK_FORCE_END_PAYLOADS.get(active_task)
+            if payload is None:
+                if active_task == DOCK_TASK_DRY_DUST_BIN:
+                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                if not _has_generic_dock_stop_proof(self.state):
+                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                if len(active_tasks) > 1:
+                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                response = await self.stop(timeout=15.0)
+            else:
+                if active_task not in self.state.telemetry_dock_task_keys:
+                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                response = await self.send_command(
+                    TOPIC_CMD_FORCE_END,
+                    payload=payload,
+                    timeout=15.0,
+                )
+
+            await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
+            refreshed = await self._refresh_after_dock_stop()
+            if _accepted_response(response):
+                self.state.clear_assumed_dock_task(active_task)
+                # Scoped force-end acknowledges the exact drying task. Clear its
+                # cached timer after a fresh dock response instead of waiting for
+                # the old timer snapshot to expire.
+                if refreshed and (
+                    payload is not None or _dock_status_confirms_idle(self.state)
+                ):
+                    self.state.clear_dock_drying_task(active_task)
+            return response
 
     async def return_to_base(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
         """Return to charging dock."""
@@ -1434,15 +1703,81 @@ class NarwalClient:
 
     async def wash_mop(self) -> CommandResponse:
         """Wash the mop pads at the station."""
-        return await self.send_command(TOPIC_CMD_WASH_MOP)
+        return await self._start_dock_task(DOCK_TASK_WASH_MOP, TOPIC_CMD_WASH_MOP)
+
+    async def wash_mop_by_robot_status(self) -> CommandResponse:
+        """Wash mop pads using the app's status-gated station command."""
+        return await self._start_dock_task(
+            DOCK_TASK_WASH_MOP,
+            TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
+        )
 
     async def dry_mop(self) -> CommandResponse:
         """Dry the mop pads at the station."""
-        return await self.send_command(TOPIC_CMD_DRY_MOP)
+        return await self._start_dock_task(DOCK_TASK_DRY_MOP, TOPIC_CMD_DRY_MOP)
+
+    async def dry_dust_bag(self) -> CommandResponse:
+        """Dry or disinfect the robot dust bin at the station."""
+        return await self._start_dock_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            TOPIC_CMD_DRY_DUST_BAG,
+        )
+
+    async def dry_station_bag(self) -> CommandResponse:
+        """Dry or disinfect the dock dust bag at the station."""
+        return await self._start_dock_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            TOPIC_CMD_DRY_STATION_BAG,
+        )
 
     async def empty_dustbin(self) -> CommandResponse:
         """Empty the dustbin at the station."""
-        return await self.send_command(TOPIC_CMD_DUST_GATHERING)
+        return await self._start_dock_task(
+            DOCK_TASK_EMPTY_DUSTBIN,
+            TOPIC_CMD_DUST_GATHERING,
+        )
+
+    async def _start_dock_task(self, task: str, topic: str) -> CommandResponse:
+        """Start one dock task after atomically validating reported state."""
+        async with self._dock_task_lock:
+            if not self._can_start_dock_task(task):
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            refresh = await self.get_status(
+                full_update=not self.state.has_recent_active_working_status
+            )
+            if not refresh.accepted:
+                return refresh
+            if not _has_dock_status_payload(refresh):
+                return CommandResponse(
+                    result_code=CommandResult.NOT_READY,
+                    data=refresh.data,
+                    raw_payload=refresh.raw_payload,
+                )
+            if not self._can_start_dock_task(task):
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            response = await self.send_command(topic)
+            if _accepted_response(response):
+                self.state.assume_dock_task(task)
+            return response
+
+    def _can_start_dock_task(self, task: str) -> bool:
+        """Return true when reported state permits a new dock-side command."""
+        state = self.state
+        if state.has_error or state.working_status in (
+            WorkingStatus.ERROR,
+            WorkingStatus.UNKNOWN,
+        ):
+            return False
+        if not state.is_docked or _clean_session_context(state):
+            return False
+        if state.has_unmapped_active_dock_task:
+            return False
+        if state.assumed_active_dock_task is not None:
+            return False
+        active_tasks = set(state.active_dock_task_keys)
+        if task in active_tasks:
+            return False
+        return not active_tasks
 
     # --- Query commands ---
 
@@ -1489,8 +1824,8 @@ class NarwalClient:
                 working_status in the response may be stale.
         """
         resp = await self.send_command(TOPIC_CMD_GET_BASE_STATUS)
-        status_data = resp.data.get("2", {})
-        if status_data:
+        status_data = _base_status_payload(resp)
+        if status_data is not None:
             # Log the whole field map, not a chosen few: field-level bug reports
             # (wrong tank state, a value we don't map) are unanswerable from a log
             # that omits the field in question — see #77.
@@ -1507,6 +1842,12 @@ class NarwalClient:
                 self.state.update_battery_from_base_status(status_data)
         else:
             _LOGGER.debug("get_status response has no field 2; keys: %s", list(resp.data.keys()))
+            if resp.accepted:
+                return CommandResponse(
+                    result_code=CommandResult.NOT_READY,
+                    data=resp.data,
+                    raw_payload=resp.raw_payload,
+                )
         return resp
 
     async def get_current_task(self) -> CommandResponse:

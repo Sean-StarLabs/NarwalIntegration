@@ -15,12 +15,11 @@ from homeassistant.const import PERCENTAGE, EntityCategory, UnitOfArea, UnitOfTi
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from .narwal_client import NarwalState
-
 from . import NarwalConfigEntry
 from .const import TASK_RESULT_OPTIONS
 from .coordinator import NarwalCoordinator
-from .entity import NarwalEntity
+from .entity import NarwalDockEntity, NarwalEntity
+from .narwal_client import NarwalState
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -28,6 +27,7 @@ class NarwalSensorEntityDescription(SensorEntityDescription):
     """Describes a Narwal sensor entity."""
 
     value_fn: Callable[[NarwalState], float | str | None]
+    dock_device: bool = False
 
 
 SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
@@ -67,6 +67,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         # base_status field 35 stationBagHealthScore (float32 %); present only with a station.
         value_fn=lambda state: round(state.dust_bag_health, 1)
         if "35" in state.raw_base_status
@@ -78,6 +79,7 @@ SENSOR_DESCRIPTIONS: tuple[NarwalSensorEntityDescription, ...] = (
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         entity_category=EntityCategory.DIAGNOSTIC,
+        dock_device=True,
         # base_status field 41 heavyDetergentRemainPercent.
         value_fn=lambda state: state.detergent_remaining
         if "41" in state.raw_base_status
@@ -117,7 +119,12 @@ async def async_setup_entry(
     """Set up Narwal sensor entities."""
     coordinator = entry.runtime_data
     entities: list[SensorEntity] = [
-        NarwalSensor(coordinator, description) for description in SENSOR_DESCRIPTIONS
+        (
+            NarwalDockSensor(coordinator, description)
+            if description.dock_device
+            else NarwalSensor(coordinator, description)
+        )
+        for description in SENSOR_DESCRIPTIONS
     ]
     entities.append(NarwalChargingStateSensor(coordinator))
     async_add_entities(entities)
@@ -134,6 +141,31 @@ class NarwalSensor(NarwalEntity, SensorEntity):
         description: NarwalSensorEntityDescription,
     ) -> None:
         """Initialize the sensor."""
+        super().__init__(coordinator)
+        self.entity_description = description
+        device_id = coordinator.config_entry.data["device_id"]
+        self._attr_unique_id = f"{device_id}_{description.key}"
+
+    @property
+    def native_value(self) -> float | str | None:
+        """Return the sensor value."""
+        state = self.coordinator.data
+        if state is None:
+            return None
+        return self.entity_description.value_fn(state)
+
+
+class NarwalDockSensor(NarwalDockEntity, SensorEntity):
+    """A description-driven Narwal sensor assigned to the dock device."""
+
+    entity_description: NarwalSensorEntityDescription
+
+    def __init__(
+        self,
+        coordinator: NarwalCoordinator,
+        description: NarwalSensorEntityDescription,
+    ) -> None:
+        """Initialize the dock sensor."""
         super().__init__(coordinator)
         self.entity_description = description
         device_id = coordinator.config_entry.data["device_id"]

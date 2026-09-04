@@ -35,11 +35,14 @@ def _string_constants() -> dict[str, str]:
     tree = ast.parse((PACKAGE / "const.py").read_text(encoding="utf-8"))
     out: dict[str, str] = {}
     for node in tree.body:
-        if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant):
-            if isinstance(node.value.value, str):
-                for target in node.targets:
-                    if isinstance(target, ast.Name):
-                        out[target.id] = node.value.value
+        if (
+            isinstance(node, ast.Assign)
+            and isinstance(node.value, ast.Constant)
+            and isinstance(node.value.value, str)
+        ):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    out[target.id] = node.value.value
     return out
 
 
@@ -61,9 +64,12 @@ def _translation_keys(module: pathlib.Path, consts: dict[str, str]) -> set[str]:
                 keys.add(key)
         elif isinstance(node, ast.Assign):
             for target in node.targets:
-                if isinstance(target, ast.Name) and target.id == "_attr_translation_key":
-                    if (key := resolve(node.value)) is not None:
-                        keys.add(key)
+                if (
+                    isinstance(target, ast.Name)
+                    and target.id == "_attr_translation_key"
+                    and (key := resolve(node.value)) is not None
+                ):
+                    keys.add(key)
     return keys
 
 
