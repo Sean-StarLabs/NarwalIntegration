@@ -438,6 +438,24 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 Use the [issue templates](https://github.com/sjmotew/NarwalIntegration/issues/new/choose) — they collect your HA version, model, and debug logs for faster diagnosis.
 
+### Attach diagnostics
+
+**Settings → Devices & Services → Narwal → ⋮ next to your device → Download diagnostics.**
+
+Attaching that file answers most of what would otherwise be asked one question at a time. It contains:
+
+| Section | What it settles |
+|---------|-----------------|
+| `model_resolution` | Your robot's product key, and **whether this build recognises it at all** |
+| `device` | Firmware version, and the six-character device suffix that matches your logs |
+| `connection` | Whether the robot is connected, awake, and broadcasting |
+| `feature_list` | What the robot says it supports — or why it refused to answer |
+| `raw_base_status` | The undecoded protobuf fields new model support is built from |
+
+**Redacted automatically:** your IP address, full device ID, and Narwal account UUID. The **product key is deliberately kept** — it identifies a model, not a person, and it is usually the answer.
+
+If your robot reports a product key this integration doesn't know, say so in the issue — that alone is often a one-line fix.
+
 ## Protocol Documentation
 
 [**docs/PROTOCOL.md**](docs/PROTOCOL.md) documents the local WebSocket protocol — frame format, topic reference, message field maps, and the open questions. It also records the assumptions this project got wrong and how they were caught, which is the part most likely to save someone else time.

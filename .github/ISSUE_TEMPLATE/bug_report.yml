@@ -55,6 +55,23 @@ body:
       required: true
 
   - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: |
+        **The single most useful thing you can attach.** Settings → Devices & Services →
+        Narwal → the three dots next to your device → **Download diagnostics**, then drag
+        the file into this box.
+
+        It carries your robot's product key, firmware, feature list and raw status fields —
+        which is most of what we would otherwise ask you for one question at a time. Your
+        IP address, device ID and Narwal account UUID are redacted automatically; open the
+        file and check before posting if you would rather be sure.
+      placeholder: "Drag the downloaded .json file here, or paste its contents."
+    validations:
+      required: false
+
+  - type: textarea
     id: port_scan
     attributes:
       label: Port Scan Results

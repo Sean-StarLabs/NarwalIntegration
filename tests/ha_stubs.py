@@ -184,6 +184,29 @@ def install() -> None:
     # homeassistant.components.*
     ha_comp = _mod("homeassistant.components", ha)
 
+    # homeassistant.components.diagnostics — async_redact_data is implemented
+    # for real rather than mocked, so tests assert on actual redaction instead
+    # of on a call being made.
+    ha_diag = _mod("homeassistant.components.diagnostics", ha_comp)
+    REDACTED = "**REDACTED**"
+
+    def _async_redact_data(data, to_redact):
+        """Recursively replace values whose key is in to_redact."""
+        if not isinstance(data, (dict, list)):
+            return data
+        if isinstance(data, list):
+            return [_async_redact_data(item, to_redact) for item in data]
+        redacted = {}
+        for key, value in data.items():
+            if key in to_redact:
+                redacted[key] = REDACTED if value is not None else None
+            else:
+                redacted[key] = _async_redact_data(value, to_redact)
+        return redacted
+
+    ha_diag.async_redact_data = _async_redact_data  # type: ignore[attr-defined]
+    ha_diag.REDACTED = REDACTED  # type: ignore[attr-defined]
+
     ha_vac = _mod("homeassistant.components.vacuum", ha_comp)
     class _Segment:
         """Stub for homeassistant.components.vacuum.Segment."""
