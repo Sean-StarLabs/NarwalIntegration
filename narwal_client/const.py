@@ -90,7 +90,10 @@ TOPIC_CMD_CANCEL = "task/cancel"
 TOPIC_CMD_AMBIENT_LIGHT_CTRL = "supply/ambient_light_ctrl"
 TOPIC_CMD_RECALL = "supply/recall"
 TOPIC_CMD_WASH_MOP = "supply/wash_mop"
+TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS = "supply/wash_mop_by_robot_status"
 TOPIC_CMD_DRY_MOP = "supply/dry_mop"
+TOPIC_CMD_DRY_DUST_BAG = "supply/dry_dust_bag"
+TOPIC_CMD_DRY_STATION_BAG = "supply/dry_station_bag"
 TOPIC_CMD_DUST_GATHERING = "supply/dust_gathering"
 
 # Cleaning (Pita protocol — correct for AX12)
