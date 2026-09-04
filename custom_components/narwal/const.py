@@ -32,6 +32,25 @@ NARWAL_MODELS: dict[str, str] = {
     "Other / Auto-detect": "auto",
 }
 
+# Label pre-selected in the model selector. Discovery carries no model
+# information, so any specific model shown there is a guess presented as a
+# fact; auto-detect reads the real key off the robot and names the entry from
+# that (#81).
+MODEL_AUTO_LABEL = "Other / Auto-detect"
+
+# Product keys that belong to a model already in the selector but are not the
+# key the selector sends. One model can ship several keys across hardware
+# revisions and regions, and a key missing here resolves to no label at all --
+# which is how a Flow 2 ended up named "Narwal Flow" (#81).
+PRODUCT_KEY_ALIASES: dict[str, str] = {
+    # Flow 2 has been observed reporting three distinct keys. QxMSPG6VSO is the
+    # one the selector sends; these two are equally real.
+    "iSuVlI1If2": "Narwal Flow 2",
+    # Reported by @DeNo64 (#81) on firmware v01.09.08.00 -- fully working, 28
+    # entities, but unnamed because the key was unknown.
+    "mkbqaprvrb": "Narwal Flow 2",
+}
+
 # Reverse of NARWAL_MODELS, for naming an entry added through Other / Auto-detect.
 # Auto-detect resolves the real product key over the WebSocket, so an entry that
 # would otherwise be titled "Narwal CGjuB6dzq7" can carry the model's own name
@@ -40,7 +59,7 @@ PRODUCT_KEY_TO_MODEL: dict[str, str] = {
     key: label
     for label, key in reversed(list(NARWAL_MODELS.items()))
     if key != "auto"
-}
+} | PRODUCT_KEY_ALIASES
 
 
 def model_label_for_product_key(product_key: str | None) -> str | None:
@@ -60,7 +79,7 @@ def configured_model_name(data: dict) -> str:
     model = data.get(CONF_MODEL)
     if not model or model == "Narwal Flow":
         return MODEL
-    if model == "Other / Auto-detect":
+    if model == MODEL_AUTO_LABEL:
         product_key = data.get(CONF_PRODUCT_KEY)
         return f"Unknown ({product_key})" if product_key else "Unknown"
     return model.removeprefix("Narwal ")
@@ -97,7 +116,15 @@ MAP_ZOOM_DEFAULT = 1.0  # renderer clamps to 1.0–2.0
 
 CONF_DOCK_LIGHT_SUPPORTED = "dock_light_supported"
 
-DOCK_LIGHT_PRODUCT_KEYS = {"QxMSPG6VSO", "iSuVlI1If2"}
+def product_keys_for_model(label: str) -> set[str]:
+    """Every product key known to belong to one selector model."""
+    return {key for key, name in PRODUCT_KEY_TO_MODEL.items() if name == label}
+
+
+# Derived rather than listed: the dock light is a property of the Flow 2, not
+# of one of its keys. Listing them meant a Flow 2 reporting a key nobody had
+# added lost a working feature, silently (#81).
+DOCK_LIGHT_PRODUCT_KEYS = product_keys_for_model("Narwal Flow 2")
 
 
 def is_dock_light_supported(data: dict, options: dict | None = None) -> bool:

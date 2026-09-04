@@ -25,6 +25,10 @@ KNOWN_PRODUCT_KEYS = [
     "QoEsI5qYXO",  # AX12 — Narwal Flow (primary, confirmed)
     "QxMSPG6VSO",  # Narwal Flow 2 (confirmed working via local WebSocket)
     "iSuVlI1If2",  # Narwal Flow 2 alternate key (confirmed working locally)
+    # Third Flow 2 key, reported by @DeNo64 (#81) on firmware v01.09.08.00.
+    # Fully working over the local WebSocket -- 28 entities -- but the entry was
+    # left unnamed until the key was added here.
+    "mkbqaprvrb",  # Narwal Flow 2 (confirmed working via local WebSocket)
     "DrzDKQ0MU8",   # CX4  — Freo Z10 Ultra (confirmed by @irekkl-maker)
     # AX26 — sold as both "Freo Z10 Turbo" (@romedtino, #40) and "Freo Z10 Pro"
     # (@shin906710, #70); same key, same FW v01.02.00.15, so one platform.

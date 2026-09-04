@@ -16,9 +16,14 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.config_flow import NarwalConfigFlow  # noqa: E402
+from custom_components.narwal.config_flow import (  # noqa: E402
+    MODEL_DEFAULT,
+    MODEL_OPTIONS,
+    NarwalConfigFlow,
+)
 from custom_components.narwal.const import (  # noqa: E402
     CONF_MODEL,
+    MODEL_AUTO_LABEL,
     NARWAL_MODELS,
     NO_BROADCAST_PRODUCT_KEYS,
 )
@@ -263,6 +268,62 @@ class TestNarwalConfigFlow:
         entry_kwargs = flow.async_create_entry.call_args.kwargs
         assert entry_kwargs["data"][CONF_MODEL] == "Narwal Flow"
         assert entry_kwargs["title"] == "Narwal Flow"
+
+    async def test_alternate_flow2_key_is_still_named_flow_2(self) -> None:
+        """A model's other product keys name the entry too (#81).
+
+        @DeNo64's Flow 2 reports `mkbqaprvrb`, not the `QxMSPG6VSO` the
+        selector sends. The label lookup was built by reversing the selector
+        dict, which holds exactly one key per model, so every other key a model
+        ships resolved to no label at all. His robot worked perfectly -- 28
+        entities on firmware v01.09.08.00 -- and was called "Narwal Flow"
+        purely because its key was absent.
+
+        This is why v1.0.7 looked like it had failed: the label did follow the
+        resolved key, and the resolved key had no label.
+        """
+        flow = self._make_flow()
+
+        mock_client = AsyncMock()
+        mock_client.topic_prefix = "/mkbqaprvrb"
+        mock_device_info = MagicMock()
+        mock_device_info.device_id = "deno64_device"
+        mock_client.get_device_info.return_value = mock_device_info
+
+        with patch(
+            "custom_components.narwal.config_flow.NarwalClient",
+            return_value=mock_client,
+        ):
+            await flow.async_step_user(
+                user_input={
+                    "host": "10.0.0.50",
+                    "port": 9002,
+                    "model": MODEL_AUTO_LABEL,
+                }
+            )
+
+        entry_kwargs = flow.async_create_entry.call_args.kwargs
+        assert entry_kwargs["data"]["product_key"] == "mkbqaprvrb"
+        assert entry_kwargs["data"][CONF_MODEL] == "Narwal Flow 2"
+        assert entry_kwargs["title"] == "Narwal Flow 2"
+
+    def test_model_selector_default_is_auto_detect_and_selectable(self) -> None:
+        """The pre-selected model must not be a guess (#81).
+
+        Discovery carries no model information, so whichever model sits first
+        in the list is asserted rather than known, and accepting it is the
+        normal path -- that is how a Flow 2 came to be called "Narwal Flow".
+
+        Also pins the default to a real option: the schema validates it with
+        `vol.In(MODEL_OPTIONS)`, so a default that is not in the list makes the
+        form unusable rather than merely wrong. The schema objects themselves
+        cannot be introspected here because ha_stubs replaces voluptuous with a
+        MagicMock; that the flow honours the resolved key is covered by
+        test_alternate_flow2_key_is_still_named_flow_2.
+        """
+        assert MODEL_DEFAULT == MODEL_AUTO_LABEL
+        assert MODEL_DEFAULT in MODEL_OPTIONS
+        assert NARWAL_MODELS[MODEL_DEFAULT] == "auto"
 
     async def test_device_id_step_can_retry_auto_detection(self) -> None:
         """The manual step is not a dead end — it can hand back to auto-detect.
