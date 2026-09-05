@@ -122,6 +122,7 @@ def _clean_session_context(state: NarwalState) -> bool:
         or state.working_status in ACTIVE_CLEANING_STATUSES
         or state.working_status == WorkingStatus.TASK_COMPLETED
         or state.has_recent_active_working_status
+        or state.has_paused_clean_task_context
         or state.is_returning
     )
 
@@ -133,13 +134,20 @@ def _robot_work_blocks_generic_dock_stop(state: NarwalState) -> bool:
         or state.has_assumed_robot_clean
         or state.working_status in ACTIVE_CLEANING_STATUSES
         or state.has_recent_active_working_status
+        or state.has_paused_clean_task_context
         or state.is_returning
     )
 
 
 def _robot_start_blocked(state: NarwalState) -> bool:
-    """Return true when a private guard or dock task blocks a start."""
-    return state.has_assumed_robot_clean or state.blocks_robot_start_for_dock_task
+    """Return true unless fresh state permits dispatching a robot start."""
+    return (
+        state.has_error
+        or state.working_status in (WorkingStatus.UNKNOWN, WorkingStatus.ERROR)
+        or not state.is_docked
+        or _clean_session_context(state)
+        or state.blocks_robot_start_for_dock_task
+    )
 
 
 def _can_force_end_scoped_dock_task(state: NarwalState, task: str | None) -> bool:
@@ -177,33 +185,6 @@ def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStat
         return WorkingStatus(int(field3["1"]))
     except (TypeError, ValueError):
         return None
-
-
-def _base_status_confirms_docked(
-    decoded: dict[str, Any] | object, status: WorkingStatus | None
-) -> bool:
-    """Return true when a terminal status also carries live dock indicators."""
-    if not isinstance(decoded, dict) or status not in _STALE_DOCK_BASE_STATUSES:
-        return False
-
-    field3 = decoded.get("3")
-    if isinstance(field3, list):
-        field3 = field3[0] if field3 else None
-    field3 = field3 if isinstance(field3, dict) else {}
-
-    def int_field(container: dict[str, Any], field: str) -> int:
-        try:
-            return int(container.get(field, 0))
-        except (TypeError, ValueError):
-            return 0
-
-    return (
-        int_field(decoded, "11") >= 2
-        or int_field(decoded, "47") in (1, 3)
-        or int_field(field3, "3") in (1, 6)
-        or int_field(field3, "10") == 1
-        or int_field(field3, "12") > 0
-    )
 
 
 def _base_status_payload(response: CommandResponse) -> dict[str, Any] | None:
@@ -360,7 +341,6 @@ class NarwalClient:
         if (
             self.state.has_recent_active_working_status
             and status in _STALE_DOCK_BASE_STATUSES
-            and not _base_status_confirms_docked(decoded, status)
         ):
             self.state.update_battery_from_base_status(decoded)
             _LOGGER.debug(
@@ -1226,14 +1206,14 @@ class NarwalClient:
         Newer firmware answers SUCCESS there and does nothing, so this path
         fails clearly when no room list is available instead (#69).
         """
+        if not self.connected:
+            raise NarwalConnectionError("Not connected to vacuum")
         if _robot_start_blocked(self.state):
             _LOGGER.warning(
                 "start: robot or dock task active (%s); not starting whole-house clean",
                 self.state.active_dock_task_keys or "unmapped",
             )
             return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
-        if not self.connected:
-            raise NarwalConnectionError("Not connected to vacuum")
         room_ids = await self._all_room_ids()
         if not room_ids:
             _LOGGER.warning("start(): no map rooms available")
@@ -1518,7 +1498,11 @@ class NarwalClient:
 
             map_data = self.state.map_data
             if not map_data or not map_data.map_id:
-                map_data = await self.get_map()
+                try:
+                    map_data = await self.get_map()
+                except NarwalCommandError as err:
+                    _LOGGER.warning("start_rooms: map fetch failed: %s", err)
+                    map_data = self.state.map_data
             map_id = map_data.map_id if map_data else 0
             if not map_id:
                 _LOGGER.warning(
@@ -1541,6 +1525,11 @@ class NarwalClient:
             except ValueError as err:
                 _LOGGER.warning("start_rooms: %s", err)
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            if _robot_start_blocked(self.state):
+                _LOGGER.warning(
+                    "start_rooms: state changed before dispatch; not starting room clean"
+                )
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             resp = await self.send_command(
                 TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,
             )
@@ -1556,6 +1545,11 @@ class NarwalClient:
                     break
                 _LOGGER.info("start_rooms: robot docking/settling, retrying clean/start_clean")
                 await asyncio.sleep(3.0)
+                if _robot_start_blocked(self.state):
+                    _LOGGER.warning(
+                        "start_rooms: state changed before retry; not starting room clean"
+                    )
+                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
                 resp = await self.send_command(
                     TOPIC_CMD_CLEAN_TASK, payload=payload, timeout=10.0,
                 )

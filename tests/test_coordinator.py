@@ -25,6 +25,8 @@ from custom_components.narwal.coordinator import (  # noqa: E402
     CleanSettings,
     NarwalCoordinator,
     can_edit_pending_clean_settings,
+    can_pause_cleaning,
+    can_prepare_clean_start,
     can_start_cleaning,
     is_clean_session_context,
     is_live_clean_setting_available,
@@ -41,8 +43,24 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     WorkingStatus,
     WorkMode,
 )
+from custom_components.narwal.narwal_client.models import (  # noqa: E402
+    DOCK_TASK_DRY_DOCK_BAG,
+    DOCK_TASK_DRY_DUST_BIN,
+    DOCK_TASK_DRY_MOP,
+    DOCK_TASK_EMPTY_DUSTBIN,
+    DOCK_TASK_WASH_MOP,
+)
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
+
+
+def test_pause_available_with_stale_unconfirmed_return_flag() -> None:
+    """A stale field 3.7 alone must not hide Pause during an active clean."""
+    state = NarwalState()
+    state.update_from_base_status({"3": {"1": 4, "7": 1}})
+    state.last_active_working_status_time = 0.0
+
+    assert can_pause_cleaning(state)
 
 
 class _RoomSelectionStore:
@@ -58,6 +76,14 @@ class _RoomSelectionStore:
     async def async_save(self, data: object) -> None:
         """Store data."""
         self.data = data
+
+
+def _docked_state() -> NarwalState:
+    """Return an idle on-dock state."""
+    state = NarwalState(working_status=WorkingStatus.DOCKED)
+    state.dock_presence = 6
+    state.dock_field11 = 2
+    return state
 
 
 def test_non_broadcast_product_key_configures_polling_client() -> None:
@@ -1167,6 +1193,261 @@ class TestCoordinatorResilience:
 
         assert not await coordinator.async_refresh_dock_status()
         assert seen == [False]
+
+    async def test_prepare_clean_start_stops_single_safe_dock_blocker(self) -> None:
+        """A clean-start intent clears one known safe dock blocker first."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.station_activity = 1
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+        coordinator.async_set_updated_data = MagicMock()
+
+        async def stop_task(task: str | None = None) -> CommandResponse:
+            assert task == DOCK_TASK_EMPTY_DUSTBIN
+            state.station_activity = 0
+            return CommandResponse(result_code=CommandResult.SUCCESS)
+
+        coordinator.client.stop_dock_task = AsyncMock(side_effect=stop_task)
+
+        assert can_prepare_clean_start(state)
+        assert await coordinator.async_prepare_clean_start()
+
+        coordinator.client.stop_dock_task.assert_awaited_once_with(
+            DOCK_TASK_EMPTY_DUSTBIN
+        )
+        assert coordinator.async_refresh_dock_status.await_count == 2
+        assert can_start_cleaning(state)
+
+    async def test_prepare_clean_start_rejects_failed_initial_refresh(self) -> None:
+        """Preparation does not act when its initial state refresh fails."""
+        coordinator = self._make_coordinator()
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=False)
+        coordinator.client.stop_dock_task = AsyncMock()
+
+        assert not await coordinator.async_prepare_clean_start()
+
+        coordinator.async_refresh_dock_status.assert_awaited_once()
+        coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_prepare_clean_start_rejects_failed_dock_stop(self) -> None:
+        """Preparation does not start after the dock rejects its required stop."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.station_activity = 1
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+        coordinator.client.stop_dock_task = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.CONFLICT)
+        )
+
+        assert not await coordinator.async_prepare_clean_start()
+
+        coordinator.async_refresh_dock_status.assert_awaited_once()
+        coordinator.client.stop_dock_task.assert_awaited_once_with(
+            DOCK_TASK_EMPTY_DUSTBIN
+        )
+
+    async def test_prepare_clean_start_rejects_failed_post_stop_refresh(self) -> None:
+        """An accepted stop still requires authoritative refreshed state."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.station_activity = 1
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(
+            side_effect=(True, False)
+        )
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.stop_dock_task = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        assert not await coordinator.async_prepare_clean_start()
+
+        assert coordinator.async_refresh_dock_status.await_count == 2
+        coordinator.client.stop_dock_task.assert_awaited_once_with(
+            DOCK_TASK_EMPTY_DUSTBIN
+        )
+
+    @pytest.mark.parametrize(
+        ("task", "fields"),
+        [
+            (DOCK_TASK_DRY_MOP, ("8", "9")),
+            (DOCK_TASK_DRY_DUST_BIN, ("10", "11")),
+            (DOCK_TASK_DRY_DOCK_BAG, ("12", "13")),
+        ],
+    )
+    async def test_prepare_clean_start_keeps_typed_drying_task(
+        self,
+        task: str,
+        fields: tuple[str, str],
+    ) -> None:
+        """A new clean lets firmware hand off typed drying work."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.set_dock_drying_task(
+            task,
+            elapsed=60,
+            target=180,
+            fields=fields,
+        )
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.stop_dock_task = AsyncMock()
+
+        assert can_prepare_clean_start(state)
+        assert await coordinator.async_prepare_clean_start()
+        assert can_prepare_clean_start(state, allow_dock_stop=False)
+
+        coordinator.client.stop_dock_task.assert_not_awaited()
+        assert coordinator.async_refresh_dock_status.await_count == 1
+        assert can_start_cleaning(state)
+
+    async def test_prepare_clean_start_rejects_lingering_dock_task_after_stop(self) -> None:
+        """Accepted stop is not enough if refreshed telemetry still shows a task."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.station_activity = 1
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.client.stop_dock_task = AsyncMock(
+            return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        )
+
+        assert can_prepare_clean_start(state)
+        assert not await coordinator.async_prepare_clean_start()
+
+        coordinator.client.stop_dock_task.assert_awaited_once_with(
+            DOCK_TASK_EMPTY_DUSTBIN
+        )
+        assert coordinator.async_refresh_dock_status.await_count == 2
+
+    async def test_prepare_clean_start_rejects_dock_stop_when_disabled(self) -> None:
+        """No-stop preparation mode should never cancel dock maintenance."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.station_activity = 2
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+        coordinator.client.stop_dock_task = AsyncMock()
+
+        assert not can_prepare_clean_start(state, allow_dock_stop=False)
+        assert not await coordinator.async_prepare_clean_start(allow_dock_stop=False)
+
+        coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_prepare_clean_start_accepts_wash_follow_on_drying(self) -> None:
+        """Stopping a wash may hand off mop drying to the clean command."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.station_activity = 2
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+        coordinator.async_set_updated_data = MagicMock()
+
+        async def stop_task(task: str | None = None) -> CommandResponse:
+            assert task == DOCK_TASK_WASH_MOP
+            state.station_activity = 0
+            state.set_dock_drying_task(
+                DOCK_TASK_DRY_MOP,
+                elapsed=0,
+                target=18000,
+                fields=("8", "9"),
+            )
+            return CommandResponse(result_code=CommandResult.SUCCESS)
+
+        coordinator.client.stop_dock_task = AsyncMock(side_effect=stop_task)
+
+        assert can_prepare_clean_start(state)
+        assert await coordinator.async_prepare_clean_start()
+
+        coordinator.client.stop_dock_task.assert_awaited_once_with(
+            DOCK_TASK_WASH_MOP
+        )
+        assert coordinator.async_refresh_dock_status.await_count == 2
+        assert state.active_dock_task_keys == (DOCK_TASK_DRY_MOP,)
+
+    async def test_prepare_clean_start_allows_multiple_typed_dryers(self) -> None:
+        """Multiple typed drying tasks can be handed off without pre-stops."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_DUST_BIN,
+            elapsed=60,
+            target=180,
+            fields=("10", "11"),
+        )
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+        coordinator.client.stop_dock_task = AsyncMock()
+
+        assert can_prepare_clean_start(state)
+        assert await coordinator.async_prepare_clean_start()
+
+        coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_prepare_clean_start_rejects_mixed_stop_and_dry_tasks(self) -> None:
+        """Mixed generic-stop and drying tasks remain ambiguous."""
+        coordinator = self._make_coordinator()
+        state = _docked_state()
+        state.station_activity = 1
+        state.set_dock_drying_task(
+            DOCK_TASK_DRY_MOP,
+            elapsed=60,
+            target=180,
+            fields=("8", "9"),
+        )
+        coordinator.client.state = state
+        coordinator.data = state
+        coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+        coordinator.client.stop_dock_task = AsyncMock()
+
+        assert not can_prepare_clean_start(state)
+        assert not await coordinator.async_prepare_clean_start()
+
+        coordinator.client.stop_dock_task.assert_not_awaited()
+
+    async def test_action_refresh_preserves_recent_active_working_status(self) -> None:
+        """Robot action gates avoid full base-status refresh while task data is fresh."""
+        coordinator = self._make_coordinator()
+        coordinator.client.state.update_from_working_status({"3": 120})
+        coordinator.client.get_status = AsyncMock(return_value=CommandResponse(data={}))
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert await coordinator.async_refresh_action_status()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=False)
+        coordinator.async_set_updated_data.assert_called_once_with(
+            coordinator.client.state
+        )
+        assert not coordinator._dock_status_refresh_failed
+
+    async def test_action_refresh_requires_dock_payload_when_full_update_needed(self) -> None:
+        """Without active task telemetry, action refresh needs real dock/base status."""
+        coordinator = self._make_coordinator()
+        coordinator.client.get_status = AsyncMock(return_value=CommandResponse(data={}))
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert not await coordinator.async_refresh_action_status()
+
+        coordinator.client.get_status.assert_awaited_once_with(full_update=True)
+        assert coordinator._dock_status_refresh_failed
 
 
 class TestTopicSubscriptionRenewal:
