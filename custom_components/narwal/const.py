@@ -115,6 +115,7 @@ MAP_ROTATION_DEFAULT = 0  # degrees clockwise; renderer accepts 0/90/180/270
 MAP_ZOOM_DEFAULT = 1.0  # renderer clamps to 1.0–2.0
 
 CONF_DOCK_LIGHT_SUPPORTED = "dock_light_supported"
+SERVICE_CLEAN_ROOMS = "clean_rooms"
 
 def product_keys_for_model(label: str) -> set[str]:
     """Every product key known to belong to one selector model."""
@@ -144,12 +145,15 @@ DOCK_LIGHT_MODE_NAMES: dict[int, str] = {
     int(value): key for key, value in DOCK_LIGHT_MODES.items()
 }
 
-# HA fan_speed labels → FanLevel, from the app's user-visible suction names (sentence case, as HA shows fan_speed values directly). The enum members keep the app's internal identifiers, so DEEP surfaces as "Super" and SUPER as "Ultra".
+# HA fan_speed labels -> FanLevel, from the app's user-visible suction names
+# (sentence case, as HA shows fan_speed values directly). The enum members keep
+# the app's internal identifiers, so DEEP surfaces as "Super Powerful" and
+# SUPER as "Ultra".
 _FAN_SPEED_CANONICAL: dict[str, FanLevel] = {
     "Quiet": FanLevel.MUTE,
     "Standard": FanLevel.NORMAL,
     "Strong": FanLevel.STRONG,
-    "Super": FanLevel.DEEP,
+    "Super Powerful": FanLevel.DEEP,
     "Ultra": FanLevel.SUPER,
 }
 
@@ -173,10 +177,40 @@ def fan_speed_list_for(data: dict) -> list[str]:
     return FAN_SPEED_LIST
 
 
+def normalize_fan_level_for_model(data: dict, fan: FanLevel) -> FanLevel:
+    """Return a persisted fan level supported by the configured model."""
+    if (
+        fan == FanLevel.SUPER
+        and data.get(CONF_PRODUCT_KEY) in NO_ULTRA_FAN_PRODUCT_KEYS
+    ):
+        return FanLevel.DEEP
+    return fan
+
+
 # FAN_SPEED_MAP also accepts the "… powerful" labels shipped through v1.0.3 and the
-# original lowercase fan_speed values (quiet/normal/strong/max) so existing automations
-# keep working; these aliases are not offered in FAN_SPEED_LIST.
+# short "Super" label used by this stack, and the original lowercase fan_speed
+# values (quiet/normal/strong/max) so existing automations keep working; these
+# aliases are not offered in FAN_SPEED_LIST.
 FAN_SPEED_MAP: dict[str, FanLevel] = _FAN_SPEED_CANONICAL | {
+    "Super": FanLevel.DEEP,
+    "Super powerful": FanLevel.DEEP,
+    "Ultra powerful": FanLevel.SUPER,
+    "quiet": FanLevel.MUTE,
+    "normal": FanLevel.NORMAL,
+    "strong": FanLevel.STRONG,
+    "max": FanLevel.SUPER,
+}
+
+# Meanings used by v1.0.5 and earlier persisted states. Keep this separate from
+# current UI labels so a rename cannot silently change a restored robot enum.
+UNVERSIONED_FAN_SPEED_MAP: dict[str, FanLevel] = {
+    "AI": FanLevel.UNSPECIFIED,
+    "Quiet": FanLevel.MUTE,
+    "Standard": FanLevel.NORMAL,
+    "Strong": FanLevel.STRONG,
+    "Super Powerful": FanLevel.DEEP,
+    "Ultra": FanLevel.SUPER,
+    "Super": FanLevel.DEEP,
     "Super powerful": FanLevel.DEEP,
     "Ultra powerful": FanLevel.SUPER,
     "quiet": FanLevel.MUTE,
@@ -229,7 +263,8 @@ ERROR_HELP_URL_TEMPLATE = (
     "https://help.narwal.com/helpcenter/vall/#/p2/question/all?eType=1&code={code}&lang=en-US"
 )
 
-# Select option id → robot enum. Option ids are rendered to the app's user-visible labels via translations.
+# Select option id -> robot enum. Option ids are rendered to the app's
+# user-visible labels via translations.
 WORK_MODE_MAP: dict[str, WorkMode] = {
     "vacuum": WorkMode.VACUUM,
     "mop": WorkMode.MOP,

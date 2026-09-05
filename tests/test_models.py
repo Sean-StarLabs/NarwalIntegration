@@ -433,6 +433,26 @@ class TestNarwalState:
         assert not state.has_assumed_robot_clean
         assert state.is_cleaning
 
+    def test_paused_context_handles_missing_task_metrics(self) -> None:
+        """Paused context is safe before richer task metric fields exist."""
+        state = NarwalState()
+        state.is_paused = True
+
+        assert not state.has_paused_clean_task_context
+
+        state.cleaning_time = 120
+
+        assert state.has_paused_clean_task_context
+
+    def test_paused_context_ignores_stale_metrics_after_docking(self) -> None:
+        """Docked API state ends stale paused overlays from the previous task."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 10, "2": 1, "10": 1}, "11": 2})
+        state.cleaning_time = 120
+        state.current_room_id = 4
+
+        assert not state.has_paused_clean_task_context
+
     def test_dock_task_assumption_is_only_a_short_command_guard(self) -> None:
         """Dock task assumptions must not fabricate long-running device state."""
         state = NarwalState()
@@ -611,15 +631,29 @@ class TestNarwalState:
         """
         from narwal_client import models as models_mod
 
-        models_mod._WARNED_WORKING_STATUS.discard(17)
+        models_mod._WARNED_WORKING_STATUS.discard(255)
         state = NarwalState()
         with caplog.at_level(logging.WARNING, logger=models_mod.__name__):
             for _ in range(50):
-                state.update_from_base_status({"3": {"1": 17}})
+                state.update_from_base_status({"3": {"1": 255}})
 
         warnings = [r for r in caplog.records if "Unknown working_status" in r.message]
         assert len(warnings) == 1
         assert state.working_status == WorkingStatus.UNKNOWN
+
+    def test_custom_cleaning_status_preserves_live_room_metrics(self) -> None:
+        """Status 17 is active custom cleaning, not an unknown idle state."""
+        state = NarwalState()
+        state.update_from_base_status(
+            {"3": {"1": 17, "14": 1, "17": 7}, "11": 1, "47": 2}
+        )
+        state.update_from_working_status({"3": 120, "6": 4})
+
+        assert state.working_status == WorkingStatus.CUSTOM_CLEANING
+        assert state.is_cleaning
+        assert not state.is_docked
+        assert state.current_room_id == 4
+        assert state.cleaning_time == 120
 
     def test_update_from_base_status(self) -> None:
         state = NarwalState()
