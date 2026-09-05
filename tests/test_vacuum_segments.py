@@ -1446,6 +1446,31 @@ class TestAsyncStartWholeHouse:
         vac.coordinator.client.resume.assert_not_awaited()
         vac.coordinator.client.start_rooms.assert_not_awaited()
 
+    async def test_terminal_transition_clears_future_stale_resume_context(self) -> None:
+        """A later paused standby cannot revive a completed accepted start."""
+        state = NarwalState(working_status=WorkingStatus.CLEANING)
+        state.assume_robot_clean()
+        state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.TASK_COMPLETED)}}
+        )
+        state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.DOCKED), "10": 1}, "11": 2}
+        )
+        state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.STANDBY), "2": 1, "10": 1}, "11": 2}
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.resume = AsyncMock()
+        vac.coordinator.client.start_rooms = AsyncMock()
+
+        with pytest.raises(HomeAssistantError):
+            await vac.async_start()
+
+        assert not state.has_assumed_robot_clean
+        vac.coordinator.client.resume.assert_not_awaited()
+        vac.coordinator.client.start_rooms.assert_not_awaited()
+
     async def test_unread_room_profiles_block_native_start(self) -> None:
         """A start cannot substitute defaults for unread durable profiles."""
         vac = _make_vacuum(state=_docked_state())

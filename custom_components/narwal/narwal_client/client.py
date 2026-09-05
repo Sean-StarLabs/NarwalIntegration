@@ -1580,7 +1580,17 @@ class NarwalClient:
 
     async def resume(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
         """Resume paused task."""
-        return await self.send_command(TOPIC_CMD_RESUME, timeout=timeout)
+        terminal_time = self.state.last_terminal_working_status_time
+        response = await self.send_command(TOPIC_CMD_RESUME, timeout=timeout)
+        terminal_during_request = (
+            self.state.last_terminal_working_status_time != terminal_time
+            or self.state.working_status
+            in {WorkingStatus.TASK_COMPLETED, WorkingStatus.ERROR}
+            or self.state.has_error
+        )
+        if _accepted_response(response) and not terminal_during_request:
+            self.state.mark_robot_resumed()
+        return response
 
     async def stop(self, timeout: float = 15.0) -> CommandResponse:
         """Force-stop current task.
