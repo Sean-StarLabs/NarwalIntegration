@@ -165,6 +165,9 @@ def install() -> None:
         def _handle_coordinator_update(self) -> None:
             pass
 
+        async def async_will_remove_from_hass(self) -> None:
+            pass
+
     ha_uc.CoordinatorEntity = _CoordinatorEntity  # type: ignore[attr-defined]
 
     ha_storage = _mod("homeassistant.helpers.storage", ha_helpers)
@@ -196,6 +199,24 @@ def install() -> None:
     ha_service = _mod("homeassistant.helpers.service", ha_helpers)
     ha_service.async_extract_entity_ids = MagicMock()  # type: ignore[attr-defined]
 
+    ha_storage = _mod("homeassistant.helpers.storage", ha_helpers)
+
+    class _Store:
+        """Stub for Home Assistant Store helper."""
+
+        def __init__(self, hass: object, version: int, key: str) -> None:
+            self.hass = hass
+            self.version = version
+            self.key = key
+            self.data: object | None = None
+
+        async def async_load(self) -> object | None:
+            return self.data
+
+        async def async_save(self, data: object) -> None:
+            self.data = data
+
+    ha_storage.Store = _Store  # type: ignore[attr-defined]
     ha_ep = _mod("homeassistant.helpers.entity_platform", ha_helpers)
     ha_ep.AddConfigEntryEntitiesCallback = MagicMock  # type: ignore[attr-defined]
 
@@ -279,7 +300,13 @@ def install() -> None:
     class _Segment:
         """Stub for homeassistant.components.vacuum.Segment."""
 
-        def __init__(self, *, id: str, name: str, group: str | None = None) -> None:  # noqa: A002
+        def __init__(  # noqa: A002
+            self,
+            *,
+            id: str,  # noqa: A002
+            name: str,
+            group: str | None = None,
+        ) -> None:
             self.id = id
             self.name = name
             self.group = group

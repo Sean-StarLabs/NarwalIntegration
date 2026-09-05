@@ -366,13 +366,16 @@ is a mistake this project has made in both directions:
 
 ### `map/display_map` — live position
 
-Sent every ~1.5 s while cleaning; grows as area accumulates (~264 B → ~945 B over 15 s).
+Sent every ~1.5 s while cleaning. Field 2 is a moving window rather than the
+complete route: a live Freo X Ultra capture repeatedly carried 30 points, with
+the next observed window sharing four points with the previous one. Consumers
+must join exact overlapping coordinates if they want to retain the whole route.
 
 | Field | Meaning |
 |---|---|
 | 1.1.1 / 1.1.2 | Robot X / Y — float32, **decimetres** |
 | 1.2 | Heading — float32 radians, [-π, π] |
-| 2 | Accumulated trajectory `{1: x_bytes, 2: y_bytes}` |
+| 2 | Rolling trajectory window `{1: x_bytes, 2: y_bytes}` |
 | 5 | Dock reference position (constant) |
 | 7 | Cleaned-area overlay: `{1: width, 2: height, 3: zlib grid}` — *not* the house map |
 | 10 | Timestamp, **milliseconds** since epoch |
@@ -388,7 +391,6 @@ it is the signature of a job about to abort, not a robot at the origin.
 | `upgrade/upgrade_status` | 2 status, 3 progress, 4 stage, 7 current firmware, 8 target firmware |
 | `status/download_status` | OTA download state |
 | `status/time_line_status` | Session timeline |
-| `status/point_navi_plan_traj` | Navigation trajectory points |
 | `report/clean_report` | End-of-session summary: 3 elapsed, 6 start, 7 end, 12 detail, 33 end-reason string (localized) |
 | `developer/planning_debug_info` | Bumper/cliff/mop-collision sensor debug |
 
@@ -573,14 +575,13 @@ rest are known-to-exist and unexplored — good starting points for anyone probi
 | 63 | `/status/download_status` | R→C | Status | ✓ |
 | 64 | `/status/time_line_status` | R→C | Status | ✓ |
 | 65 | `/status/app_status_heartbeat` | R→C | Status | ✓ |
-| 66 | `/status/point_navi_plan_traj` | R→C | Status | |
 | 67 | `/report/clean_report` | C→R | Report | |
 | 68 | `/clean/report` | C→R | Report | |
 | 69 | `/developer/ping` | C→R | Developer | ✓ |
 | 70 | `/developer/take_picture` | C→R | Developer | ✓ |
 | 71 | `/developer/take_picture/response` | R→C | Developer | ✓ |
 | 72 | `/developer/led_control` | C→R | Developer | ✓ |
-| 73 | `/developer/planning_debug_info` | R→C | Developer | ✓ |
+| 73 | `/developer/planning_debug_info` | R→C | Developer | |
 | 74 | `/info/get_clean_time_line` | C→R | Status | |
 | 75 | `/info/get_clean_time_line/response` | R→C | Status | |
 

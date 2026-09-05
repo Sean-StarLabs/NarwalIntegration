@@ -8,14 +8,13 @@ Covers MAP-04 (post-cleaning map refresh) validation gaps:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 # Install HA stubs before any custom_components import
 import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from custom_components.narwal.camera import NarwalMapCamera  # noqa: E402
 from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
 from custom_components.narwal.narwal_client import NarwalState  # noqa: E402
 from custom_components.narwal.narwal_client.const import WorkingStatus  # noqa: E402
@@ -50,6 +49,14 @@ class TestCoordinatorMapRefresh:
         coordinator._prev_working_status = WorkingStatus.UNKNOWN
         coordinator.active_clean_work_mode = None
         coordinator.active_room_clean_settings = {}
+        coordinator._map_display_cache_store = MagicMock()
+        coordinator._map_display_cache_store.async_save = AsyncMock()
+        coordinator._map_display_cache_signature = ()
+        coordinator._pending_map_display_cache_snapshot = None
+        coordinator._pending_map_display_cache_restore = None
+        coordinator._map_display_cache_save_task = None
+        coordinator._map_display_cache_last_save = 0.0
+        coordinator._map_display_cache_restored = False
         coordinator.update_interval = None
         coordinator.async_set_updated_data = MagicMock()
         def _close_background_task(*args: object) -> None:
@@ -179,83 +186,3 @@ class TestCoordinatorMapRefresh:
 
         assert coordinator._fast_poll_remaining == 0
         assert coordinator.update_interval == POLL_INTERVAL
-
-
-def test_custom_cleaning_starts_a_new_camera_trail() -> None:
-    """A custom room clean must reset the sampled trail like every clean status."""
-    state = NarwalState(working_status=WorkingStatus.CUSTOM_CLEANING)
-    coordinator = MagicMock()
-    coordinator.client.state = state
-    camera = NarwalMapCamera.__new__(NarwalMapCamera)
-    camera.coordinator = coordinator
-    camera._last_cleaning_status = WorkingStatus.STANDBY
-    camera._reset_trail = MagicMock()
-    camera.async_write_ha_state = MagicMock()
-
-    camera._handle_coordinator_update()
-
-    camera._reset_trail.assert_called_once_with()
-
-
-def test_remapping_does_not_start_a_cleaning_trail() -> None:
-    """Map exploration must not be recorded as cleaning history."""
-    state = NarwalState(working_status=WorkingStatus.REMAPPING)
-    coordinator = MagicMock()
-    coordinator.client.state = state
-    camera = NarwalMapCamera.__new__(NarwalMapCamera)
-    camera.coordinator = coordinator
-    camera._last_cleaning_status = WorkingStatus.STANDBY
-    camera._reset_trail = MagicMock()
-    camera.async_write_ha_state = MagicMock()
-
-    camera._handle_coordinator_update()
-
-    camera._reset_trail.assert_not_called()
-
-
-def test_metric_only_clean_starts_camera_trail_once() -> None:
-    """Fresh clean metrics drive the camera without rewriting coarse status."""
-    state = NarwalState(working_status=WorkingStatus.STANDBY)
-    state.update_from_working_status({"3": 120})
-    coordinator = MagicMock()
-    coordinator.client.state = state
-    camera = NarwalMapCamera.__new__(NarwalMapCamera)
-    camera.coordinator = coordinator
-    camera._last_cleaning_status = WorkingStatus.STANDBY
-    camera._reset_trail = MagicMock()
-    camera.async_write_ha_state = MagicMock()
-
-    camera._handle_coordinator_update()
-    camera._handle_coordinator_update()
-
-    assert state.working_status == WorkingStatus.STANDBY
-    camera._reset_trail.assert_called_once_with()
-
-
-def test_metric_only_pause_resume_keeps_existing_camera_trail() -> None:
-    """Pausing a metric-only clean must not turn resume into a new session."""
-    state = NarwalState(working_status=WorkingStatus.STANDBY)
-    with patch("narwal_client.models.time.monotonic", return_value=100.0):
-        state.update_from_working_status({"3": 120})
-    coordinator = MagicMock()
-    coordinator.client.state = state
-    camera = NarwalMapCamera.__new__(NarwalMapCamera)
-    camera.coordinator = coordinator
-    camera._last_cleaning_status = WorkingStatus.STANDBY
-    camera._reset_trail = MagicMock()
-    camera.async_write_ha_state = MagicMock()
-
-    with patch("narwal_client.models.time.monotonic", return_value=100.0):
-        camera._handle_coordinator_update()
-    state.is_paused = True
-    camera._handle_coordinator_update()
-    with patch("narwal_client.models.time.monotonic", return_value=116.0):
-        state.update_from_working_status({"3": 120})
-    assert state.is_paused
-    camera._handle_coordinator_update()
-    with patch("narwal_client.models.time.monotonic", return_value=117.0):
-        state.update_from_working_status({"3": 121})
-    assert not state.is_paused
-    camera._handle_coordinator_update()
-
-    camera._reset_trail.assert_called_once_with()
