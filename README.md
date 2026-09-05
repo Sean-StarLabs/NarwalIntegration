@@ -86,6 +86,9 @@ Shipped in v1.0.2 ([#50](https://github.com/sjmotew/NarwalIntegration/pull/50)) 
 ### Dock
 - **Ambient light** — off, fireplace, nightlight, purple, on models with a dock light ([#61](https://github.com/sjmotew/NarwalIntegration/pull/61), v1.0.2)
 
+### Dashboard
+v1.0.8's per-room profiles create six selects and a switch **per room** — 168 entities on a 24-room map — which is right for automations and wrong for a dashboard. [`tools/gen_dashboard.py`](tools/gen_dashboard.py) reads your Home Assistant entity registry and emits a **room-picker section**: one dropdown, and only the chosen room's seven controls on screen, plus a Whole-house panel for the defaults, Start / Clear-selection buttons, a `script` that cleans exactly one room with its own profile, and a Dock-tasks section. Paste the YAML into any sections-view dashboard. Needs the `state-switch` card from HACS.
+
 ### Connectivity
 - Real-time WebSocket push updates on broadcasting models
 - Auto-reconnect with exponential backoff

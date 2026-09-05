@@ -45,6 +45,8 @@ tools/*
 !tools/narwal_capture.py
 !tools/coverage_probe.py
 !tools/CAPTURE_GUIDE.md
+# ...and the dashboard generator, which users run against their own registry.
+!tools/gen_dashboard.py
 captures/
 proto/
 apk/
