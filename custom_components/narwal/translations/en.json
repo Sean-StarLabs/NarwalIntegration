@@ -42,6 +42,9 @@
       "cleaning_time": {
         "name": "Cleaning time"
       },
+      "remaining_time": {
+        "name": "Remaining time"
+      },
       "firmware_version": {
         "name": "Firmware version"
       },
@@ -81,9 +84,6 @@
           "fully_charged": "Fully Charged",
           "not_charging": "Not Charging"
         }
-      },
-      "current_room": {
-        "name": "Current room"
       }
     },
     "binary_sensor": {

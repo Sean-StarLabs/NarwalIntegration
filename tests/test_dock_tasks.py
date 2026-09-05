@@ -17,6 +17,7 @@ from custom_components.narwal.dock_tasks import (  # noqa: E402
     can_start_dock_task,
     can_start_robot_clean,
     can_stop_dock_task,
+    dock_task_blocks_robot_return,
 )
 from custom_components.narwal.switch import (  # noqa: E402
     DOCK_TASK_SWITCHES,
@@ -112,6 +113,18 @@ def test_cleaning_state_hides_dock_start_controls() -> None:
     state.dock_field11 = 1
     state.dock_field47 = 2
 
+    assert not can_start_dock_task(state, DOCK_TASK_EMPTY_DUSTBIN)
+
+
+def test_retained_paused_context_hides_dock_start_controls() -> None:
+    """A paused clean remains robot work after live metric freshness expires."""
+    state = _docked_state()
+    state.working_status = WorkingStatus.STANDBY
+    state.is_paused = True
+    state.cleaning_time = 120
+    state.task_elapsed_time = 120
+
+    assert state.has_paused_clean_task_context
     assert not can_start_dock_task(state, DOCK_TASK_EMPTY_DUSTBIN)
 
 
@@ -343,6 +356,34 @@ async def test_active_dry_dust_bin_switch_stops_with_scoped_command() -> None:
     coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
 
 
+async def test_switch_refreshes_before_stop_validation() -> None:
+    """A stale local status cannot reject a typed stop before refresh."""
+    state = _docked_state()
+    state.working_status = WorkingStatus.UNKNOWN
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DUST_BIN,
+        elapsed=61,
+        target=180,
+        fields=("10", "11"),
+    )
+    coordinator = _coordinator(state)
+
+    async def refresh_dock_status() -> bool:
+        state.working_status = WorkingStatus.DOCKED
+        return True
+
+    coordinator.async_refresh_dock_status = AsyncMock(side_effect=refresh_dock_status)
+    coordinator.client.stop_dock_task = AsyncMock(
+        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+    )
+    switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[3])
+
+    await switch.async_turn_off()
+
+    coordinator.async_refresh_dock_status.assert_awaited()
+    coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
+
+
 def test_multiple_tasks_only_allow_scoped_stop() -> None:
     """Generic stop is unavailable for ambiguous multi-task dock activity."""
     state = _docked_state()
@@ -447,20 +488,125 @@ def test_unmapped_coarse_activity_allows_scoped_dock_bag_stop() -> None:
     assert not can_stop_dock_task(state, DOCK_TASK_DRY_MOP)
 
 
-def test_robot_clean_start_allows_only_typed_dock_bag() -> None:
-    """Robot starts are blocked by dock work except typed dock-bag drying."""
+@pytest.mark.parametrize(
+    ("task", "fields"),
+    [
+        (DOCK_TASK_DRY_MOP, ("8", "9")),
+        (DOCK_TASK_DRY_DUST_BIN, ("10", "11")),
+        (DOCK_TASK_DRY_DOCK_BAG, ("12", "13")),
+    ],
+)
+def test_robot_clean_start_allows_typed_drying_tasks(
+    task: str,
+    fields: tuple[str, str],
+) -> None:
+    """Typed drying tasks can be handed off to the robot clean command."""
     state = _docked_state()
-    state.assume_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+    state.assume_dock_task(task)
     assert not can_start_robot_clean(state)
 
     state = _docked_state()
+    state.set_dock_drying_task(
+        task,
+        elapsed=45,
+        target=180,
+        fields=fields,
+    )
+    assert can_start_robot_clean(state)
+
+
+def test_robot_clean_start_allows_multiple_typed_drying_tasks() -> None:
+    """Multiple typed drying timers can be handed off on clean start."""
+    state = _docked_state()
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_MOP,
+        elapsed=45,
+        target=180,
+        fields=("8", "9"),
+    )
     state.set_dock_drying_task(
         DOCK_TASK_DRY_DOCK_BAG,
         elapsed=45,
         target=180,
         fields=("12", "13"),
     )
+
     assert can_start_robot_clean(state)
+
+
+def test_robot_clean_start_rejects_typed_drying_with_unmapped_activity() -> None:
+    """Typed drying must not mask additional unmapped station work."""
+    state = _docked_state()
+    state.station_activity = 99
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DOCK_BAG,
+        elapsed=45,
+        target=180,
+        fields=("12", "13"),
+    )
+
+    assert not can_start_robot_clean(state)
+
+
+def test_robot_return_allows_only_typed_dock_bag() -> None:
+    """Robot return is blocked by dock work except typed dock-bag drying."""
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.station_activity = 4
+    assert dock_task_blocks_robot_return(state)
+
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DOCK_BAG,
+        elapsed=45,
+        target=180,
+        fields=("12", "13"),
+    )
+    assert not dock_task_blocks_robot_return(state)
+
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.dock_presence = 6
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_MOP,
+        elapsed=45,
+        target=180,
+        fields=("8", "9"),
+    )
+    assert dock_task_blocks_robot_return(state)
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        DOCK_TASK_EMPTY_DUSTBIN,
+        DOCK_TASK_WASH_MOP,
+        DOCK_TASK_DRY_MOP,
+        DOCK_TASK_DRY_DUST_BIN,
+    ],
+)
+def test_accepted_dock_task_blocks_robot_return_during_handoff(task: str) -> None:
+    """Accepted incompatible dock work blocks robot actions before telemetry."""
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.assume_dock_task(task)
+
+    assert dock_task_blocks_robot_return(state)
+
+
+def test_accepted_dock_bag_dry_keeps_robot_return_compatible() -> None:
+    """The proven dock-bag exception applies during its telemetry handoff too."""
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.assume_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+    assert not dock_task_blocks_robot_return(state)
+
+
+def test_unmapped_dock_timer_blocks_robot_return_without_coarse_activity() -> None:
+    """Fresh unknown timer work blocks return despite an idle station field."""
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.update_from_working_status({"14": 60, "15": 180})
+
+    assert state.has_unmapped_active_dock_task
+    assert not state.is_station_active
+    assert dock_task_blocks_robot_return(state)
 
 
 async def test_wash_mop_switch_uses_status_gated_command() -> None:

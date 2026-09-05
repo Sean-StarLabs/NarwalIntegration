@@ -7,13 +7,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import blackboxprotobuf
 import pytest
 
-from narwal_client.client import NarwalClient, RoomCleanSettings
+from narwal_client.client import NarwalClient, NarwalCommandError, RoomCleanSettings
 from narwal_client.const import (
     CleaningRoute,
     CommandResult,
     FanLevel,
     MopHumidity,
     MopStrengthLevel,
+    WorkingStatus,
     WorkMode,
 )
 from narwal_client.models import CommandResponse
@@ -161,6 +162,9 @@ class TestStartRooms:
     def _client(self) -> NarwalClient:
         client = NarwalClient("127.0.0.1")
         client._ws = AsyncMock()
+        client.state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.DOCKED), "10": 1}, "11": 2}
+        )
         client.state.map_data = MagicMock(map_id=1)
         return client
 
@@ -257,6 +261,19 @@ class TestStartRooms:
         assert result.result_code == CommandResult.NOT_APPLICABLE
 
     @pytest.mark.asyncio
+    async def test_map_fetch_error_returns_not_applicable(self) -> None:
+        """A failed map refresh bails out without sending a room-clean command."""
+        client = self._client()
+        client.state.map_data = None
+        with patch.object(client, "get_map", new_callable=AsyncMock) as mock_get_map, \
+             patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            mock_get_map.side_effect = NarwalCommandError("no active map")
+            result = await client.start_rooms([5])
+        mock_get_map.assert_awaited_once()
+        mock_send.assert_not_awaited()
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+
+    @pytest.mark.asyncio
     async def test_not_ready_retries_while_docked(self) -> None:
         """NOT_READY on the dock retries clean/start_clean (dock settling)."""
         client = self._client()
@@ -272,16 +289,65 @@ class TestStartRooms:
         assert result is success
 
     @pytest.mark.asyncio
-    async def test_not_ready_off_dock_does_not_retry(self) -> None:
-        """NOT_READY off the dock surfaces as-is — start_clean needs the dock."""
+    async def test_off_dock_does_not_dispatch(self) -> None:
+        """An off-dock robot is rejected before dispatch."""
         client = self._client()
+        client.state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.STANDBY)}, "11": 1, "47": 2}
+        )
+        client.state.dock_presence = 2
+        client.state.dock_sub_state = 2
         assert not client.state.is_docked
-        not_ready = CommandResponse(result_code=CommandResult.NOT_READY)
         with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
-            mock_send.return_value = not_ready
             result = await client.start_rooms([5])
-        mock_send.assert_awaited_once()
-        assert result.result_code == CommandResult.NOT_READY
+        mock_send.assert_not_awaited()
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+
+    @pytest.mark.asyncio
+    async def test_active_clean_does_not_dispatch(self) -> None:
+        """A second start is rejected while robot cleaning is active."""
+        client = self._client()
+        client.state.working_status = WorkingStatus.CLEANING
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            result = await client.start_rooms([5])
+
+        mock_send.assert_not_awaited()
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+
+    @pytest.mark.asyncio
+    async def test_error_status_does_not_dispatch(self) -> None:
+        """An explicit robot error is rejected even without an error payload."""
+        client = self._client()
+        client.state.working_status = WorkingStatus.ERROR
+        client.state.error_code = 0
+
+        with patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            result = await client.start_rooms([5])
+
+        mock_send.assert_not_awaited()
+        assert result.result_code == CommandResult.NOT_APPLICABLE
+
+    @pytest.mark.asyncio
+    async def test_state_change_during_map_fetch_does_not_dispatch(self) -> None:
+        """State is checked again after the asynchronous map fetch."""
+        client = self._client()
+        client.state.map_data = None
+
+        async def change_state_during_map_fetch():
+            client.state.working_status = WorkingStatus.CLEANING
+            return MagicMock(map_id=1)
+
+        with patch.object(
+            client,
+            "get_map",
+            new_callable=AsyncMock,
+            side_effect=change_state_during_map_fetch,
+        ), patch.object(client, "send_command", new_callable=AsyncMock) as mock_send:
+            result = await client.start_rooms([5])
+
+        mock_send.assert_not_awaited()
+        assert result.result_code == CommandResult.NOT_APPLICABLE
 
     @pytest.mark.asyncio
     async def test_conflict_surfaces_without_retry(self) -> None:

@@ -65,6 +65,13 @@ def _coordinator(
         return_value=CommandResponse(result_code=result_code)
     )
     coordinator.async_refresh_dock_status = AsyncMock(return_value=True)
+
+    async def prepare_clean_start(*, allow_dock_stop: bool = True) -> bool:
+        return coordinator.client.state.is_docked and (
+            allow_dock_stop or not coordinator.client.state.active_dock_task_keys
+        )
+
+    coordinator.async_prepare_clean_start = AsyncMock(side_effect=prepare_clean_start)
     coordinator.dock_action_lock = asyncio.Lock()
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.data = {"product_key": product_key}
@@ -169,7 +176,7 @@ async def test_clean_rooms_service_starts_requested_rooms() -> None:
         await handler(call)
 
     extract_entity_ids.assert_awaited_once()
-    assert extract_entity_ids.await_args.args == (call,)
+    assert extract_entity_ids.await_args.args[0] is call
     coordinator.client.start_rooms.assert_awaited_once()
     assert coordinator.client.start_rooms.await_args.args[0] == [4, 7]
     assert coordinator.client.state.has_assumed_robot_clean
@@ -178,28 +185,30 @@ async def test_clean_rooms_service_starts_requested_rooms() -> None:
     coordinator.async_set_updated_data.assert_called_once_with(coordinator.client.state)
 
 
-async def test_clean_rooms_service_accepts_legacy_extract_signature() -> None:
-    """The service supports HA versions where extraction also takes hass."""
+async def test_clean_rooms_service_supports_legacy_entity_extractor() -> None:
+    """Target extraction remains compatible with older HA helper signatures."""
     coordinator = _coordinator()
     handler, registry = _register_clean_rooms_handler(coordinator)
     call = _clean_rooms_call()
-    extract_entity_ids = AsyncMock(
-        side_effect=[TypeError, ["vacuum.downstairs_narwal"]]
-    )
 
     with (
         patch(
             "custom_components.narwal.service.async_extract_entity_ids",
-            extract_entity_ids,
-        ),
+            new_callable=AsyncMock,
+            side_effect=[
+                TypeError("missing required positional argument: service_call"),
+                ["vacuum.downstairs_narwal"],
+            ],
+        ) as extract_entity_ids,
         patch("custom_components.narwal.er.async_get", return_value=registry),
     ):
         await handler(call)
 
+    assert len(extract_entity_ids.await_args_list) == 2
     assert extract_entity_ids.await_args_list[0].args == (call,)
-    legacy_args = extract_entity_ids.await_args_list[1].args
-    assert legacy_args[1] is call
-    assert legacy_args[0].data[DOMAIN]["entry-1"] is coordinator
+    assert len(extract_entity_ids.await_args_list[1].args) == 2
+    assert extract_entity_ids.await_args_list[1].args[1] is call
+    coordinator.client.start_rooms.assert_awaited_once()
 
 
 async def test_clean_rooms_service_accepts_async_accepted_response() -> None:
@@ -243,6 +252,37 @@ async def test_clean_rooms_service_uses_requested_settings_over_room_profiles() 
     kwargs = coordinator.client.start_rooms.await_args.kwargs
     assert kwargs["room_settings"][4].fan == FanLevel.STRONG
     assert kwargs["room_settings"][7].fan == FanLevel.STRONG
+
+
+@pytest.mark.parametrize(
+    ("product_key", "expected"),
+    [
+        ("QoEsI5qYXO", FanLevel.SUPER),
+        ("qV6BujoYLz", FanLevel.DEEP),
+    ],
+)
+async def test_clean_rooms_service_resolves_max_for_each_model(
+    product_key: str,
+    expected: FanLevel,
+) -> None:
+    """The max alias resolves through each model's visible tiers."""
+    coordinator = _coordinator(product_key=product_key)
+    handler, registry = _register_clean_rooms_handler(coordinator)
+    call = _clean_rooms_call()
+    call.data[FIELD_SUCTION] = "max"
+
+    with (
+        patch(
+            "custom_components.narwal.service.async_extract_entity_ids",
+            new_callable=AsyncMock,
+            return_value=["vacuum.downstairs_narwal"],
+        ),
+        patch("custom_components.narwal.er.async_get", return_value=registry),
+    ):
+        await handler(call)
+
+    room_settings = coordinator.client.start_rooms.await_args.kwargs["room_settings"]
+    assert all(settings.fan == expected for settings in room_settings.values())
 
 
 async def test_clean_rooms_service_rejects_unavailable_start() -> None:

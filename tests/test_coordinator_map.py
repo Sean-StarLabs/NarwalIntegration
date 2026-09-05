@@ -8,7 +8,7 @@ Covers MAP-04 (post-cleaning map refresh) validation gaps:
 
 from __future__ import annotations
 
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Install HA stubs before any custom_components import
 import tests.ha_stubs  # noqa: E402
@@ -211,3 +211,51 @@ def test_remapping_does_not_start_a_cleaning_trail() -> None:
     camera._handle_coordinator_update()
 
     camera._reset_trail.assert_not_called()
+
+
+def test_metric_only_clean_starts_camera_trail_once() -> None:
+    """Fresh clean metrics drive the camera without rewriting coarse status."""
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    state.update_from_working_status({"3": 120})
+    coordinator = MagicMock()
+    coordinator.client.state = state
+    camera = NarwalMapCamera.__new__(NarwalMapCamera)
+    camera.coordinator = coordinator
+    camera._last_cleaning_status = WorkingStatus.STANDBY
+    camera._reset_trail = MagicMock()
+    camera.async_write_ha_state = MagicMock()
+
+    camera._handle_coordinator_update()
+    camera._handle_coordinator_update()
+
+    assert state.working_status == WorkingStatus.STANDBY
+    camera._reset_trail.assert_called_once_with()
+
+
+def test_metric_only_pause_resume_keeps_existing_camera_trail() -> None:
+    """Pausing a metric-only clean must not turn resume into a new session."""
+    state = NarwalState(working_status=WorkingStatus.STANDBY)
+    with patch("narwal_client.models.time.monotonic", return_value=100.0):
+        state.update_from_working_status({"3": 120})
+    coordinator = MagicMock()
+    coordinator.client.state = state
+    camera = NarwalMapCamera.__new__(NarwalMapCamera)
+    camera.coordinator = coordinator
+    camera._last_cleaning_status = WorkingStatus.STANDBY
+    camera._reset_trail = MagicMock()
+    camera.async_write_ha_state = MagicMock()
+
+    with patch("narwal_client.models.time.monotonic", return_value=100.0):
+        camera._handle_coordinator_update()
+    state.is_paused = True
+    camera._handle_coordinator_update()
+    with patch("narwal_client.models.time.monotonic", return_value=116.0):
+        state.update_from_working_status({"3": 120})
+    assert state.is_paused
+    camera._handle_coordinator_update()
+    with patch("narwal_client.models.time.monotonic", return_value=117.0):
+        state.update_from_working_status({"3": 121})
+    assert not state.is_paused
+    camera._handle_coordinator_update()
+
+    camera._reset_trail.assert_called_once_with()
