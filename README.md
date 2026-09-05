@@ -2,7 +2,7 @@
 
 A fully **local, cloud-independent** [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Communicates directly with your vacuum over your local network via WebSocket — no cloud account or internet connection required.
 
-> **Latest release: [v1.0.7](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.7)** (HACS) — the model name now always matches the robot the integration actually found ([notes](docs/RELEASE-NOTES-v1.0.7.md)). v1.0.6 before it **stopped the integration waking your docked robot ~1,900 times a day** ([notes](docs/RELEASE-NOTES-v1.0.6.md)). **No breaking changes.** **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first**, then the [v1.0.4 notes](docs/RELEASE-NOTES-v1.0.4.md) — your consumable alerts were wrong before that release.
+> **Latest release: [v1.0.8](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.8)** (HACS) — per-room cleaning profiles, a vacuum entity that only advertises the commands it can run right now, native map trails that survive restarts, dock task switches, and a downloadable diagnostics dump ([notes](docs/RELEASE-NOTES-v1.0.8.md)). **Two breaking changes: the `current_room` sensor moved onto the vacuum entity, and the suction tiers were renamed to match the Narwal app** — the old names still work. **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first**, then the [v1.0.4 notes](docs/RELEASE-NOTES-v1.0.4.md) — your consumable alerts were wrong before that release.
 
 > ### ✅ Room cleaning is fixed — shipped in v1.0.2, verified on hardware in v1.0.3
 >
@@ -375,9 +375,22 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 ## Project Status
 
-**Where things stand — updated 2026-09-01, at the v1.0.7 release.**
+**Where things stand — updated 2026-09-05, at the v1.0.8 release.**
 
-**v1.0.7 is released** — everything below is shipped to HACS. 280 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. **Open PRs: [#85](https://github.com/sjmotew/NarwalIntegration/pull/85)-[#89](https://github.com/sjmotew/NarwalIntegration/pull/89) (@Sean-StarLabs — dock tasks, per-room clean profiles, live task state, native map trails; all drafts).**
+**v1.0.8 is released** — everything below is shipped to HACS. 854 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. No open pull requests.
+
+| Merged in v1.0.8 | What it does |
+|---|---|
+| [#87](https://github.com/sjmotew/NarwalIntegration/pull/87) | **Per-room cleaning profiles** — mode, suction, water, scrub, route and passes per room, room-selection switches, a `narwal.clean_rooms` service, and `vacuum.start` that cleans the selected rooms with their own settings in one mixed job. From @Sean-StarLabs |
+| [#88](https://github.com/sjmotew/NarwalIntegration/pull/88) | **The vacuum entity advertises only the commands it can run right now**, and carries current room, progress and task status as attributes. The `current_room` sensor is gone. From @Sean-StarLabs |
+| [#89](https://github.com/sjmotew/NarwalIntegration/pull/89) | **Native map trails** — Narwal's own rolling trajectory windows joined into one route, kept across restarts, cleared when a new clean starts. Closes [#75](https://github.com/sjmotew/NarwalIntegration/issues/75). From @Sean-StarLabs |
+| [#91](https://github.com/sjmotew/NarwalIntegration/pull/91) | **Suction tiers named as the Narwal app names them** — Super Powerful and Ultra Powerful; the old Super / Ultra names still work. From @Sean-StarLabs |
+| [#86](https://github.com/sjmotew/NarwalIntegration/pull/86) | **Dock task switches** — empty dustbin, wash mop, dry mop, dry dust bin, dry dock bag — on a dock device of its own, with robot commands gated while the dock is busy. From @Sean-StarLabs |
+| [#85](https://github.com/sjmotew/NarwalIntegration/pull/85) | Models with a product-specific topic prefix keep that prefix after auto-detection. From @Sean-StarLabs |
+| — | **Downloadable diagnostics** from the device page, and the bug template asks for it first |
+| [#81](https://github.com/sjmotew/NarwalIntegration/issues/81) | **Every product key a model ships is recognised**, not just one — a regional Flow 2 key (`mkbqaprvrb`) was showing as Unknown and silently costing its owner the dock light. The model selector now defaults to Other / Auto-detect |
+| [#93](https://github.com/sjmotew/NarwalIntegration/issues/93) | **`current_room` no longer stays `unknown` forever** — a bare `get_map` ack on first connection was cached as an empty map and never retried |
+| — | Docs: the plain Freo Z10 recorded as under investigation ([#92](https://github.com/sjmotew/NarwalIntegration/issues/92)) — its port 9002 refuses connections outright, a third distinct failure signature |
 
 | Merged in v1.0.7 | What it does |
 |---|---|
@@ -425,14 +438,17 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 ### Next steps
 
-1. **Local discovery** ([#35](https://github.com/sjmotew/NarwalIntegration/pull/35)) — zeroconf and DHCP discovery is the largest outstanding UX win, since [#40](https://github.com/sjmotew/NarwalIntegration/issues/40) shows setup failing outright on the wake timeout. Awaiting a narrowed PR.
+1. **Repair issues** — the integration never raises a Home Assistant repair. v1.0.8 renamed suction tiers and removed a sensor; both should surface as repairs rather than release-notes prose.
+2. **Multi-floor map switching** ([#43](https://github.com/sjmotew/NarwalIntegration/issues/43)) — the only substantial unimplemented request, now tractable through the `map_id` plumbing that landed with the room profiles.
+3. **Last-clean sensors** ([#32](https://github.com/sjmotew/NarwalIntegration/issues/32)).
 
 ### Open protocol questions — help wanted
 
 - ~~**Is there a fifth suction tier?**~~ **Answered** ([#70](https://github.com/sjmotew/NarwalIntegration/issues/70)) — the AX26 app's top tier sends `4` (`DEEP`), while a Flow 2 accepted and actively reported a clean configured with `5` (`SUPER`). Ultra Powerful is withheld only on models known not to support it.
 - **What is `CleanParam` tag 8?** The Narwal app sends `8 = 2`; we never send it and cleaning works without it. The best current candidate is the app's two-value coverage-precision toggle ([#25](https://github.com/sjmotew/NarwalIntegration/issues/25)).
-- **The complete `WorkingStatus` enum.** Values have been discovered one user bug report at a time. Anyone holding an APK `BuilderInfo` decode can end that ([#46](https://github.com/sjmotew/NarwalIntegration/issues/46)).
-- **Narwal JX confirmation.** The product key is known; no working report yet ([#42](https://github.com/sjmotew/NarwalIntegration/issues/42)).
+- **The complete `WorkingStatus` enum.** Values have been discovered one user bug report at a time — `17` turned out to be the custom per-room clean and is decoded since v1.0.8. Anyone holding an APK `BuilderInfo` decode can end that ([#46](https://github.com/sjmotew/NarwalIntegration/issues/46)).
+- **Does the Freo X Ultra speak the local protocol?** The compatibility table says no, per [#4](https://github.com/sjmotew/NarwalIntegration/issues/4). A product key and `nmap -p 9002` from an owner settles it either way.
+- **Why does the plain Freo Z10 refuse port 9002?** It advertises over mDNS like every other model, then returns `ECONNREFUSED` ([#92](https://github.com/sjmotew/NarwalIntegration/issues/92)). A full port scan and an app-to-robot capture would tell us what it listens on instead.
 
 ## Reporting Issues
 
