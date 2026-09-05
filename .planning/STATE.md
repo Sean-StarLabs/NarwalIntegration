@@ -2,10 +2,10 @@
 gsd_state_version: 1.0
 milestone: v0.5
 milestone_name: Map Validation & Polish
-status: "v1.0.3 RELEASED 2026-08-08 — #73 root-caused and fixed on hardware; queue drained"
-stopped_at: "**v1.0.3 published 2026-08-08** (latest, manifest 1.0.3). #73 root cause found on hardware during a live Pantry clean: the active_robot_publish subscription lasts 600s and was never renewed, so working_status/display_map stopped and the entity froze at docked. Renewal now runs unconditionally every 240s. Counts: expired 423/1/1 -> renewing 411/148/148. #73 CLOSED. v1.0.2 notes corrected in repo and on the release. Announced on #37/#55/#66/#40."
-last_updated: "2026-08-08T00:00:00.000Z"
-last_activity: 2026-08-08
+status: "v1.0.8 RELEASED 2026-09-05 — Sean stack #85-#91 merged; per-room profiles, state-aware vacuum, native trails, dock switches, diagnostics; queue drained"
+stopped_at: "**v1.0.8 published 2026-09-05** (tag 30967a2, 854 tests, deployed to 10.0.0.5 and verified before tagging). Sean answered the #88 RETURN_HOME blocker in code; stack merged locally (GitHub marked #88/#89/#91 CLOSED not MERGED — use gh pr merge in order next time). #93 fixed via #87 client commit, #81 confirmed (AUS unit), #75 closed. Steve dashboard rebuilt around input_select room picker via tools/gen_dashboard.py (404fcbe); #94 opened for disabled-by-default room entities. Steve testing for a few weeks."
+last_updated: "2026-09-05T13:35:00.000Z"
+last_activity: 2026-09-05
 progress:
   total_phases: 9
   completed_phases: 7
@@ -116,6 +116,6 @@ Progress: Phase 15 executed as issue/PR work, not formal plans — 8 of 9 merge 
 
 ## Session Continuity
 
-Last session: 2026-09-04
-Stopped at: Resumed via /gsd:resume-work. #81 root-caused and fixed, #92 answered, PR #86 merged, #87-#91 stack reviewed. Master 2ad8b68, 422 tests, CI green, unreleased.
+Last session: 2026-09-05
+Stopped at: v1.0.8 shipped (30967a2). Stack #87→#88→#89→#91 merged and released with diagnostics, product-key aliases and the #93 get_map fix; two breaking changes documented in docs/RELEASE-NOTES-v1.0.8.md. Steve's Narwal dashboard rebuilt around a room picker (tools/gen_dashboard.py, 404fcbe); he is field-testing for several weeks. Open: #94 (room entities disabled by default, Sean's call), repair issues → #43 multi-floor → #32; #92 Z10 port scan; Freo X Ultra key; Steve to name rooms in the app (then rerun the generator + re-register room entity_ids) and redo the segment→area mapping.
 Resume file: .planning/.continue-here.md
