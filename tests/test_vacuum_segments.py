@@ -1093,6 +1093,21 @@ class TestVacuumFanSpeed:
             "value": int(FanLevel.DEEP),
         }
 
+    async def test_live_highest_fan_clamps_to_deep_and_stays_pending(self) -> None:
+        state = _active_clean_state()
+        vac = _make_vacuum(state=state)
+        vac.coordinator.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+
+        await vac.async_set_fan_speed("Ultra Powerful")
+
+        vac.coordinator.client.set_fan_speed.assert_awaited_once_with(FanLevel.DEEP)
+        vac.coordinator.set_active_clean_setting.assert_called_once_with(
+            "fan", FanLevel.DEEP
+        )
+        assert vac.coordinator.clean_settings.fan == FanLevel.SUPER
+
     async def test_live_fan_change_applies_while_paused(self) -> None:
         state = _active_clean_state()
         state.is_paused = True
@@ -1120,6 +1135,14 @@ class TestVacuumFanSpeed:
 
         vac.coordinator.client.set_fan_speed.assert_not_awaited()
         assert vac.coordinator.clean_settings.fan == FanLevel.STRONG
+
+    async def test_pre_rename_super_service_value_remains_accepted(self) -> None:
+        """The entity preserves the old level-4 service value."""
+        vac = _make_vacuum(state=_docked_state())
+
+        await vac.async_set_fan_speed("Super")
+
+        assert vac.coordinator.clean_settings.fan == FanLevel.DEEP
 
     async def test_fan_change_rejected_when_entity_unavailable(self) -> None:
         state = _active_clean_state()

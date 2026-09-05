@@ -45,7 +45,10 @@ from .coordinator import (
 from .dock_tasks import ROBOT_RETURN_COMPATIBLE_DOCK_TASKS
 from .entity import NarwalEntity
 from .narwal_client import CommandResult, FanLevel, WorkingStatus
-from .narwal_client.const import ACTIVE_CLEANING_STATUSES
+from .narwal_client.const import (
+    ACTIVE_CLEANING_STATUSES,
+    fan_level_for_live_command,
+)
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -220,7 +223,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         """Initialize the vacuum entity."""
         super().__init__(coordinator)
         self._attr_unique_id = coordinator.config_entry.data["device_id"]
-        # Offered tiers are per-model: models whose app tops out at DEEP don't get "Ultra".
+        # Offered tiers are per-model: models whose app tops out at DEEP omit level 5.
         self._attr_fan_speed_list = fan_speed_list_for(coordinator.config_entry.data)
         self._last_reported_segment_signature = None
 
@@ -609,9 +612,10 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                 "Narwal fan speed is not available in mop-only mode"
             )
         if live_available:
-            resp = await self.coordinator.client.set_fan_speed(level)
+            live_level = fan_level_for_live_command(level)
+            resp = await self.coordinator.client.set_fan_speed(live_level)
             _raise_if_command_failed(resp, "set fan speed")
-            self.coordinator.set_active_clean_setting("fan", level)
+            self.coordinator.set_active_clean_setting("fan", live_level)
         if not has_selected_rooms:
             self.coordinator.clean_settings.fan = level
         self.async_write_ha_state()

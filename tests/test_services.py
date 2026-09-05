@@ -26,6 +26,7 @@ from custom_components.narwal import (  # noqa: E402
     _async_room_ids_for_coordinator,
     _async_validate_clean_rooms_targets,
     _normalise_room_ids,
+    _suction_for_coordinator,
     _validate_pass_count,
 )
 from custom_components.narwal.const import DOMAIN, SERVICE_CLEAN_ROOMS  # noqa: E402
@@ -365,6 +366,37 @@ async def test_clean_rooms_service_rejects_unsupported_ultra_suction() -> None:
         await handler(call)
 
     coordinator.client.start_rooms.assert_not_awaited()
+
+
+def test_clean_rooms_ultra_alias_keeps_historical_level() -> None:
+    """The hidden service alias keeps its prior SUPER enum meaning."""
+    assert _suction_for_coordinator(_coordinator(), "ultra") is FanLevel.SUPER
+
+    with pytest.raises(Exception, match="Ultra suction is not supported"):
+        _suction_for_coordinator(_coordinator(product_key="qV6BujoYLz"), "ultra")
+
+
+def test_clean_rooms_ultra_powerful_uses_level_five_when_supported() -> None:
+    """The canonical top tier uses SUPER and remains model-gated."""
+    assert _suction_for_coordinator(_coordinator(), "ultra_powerful") is FanLevel.SUPER
+
+    with pytest.raises(Exception, match="Ultra Powerful suction is not supported"):
+        _suction_for_coordinator(
+            _coordinator(product_key="qV6BujoYLz"),
+            "ultra_powerful",
+        )
+
+
+def test_clean_rooms_super_alias_keeps_historical_level() -> None:
+    """The hidden service alias keeps its pre-rename DEEP enum meaning."""
+    assert _suction_for_coordinator(_coordinator(), "super") is FanLevel.DEEP
+    assert (
+        _suction_for_coordinator(
+            _coordinator(product_key="qV6BujoYLz"),
+            "super",
+        )
+        is FanLevel.DEEP
+    )
 
 
 async def test_clean_rooms_service_rejects_invalid_room_ids() -> None:

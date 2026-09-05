@@ -78,10 +78,10 @@ SUCTION_OPTIONS = (
     "standard",
     "normal",
     "strong",
-    "ultra",
-    "super",
-    "ultra_powerful",
     "super_powerful",
+    "ultra_powerful",
+    "super",
+    "ultra",
     "max",
 )
 WATER_OPTIONS: dict[str, MopHumidity] = {
@@ -122,8 +122,8 @@ SUCTION_OPTION_LABELS: dict[str, str] = {
     "standard": "Standard",
     "normal": "Standard",
     "strong": "Strong",
-    "ultra": "Ultra",
-    "ultra_powerful": "Ultra",
+    "ultra": "Ultra Powerful",
+    "ultra_powerful": "Ultra Powerful",
     "super": "Super Powerful",
     "super_powerful": "Super Powerful",
     "max": "Super Powerful",
@@ -140,6 +140,19 @@ def _suction_for_coordinator(
     fan_map = fan_speed_map_for(coordinator.config_entry.data, include_aliases=False)
     if option == "max":
         return list(fan_map.values())[-1]
+    compatibility_label = {
+        "super": "Super",
+        "ultra": "Ultra",
+    }.get(option)
+    if compatibility_label is not None:
+        compatibility_level = fan_speed_map_for(
+            coordinator.config_entry.data
+        ).get(compatibility_label)
+        if compatibility_level is None:
+            raise HomeAssistantError(
+                f"{compatibility_label} suction is not supported by this Narwal model"
+            )
+        return compatibility_level
     label = SUCTION_OPTION_LABELS[option]
     if label not in fan_map:
         raise HomeAssistantError(

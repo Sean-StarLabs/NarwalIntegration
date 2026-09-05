@@ -458,7 +458,7 @@ class TestLegacyNarwalSettingSelect:
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
 
         assert "Super Powerful" in sel.options
-        assert sel._normalise_option("Super") == "Super Powerful"
+        assert sel._normalise_option("Super") == "Super"
         assert "Ultra" not in sel.options
         assert sel._normalise_option("Ultra powerful") is None
 
@@ -532,6 +532,20 @@ class TestLegacyNarwalSettingSelect:
             await sel.async_select_option("Strong")
 
         coord.client.set_fan_speed.assert_not_awaited()
+
+    async def test_legacy_live_highest_suction_clamps_and_stays_pending(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.active_clean_work_mode = WorkMode.VACUUM
+        coord.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+
+        await sel.async_select_option("Ultra Powerful")
+
+        coord.client.set_fan_speed.assert_awaited_once_with(FanLevel.DEEP)
+        coord.set_active_clean_setting.assert_called_once_with("fan", FanLevel.DEEP)
+        assert coord.clean_settings.fan == FanLevel.SUPER
 
     def test_legacy_settings_are_config_entities(self) -> None:
         coord = _coordinator(state=_state())
