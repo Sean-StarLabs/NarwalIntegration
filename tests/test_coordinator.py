@@ -6,6 +6,7 @@ UpdateFailed after the threshold, and resets counters on success/push.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 import time
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
@@ -21,17 +22,42 @@ from custom_components.narwal.const import NO_BROADCAST_PRODUCT_KEYS  # noqa: E4
 from custom_components.narwal.coordinator import (  # noqa: E402
     TOPIC_RESUBSCRIBE_AFTER,
     TOPIC_SUBSCRIPTION_TTL,
+    CleanSettings,
     NarwalCoordinator,
-)
+    can_edit_pending_clean_settings,
+    can_start_cleaning,
+    is_clean_session_context,
+    is_live_clean_setting_available,
+    is_narwal_task_busy,
+)  # noqa: E402
 from custom_components.narwal.narwal_client import (  # noqa: E402
     CommandResponse,
     CommandResult,
+    FanLevel,
+    MopHumidity,
     NarwalConnectionError,
     NarwalState,
+    RoomCleanSettings,
     WorkingStatus,
+    WorkMode,
 )
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
+
+
+class _RoomSelectionStore:
+    """Minimal storage double for room-selection persistence tests."""
+
+    def __init__(self) -> None:
+        self.data: object | None = None
+
+    async def async_load(self) -> object | None:
+        """Return stored data."""
+        return self.data
+
+    async def async_save(self, data: object) -> None:
+        """Store data."""
+        self.data = data
 
 
 def test_non_broadcast_product_key_configures_polling_client() -> None:
@@ -55,6 +81,728 @@ def test_non_broadcast_product_key_configures_polling_client() -> None:
         topic_prefix=f"/{product_key}",
         supports_broadcasts=False,
     )
+
+
+def test_room_profiles_only_override_customized_fields() -> None:
+    """Read-only room profile creation must not freeze global defaults."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.clean_settings = CleanSettings()
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+
+    coordinator.room_clean_settings_for(4)
+    coordinator.clean_settings.fan = FanLevel.STRONG
+    coordinator.clean_settings.water = MopHumidity.WET
+
+    settings = coordinator.room_clean_settings_for_rooms([4])[4]
+
+    assert settings.fan == FanLevel.STRONG
+    assert settings.water == MopHumidity.WET
+
+    coordinator.set_room_clean_setting(4, "water", MopHumidity.DRY)
+    merged = coordinator.room_clean_settings_for_rooms([4])[4]
+
+    assert merged.fan == FanLevel.STRONG
+    assert merged.water == MopHumidity.DRY
+
+
+def test_effective_room_profile_follows_global_defaults_until_customized() -> None:
+    """Room entity reads should not materialize stale inherited defaults."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.clean_settings = CleanSettings()
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+
+    first = coordinator.effective_room_clean_settings_for(4)
+    coordinator.clean_settings.route = first.route
+    coordinator.clean_settings.fan = FanLevel.STRONG
+
+    inherited = coordinator.effective_room_clean_settings_for(4)
+
+    assert inherited.fan == FanLevel.STRONG
+    assert coordinator.room_clean_settings == {}
+
+    coordinator.set_room_clean_setting(4, "water", MopHumidity.DRY)
+    coordinator.clean_settings.water = MopHumidity.WET
+    customized = coordinator.effective_room_clean_settings_for(4)
+
+    assert customized.fan == FanLevel.STRONG
+    assert customized.water == MopHumidity.DRY
+
+
+def test_room_profiles_can_be_bypassed_for_explicit_service_settings() -> None:
+    """Callers can request exact settings without saved room-profile overrides."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.clean_settings = CleanSettings()
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator.set_room_clean_setting(4, "fan", FanLevel.MUTE)
+    requested = RoomCleanSettings(fan=FanLevel.STRONG)
+
+    settings = coordinator.room_clean_settings_for_rooms(
+        [4],
+        default=requested,
+        use_room_profiles=False,
+    )[4]
+
+    assert settings is requested
+    assert settings.fan == FanLevel.STRONG
+
+
+def test_selected_clean_rooms_fall_back_to_all_rooms() -> None:
+    """No room selection means the native start command cleans every room."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.selected_clean_rooms = {}
+
+    assert coordinator.selected_clean_room_ids_for([4, 5]) == [4, 5]
+
+
+def test_selected_clean_rooms_prune_stale_ids_and_are_map_scoped() -> None:
+    """Known selected rooms remain scoped without mutating stale selections."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.selected_clean_rooms = {}
+
+    coordinator.set_room_selected_for_clean(5, True, map_id="upstairs")
+    coordinator.set_room_selected_for_clean(99, True, map_id="upstairs")
+
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="upstairs") == [5]
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="downstairs") == [4, 5]
+
+    coordinator.set_room_selected_for_clean(5, False, map_id="upstairs")
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="upstairs") == []
+
+
+def test_selected_clean_rooms_fall_back_when_every_selected_room_vanished() -> None:
+    """A vanished explicit selection continues to fail closed."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.selected_clean_rooms = {"upstairs": {99}}
+
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="upstairs") == []
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="upstairs") == []
+    assert coordinator.has_selected_clean_rooms(map_id="upstairs")
+
+
+def test_unidentified_map_selection_remains_explicit_after_identification() -> None:
+    """Learning a map id cannot broaden an unresolved explicit selection."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {None: {4}}
+    coordinator._room_selection_store_loaded = True
+
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="100") == [4]
+    assert coordinator.has_selected_clean_rooms(map_id="100")
+    assert coordinator.is_room_selected_for_clean(4, map_id="100")
+
+    coordinator._schedule_room_selection_save = MagicMock()
+    coordinator.set_room_selected_for_clean(4, False, map_id="100")
+    coordinator.set_room_selected_for_clean(5, True, map_id="100")
+
+    assert None not in coordinator.selected_clean_rooms
+    assert coordinator.selected_clean_rooms == {"100": {5}}
+
+
+async def test_room_selection_store_preserves_disappeared_selected_room() -> None:
+    """Restart cannot broaden a stale explicit selection to every current room."""
+    store = _RoomSelectionStore()
+    before = NarwalCoordinator.__new__(NarwalCoordinator)
+    before.selected_clean_rooms = {"upstairs": {4}}
+    before._room_selection_store = store
+    before._room_selection_save_lock = asyncio.Lock()
+    before._room_selection_store_loaded = True
+
+    await before._async_save_room_selections()
+
+    after = NarwalCoordinator.__new__(NarwalCoordinator)
+    after.selected_clean_rooms = {}
+    after._room_selection_store = store
+    after._room_selection_store_loaded = False
+    await after._async_restore_room_selections()
+
+    assert after.selected_clean_room_ids_for([5], map_id="upstairs") == []
+    assert after.is_room_selected_for_clean(4, map_id="upstairs")
+
+
+async def test_room_store_restores_customized_profile_without_entities() -> None:
+    """Disabled room controls cannot lose their raw customized values."""
+    store = _RoomSelectionStore()
+    before = NarwalCoordinator.__new__(NarwalCoordinator)
+    before.selected_clean_rooms = {}
+    before.room_clean_settings = {
+        ("upstairs", 4): RoomCleanSettings(
+            work_mode=WorkMode.MOP,
+            fan=FanLevel.STRONG,
+            passes=3,
+        )
+    }
+    before.room_clean_settings_customized = {
+        ("upstairs", 4): {"work_mode", "fan", "passes"}
+    }
+    before._room_selection_store = store
+    before._room_selection_save_lock = asyncio.Lock()
+    before._room_selection_store_loaded = True
+
+    await before._async_save_room_selections()
+
+    after = NarwalCoordinator.__new__(NarwalCoordinator)
+    after.selected_clean_rooms = {}
+    after.room_clean_settings = {}
+    after.room_clean_settings_customized = {}
+    after._room_selection_store = store
+    after._room_selection_store_loaded = False
+    await after._async_restore_room_selections()
+
+    restored = after.room_clean_settings[("upstairs", 4)]
+    assert restored.work_mode == WorkMode.MOP
+    assert restored.fan == FanLevel.STRONG
+    assert restored.passes == 3
+    assert after.room_clean_settings_customized == {
+        ("upstairs", 4): {"work_mode", "fan", "passes"}
+    }
+
+
+async def test_room_selection_load_failure_cannot_overwrite_stored_state() -> None:
+    """A failed restore must not replace unread selections during shutdown."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {}
+    coordinator._room_selection_store = MagicMock()
+    coordinator._room_selection_store.async_load = AsyncMock(side_effect=OSError)
+    coordinator._room_selection_store.async_save = AsyncMock()
+    coordinator._room_selection_save_lock = asyncio.Lock()
+    coordinator._room_selection_store_loaded = False
+    coordinator._room_profile_store_loaded = False
+
+    await coordinator._async_restore_room_selections()
+    await coordinator._async_save_room_selections()
+
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="100") == []
+    coordinator._room_selection_store.async_save.assert_not_awaited()
+
+
+async def test_selection_change_cannot_authorize_unread_profile_overwrite() -> None:
+    """A room toggle after failed restore cannot replace durable profiles."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {}
+    coordinator.room_clean_settings = {
+        ("upstairs", 4): RoomCleanSettings(fan=FanLevel.MUTE)
+    }
+    coordinator.room_clean_settings_customized = {("upstairs", 4): {"fan"}}
+    coordinator._room_selection_store = MagicMock()
+    coordinator._room_selection_store.async_load = AsyncMock(
+        side_effect=[OSError, {"maps": [], "profiles": [{"durable": "profile"}]}]
+    )
+    coordinator._room_selection_store.async_save = AsyncMock()
+    coordinator._room_selection_save_lock = asyncio.Lock()
+    coordinator._room_selection_store_loaded = False
+    coordinator._room_profile_store_loaded = False
+    coordinator._schedule_room_selection_save = MagicMock()
+
+    await coordinator._async_restore_room_selections()
+    coordinator.set_room_selected_for_clean(4, True, map_id="upstairs")
+    await coordinator._async_save_room_selections()
+
+    assert coordinator._room_selection_store_loaded
+    assert not coordinator._room_profile_store_loaded
+    coordinator._room_selection_store.async_save.assert_awaited_once_with(
+        {
+            "maps": [{"map_id": "upstairs", "room_ids": [4]}],
+            "profiles": [{"durable": "profile"}],
+        }
+    )
+
+
+async def test_selection_retry_preserves_other_stored_maps() -> None:
+    """A local toggle after a failed read must merge unrelated stored maps."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {}
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator.data = NarwalState()
+    coordinator.client = MagicMock()
+    coordinator.client.state = coordinator.data
+    coordinator._room_selection_store = MagicMock()
+    coordinator._room_selection_store.async_load = AsyncMock(
+        side_effect=[
+            OSError,
+            {
+                "maps": [
+                    {"map_id": "100", "room_ids": [4]},
+                    {"map_id": "200", "room_ids": [7]},
+                ],
+                "profiles": [],
+            },
+        ]
+    )
+    coordinator._room_selection_store.async_save = AsyncMock()
+    coordinator._room_selection_save_lock = asyncio.Lock()
+    coordinator._room_selection_store_loaded = False
+    coordinator._room_profile_store_loaded = False
+    coordinator._schedule_room_selection_save = MagicMock()
+
+    await coordinator._async_restore_room_selections()
+    coordinator.set_room_selected_for_clean(5, True, map_id="100")
+    await coordinator._async_save_room_selections()
+
+    saved = coordinator._room_selection_store.async_save.await_args.args[0]
+    assert saved["maps"] == [
+        {"map_id": "100", "room_ids": [5]},
+        {"map_id": "200", "room_ids": [7]},
+    ]
+
+
+def test_map_identification_migrates_unresolved_profiles_with_selection() -> None:
+    """Resolving a map keeps its customized room profiles attached."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    profile = RoomCleanSettings(work_mode=WorkMode.VACUUM)
+    coordinator.selected_clean_rooms = {None: {4}}
+    coordinator.room_clean_settings = {(None, 4): profile}
+    coordinator.room_clean_settings_customized = {(None, 4): {"work_mode"}}
+    coordinator._room_selection_store_loaded = True
+    coordinator._schedule_room_selection_save = MagicMock()
+
+    coordinator.set_room_selected_for_clean(5, True, map_id="100")
+
+    assert coordinator.selected_clean_rooms == {"100": {4, 5}}
+    assert coordinator.room_clean_settings == {("100", 4): profile}
+    assert coordinator.room_clean_settings_customized == {
+        ("100", 4): {"work_mode"}
+    }
+
+
+def test_profile_resolution_does_not_require_another_selection_toggle() -> None:
+    """A fetched map immediately attaches unresolved profiles to native starts."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.clean_settings = CleanSettings(work_mode=WorkMode.VACUUM_AND_MOP)
+    coordinator.selected_clean_rooms = {None: {4}}
+    coordinator.room_clean_settings = {
+        (None, 4): RoomCleanSettings(work_mode=WorkMode.VACUUM)
+    }
+    coordinator.room_clean_settings_customized = {(None, 4): {"work_mode"}}
+    coordinator._room_selection_store_loaded = True
+    coordinator._room_selection_dirty_maps = set()
+    coordinator._schedule_room_selection_save = MagicMock()
+
+    settings = coordinator.room_clean_settings_for_rooms([4], map_id="100")
+
+    assert settings[4].work_mode == WorkMode.VACUUM
+    assert coordinator.selected_clean_rooms == {"100": {4}}
+    assert set(coordinator.room_clean_settings) == {("100", 4)}
+    assert coordinator.room_clean_settings[("100", 4)].work_mode == WorkMode.VACUUM
+
+
+async def test_newer_unresolved_selection_supersedes_same_stored_map() -> None:
+    """A post-failure unresolved choice wins when its map becomes known."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {}
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator.data = NarwalState()
+    coordinator.client = MagicMock()
+    coordinator.client.state = coordinator.data
+    coordinator._room_selection_store = MagicMock()
+    coordinator._room_selection_store.async_load = AsyncMock(
+        side_effect=[
+            OSError,
+            {
+                "maps": [{"map_id": "100", "room_ids": [4]}],
+                "profiles": [],
+            },
+        ]
+    )
+    coordinator._room_selection_store.async_save = AsyncMock()
+    coordinator._room_selection_save_lock = asyncio.Lock()
+    coordinator._room_selection_store_loaded = False
+    coordinator._room_profile_store_loaded = False
+    coordinator._room_selection_dirty_maps = set()
+    coordinator._schedule_room_selection_save = MagicMock()
+
+    await coordinator._async_restore_room_selections()
+    coordinator.set_room_selected_for_clean(5, True)
+    await coordinator._async_save_room_selections()
+
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="100") == [5]
+    assert coordinator.selected_clean_rooms == {"100": {5}}
+
+    saved = coordinator._room_selection_store.async_save.await_args.args[0]
+    assert saved["maps"] == [
+        {
+            "map_id": None,
+            "room_ids": [5],
+            "pending_map_resolution": True,
+        },
+        {"map_id": "100", "room_ids": [4]},
+    ]
+    restarted = NarwalCoordinator.__new__(NarwalCoordinator)
+    restarted.selected_clean_rooms = {}
+    restarted.room_clean_settings = {}
+    restarted.room_clean_settings_customized = {}
+    restarted._room_selection_store = _RoomSelectionStore()
+    restarted._room_selection_store.data = saved
+    restarted._room_selection_store_loaded = False
+    restarted._room_profile_store_loaded = False
+    restarted._room_selection_dirty_maps = set()
+    restarted._schedule_room_selection_save = MagicMock()
+
+    await restarted._async_restore_room_selections()
+
+    assert restarted.selected_clean_room_ids_for([4, 5], map_id="100") == [5]
+    assert restarted.selected_clean_rooms == {"100": {5}}
+
+
+async def test_persisted_unresolved_precedence_survives_failed_read_retry() -> None:
+    """A shutdown retry cannot treat persisted precedence as a local deletion."""
+    stored = {
+        "maps": [
+            {
+                "map_id": None,
+                "room_ids": [5],
+                "pending_map_resolution": True,
+            },
+            {"map_id": "100", "room_ids": [4]},
+        ],
+        "profiles": [],
+    }
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {}
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator._room_selection_store = MagicMock()
+    coordinator._room_selection_store.async_load = AsyncMock(
+        side_effect=[OSError, stored]
+    )
+    coordinator._room_selection_store.async_save = AsyncMock()
+    coordinator._room_selection_save_lock = asyncio.Lock()
+    coordinator._room_selection_store_loaded = False
+    coordinator._room_profile_store_loaded = False
+    coordinator._room_selection_dirty_maps = set()
+
+    await coordinator._async_restore_room_selections()
+    await coordinator._async_save_room_selections()
+
+    saved = coordinator._room_selection_store.async_save.await_args.args[0]
+    assert saved["maps"] == stored["maps"]
+
+    restarted = NarwalCoordinator.__new__(NarwalCoordinator)
+    restarted.selected_clean_rooms = {}
+    restarted.room_clean_settings = {}
+    restarted.room_clean_settings_customized = {}
+    restarted._room_selection_store = _RoomSelectionStore()
+    restarted._room_selection_store.data = saved
+    restarted._room_selection_store_loaded = False
+    restarted._room_profile_store_loaded = False
+    restarted._room_selection_dirty_maps = set()
+    restarted._schedule_room_selection_save = MagicMock()
+    await restarted._async_restore_room_selections()
+
+    assert restarted.selected_clean_room_ids_for([4, 5], map_id="100") == [5]
+
+
+async def test_newer_unresolved_profile_overrides_scoped_profile_after_restart() -> None:
+    """Profile resolution preserves a newer edit made before map identification."""
+    store = _RoomSelectionStore()
+    store.data = {
+        "maps": [{"map_id": "100", "room_ids": [4]}],
+        "profiles": [
+            {
+                "map_id": "100",
+                "room_id": 4,
+                "values": {"work_mode": int(WorkMode.VACUUM_AND_MOP)},
+            },
+            {
+                "map_id": None,
+                "room_id": 4,
+                "values": {"work_mode": int(WorkMode.VACUUM)},
+                "pending_map_resolution": True,
+            },
+        ],
+    }
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {}
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator.clean_settings = CleanSettings()
+    coordinator._room_selection_store = store
+    coordinator._room_selection_store_loaded = False
+    coordinator._room_profile_store_loaded = False
+    coordinator._room_selection_dirty_maps = set()
+    coordinator._schedule_room_selection_save = MagicMock()
+
+    await coordinator._async_restore_room_selections()
+    settings = coordinator.room_clean_settings_for_rooms([4], map_id="100")
+
+    assert settings[4].work_mode == WorkMode.VACUUM
+    assert set(coordinator.room_clean_settings) == {("100", 4)}
+
+
+async def test_unresolved_profile_edit_preserves_other_scoped_fields() -> None:
+    """Resolution merges newer fields without replacing scoped customization."""
+    store = _RoomSelectionStore()
+    store.data = {
+        "maps": [{"map_id": "100", "room_ids": [4]}],
+        "profiles": [
+            {
+                "map_id": "100",
+                "room_id": 4,
+                "values": {"work_mode": int(WorkMode.VACUUM)},
+            },
+            {
+                "map_id": None,
+                "room_id": 4,
+                "values": {"fan": int(FanLevel.STRONG)},
+                "pending_map_resolution": True,
+            },
+        ],
+    }
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.clean_settings = CleanSettings(work_mode=WorkMode.VACUUM_AND_MOP)
+    coordinator.selected_clean_rooms = {}
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator._room_selection_store = store
+    coordinator._room_selection_store_loaded = False
+    coordinator._room_profile_store_loaded = False
+    coordinator._room_selection_dirty_maps = set()
+    coordinator._schedule_room_selection_save = MagicMock()
+
+    await coordinator._async_restore_room_selections()
+    settings = coordinator.room_clean_settings_for_rooms([4], map_id="100")
+
+    assert settings[4].work_mode == WorkMode.VACUUM
+    assert settings[4].fan == FanLevel.STRONG
+    assert coordinator.room_clean_settings_customized == {
+        ("100", 4): {"work_mode", "fan"}
+    }
+
+
+async def test_room_selection_write_failure_does_not_escape() -> None:
+    """Store write failures are logged without aborting coordinator shutdown."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {"100": {4}}
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator._room_selection_store = MagicMock()
+    coordinator._room_selection_store.async_save = AsyncMock(
+        side_effect=PermissionError
+    )
+    coordinator._room_selection_save_lock = asyncio.Lock()
+    coordinator._room_selection_store_loaded = True
+    coordinator._room_profile_store_loaded = True
+    coordinator._room_selection_dirty_maps = {"100"}
+
+    await coordinator._async_save_room_selections()
+
+    assert coordinator._room_selection_dirty_maps == {"100"}
+
+
+async def test_cancelled_room_save_cannot_overwrite_newer_selection() -> None:
+    """Serialization remains held until a cancelled Store write completes."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {"upstairs": {4}}
+    coordinator.room_clean_settings = {}
+    coordinator.room_clean_settings_customized = {}
+    coordinator._room_selection_store_loaded = True
+    coordinator._room_profile_store_loaded = True
+    coordinator._room_selection_save_lock = asyncio.Lock()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    saved: list[object] = []
+
+    async def save(data: object) -> None:
+        if not saved:
+            first_started.set()
+            await release_first.wait()
+        saved.append(data)
+
+    coordinator._room_selection_store = MagicMock()
+    coordinator._room_selection_store.async_save = AsyncMock(side_effect=save)
+
+    older = asyncio.create_task(coordinator._async_save_room_selections())
+    await first_started.wait()
+    coordinator.selected_clean_rooms["upstairs"].add(5)
+    newer = asyncio.create_task(coordinator._async_save_room_selections())
+    older.cancel()
+    await asyncio.sleep(0)
+    older.cancel()
+    await asyncio.sleep(0)
+    release_first.set()
+    await asyncio.gather(older, newer, return_exceptions=True)
+
+    assert saved[-1]["maps"] == [
+        {"map_id": "upstairs", "room_ids": [4, 5]}
+    ]
+
+
+async def test_malformed_room_selection_store_remains_non_authoritative() -> None:
+    """Malformed nested data cannot enable starts or be overwritten."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.selected_clean_rooms = {}
+    coordinator._room_selection_store = MagicMock()
+    coordinator._room_selection_store.async_load = AsyncMock(
+        return_value={"maps": [{"map_id": "100", "room_ids": "4"}]}
+    )
+    coordinator._room_selection_store.async_save = AsyncMock()
+    coordinator._room_selection_save_lock = asyncio.Lock()
+    coordinator._room_selection_store_loaded = False
+    coordinator._room_profile_store_loaded = False
+
+    await coordinator._async_restore_room_selections()
+    await coordinator._async_save_room_selections()
+
+    assert coordinator.selected_clean_room_ids_for([4, 5], map_id="100") == []
+    coordinator._room_selection_store.async_save.assert_not_awaited()
+
+
+def test_selected_clean_room_presence_is_map_scoped() -> None:
+    """Whole-floor setup can distinguish explicit selections per map."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.client = MagicMock()
+    coordinator.client.state = NarwalState()
+    coordinator.data = coordinator.client.state
+    coordinator.selected_clean_rooms = {"upstairs": {5}}
+
+    assert coordinator.has_selected_clean_rooms(map_id="upstairs")
+    assert not coordinator.has_selected_clean_rooms(map_id="downstairs")
+
+
+def test_active_clean_settings_follow_current_room_and_runtime_updates() -> None:
+    """Live controls report dispatched room profiles instead of pending globals."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    state = NarwalState(working_status=WorkingStatus.CLEANING)
+    state.current_room_id = 5
+    coordinator.client = MagicMock()
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.active_clean_work_mode = None
+    coordinator.active_room_clean_settings = {}
+    requested = {
+        4: RoomCleanSettings(fan=FanLevel.NORMAL),
+        5: RoomCleanSettings(fan=FanLevel.STRONG),
+    }
+
+    coordinator.record_accepted_clean_start(requested)
+
+    assert coordinator.active_clean_setting("fan") == FanLevel.STRONG
+    assert coordinator.active_room_clean_settings[5] is not requested[5]
+
+    coordinator.set_active_clean_setting("fan", FanLevel.DEEP)
+
+    assert coordinator.active_clean_setting("fan") == FanLevel.DEEP
+    assert all(
+        settings.fan == FanLevel.DEEP
+        for settings in coordinator.active_room_clean_settings.values()
+    )
+
+
+def test_runtime_setting_is_retained_without_reconstructed_room_profiles() -> None:
+    """An accepted live command remains visible without startup task profiles."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    state = NarwalState(working_status=WorkingStatus.CLEANING)
+    coordinator.client = MagicMock()
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.active_clean_work_mode = None
+    coordinator.active_room_clean_settings = {}
+    coordinator.active_clean_setting_overrides = {}
+
+    coordinator.set_active_clean_setting("fan", FanLevel.STRONG)
+
+    assert coordinator.active_clean_setting("fan") == FanLevel.STRONG
+
+    state.working_status = WorkingStatus.STANDBY
+    coordinator._sync_active_clean_context(state)
+
+    assert coordinator.active_clean_setting_overrides == {}
+
+
+def test_mixed_active_clean_uses_current_room_mode_for_live_controls() -> None:
+    """Runtime control applicability follows the room currently being cleaned."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    state = NarwalState(working_status=WorkingStatus.CLEANING)
+    state.current_room_id = 5
+    coordinator.client = MagicMock()
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.active_clean_work_mode = None
+    coordinator.active_room_clean_settings = {}
+
+    coordinator.record_accepted_clean_start(
+        {
+            4: RoomCleanSettings(work_mode=WorkMode.MOP),
+            5: RoomCleanSettings(work_mode=WorkMode.VACUUM),
+        }
+    )
+
+    assert coordinator.active_clean_work_mode is None
+    assert coordinator.clean_setting_applicability_mode(live=True) == WorkMode.VACUUM
+
+    state.current_room_id = 4
+    assert coordinator.clean_setting_applicability_mode(live=True) == WorkMode.MOP
+
+
+def test_paused_standby_task_context_blocks_new_actions() -> None:
+    """Paused STANDBY overlays still represent the current clean task."""
+    state = NarwalState()
+    state.task_progress_percent = 72
+    state.task_elapsed_time = 900
+    state.current_room_id = 4
+
+    state.update_from_base_status({"3": {"1": 1, "2": 1}, "11": 1, "47": 2})
+
+    assert state.working_status == WorkingStatus.STANDBY
+    assert state.is_paused
+    assert state.has_paused_clean_task_context
+    assert is_live_clean_setting_available(state)
+    assert not can_edit_pending_clean_settings(state)
+    assert not can_start_cleaning(state)
+
+
+def test_task_completed_remains_busy_until_terminal_dock_state() -> None:
+    """TASK_COMPLETED is the return leg, not an editable idle state."""
+    state = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
+    state.dock_presence = 6
+
+    assert state.is_docked
+    assert is_clean_session_context(state)
+    assert is_narwal_task_busy(state)
+    assert not can_edit_pending_clean_settings(state)
+    assert not can_start_cleaning(state)
+
+
+def test_remapping_does_not_expose_live_clean_settings() -> None:
+    """Map-building tasks do not accept live clean-setting commands."""
+    state = NarwalState(working_status=WorkingStatus.REMAPPING)
+
+    assert not is_live_clean_setting_available(state)
+
+
+@pytest.mark.parametrize(
+    "working_status", (WorkingStatus.TASK_COMPLETED, WorkingStatus.ERROR)
+)
+def test_terminal_status_does_not_expose_live_clean_settings(
+    working_status: WorkingStatus,
+) -> None:
+    """Accepted-start context cannot expose controls after a terminal status."""
+    state = NarwalState(working_status=WorkingStatus.CLEANING)
+    state.assume_robot_clean()
+    state.working_status = working_status
+
+    assert not is_live_clean_setting_available(state)
 
 
 class TestCoordinatorResilience:
@@ -90,9 +838,17 @@ class TestCoordinatorResilience:
         # Fresh subscription so renewal does not fire in unrelated tests.
         coordinator._last_topic_subscribe = time.monotonic()
         coordinator._prev_working_status = MagicMock()
+        coordinator.active_clean_work_mode = None
+        coordinator.active_room_clean_settings = {}
         coordinator.update_interval = None
-        # Prevent background task warnings
-        mock_entry.async_create_background_task = MagicMock()
+        def _close_background_task(*args: object) -> None:
+            for arg in args:
+                if hasattr(arg, "close"):
+                    arg.close()
+
+        mock_entry.async_create_background_task = MagicMock(
+            side_effect=_close_background_task
+        )
         return coordinator
 
     async def test_stale_data_on_first_failure(self) -> None:
@@ -104,6 +860,72 @@ class TestCoordinatorResilience:
 
         assert result is coordinator.client.state
         assert coordinator._consecutive_failures == 1
+
+    async def test_poll_retries_failed_room_store_restore(self) -> None:
+        """Polling retries a transient Store read failure without user action."""
+        coordinator = self._make_coordinator()
+        coordinator._room_selection_store = MagicMock()
+        coordinator._room_selection_store.async_load = AsyncMock(
+            side_effect=[OSError, None]
+        )
+        coordinator._room_selection_save_lock = asyncio.Lock()
+        coordinator._room_selection_store_loaded = False
+        coordinator._room_profile_store_loaded = False
+        type(coordinator.client).connected = PropertyMock(return_value=False)
+
+        await coordinator._async_restore_room_selections()
+        assert not coordinator._room_selection_store_loaded
+        assert not coordinator._room_profile_store_loaded
+
+        result = await coordinator._async_update_data()
+
+        assert result is coordinator.client.state
+        assert coordinator._room_selection_store_loaded
+        assert coordinator._room_profile_store_loaded
+        assert coordinator._room_selection_store.async_load.await_count == 2
+
+    async def test_poll_restore_is_serialized_with_room_store_save(self) -> None:
+        """A retry cannot apply an old read after a concurrent save."""
+        coordinator = self._make_coordinator()
+        coordinator.selected_clean_rooms = {}
+        coordinator.room_clean_settings = {}
+        coordinator.room_clean_settings_customized = {}
+        coordinator._room_selection_dirty_maps = set()
+        coordinator._room_profile_pending_resolution = set()
+        coordinator._room_selection_save_lock = asyncio.Lock()
+        coordinator._room_selection_store_loaded = False
+        coordinator._room_profile_store_loaded = False
+        coordinator._schedule_room_selection_save = MagicMock()
+        type(coordinator.client).connected = PropertyMock(return_value=False)
+        read_started = asyncio.Event()
+        release_read = asyncio.Event()
+
+        async def delayed_load() -> object:
+            read_started.set()
+            await release_read.wait()
+            return {
+                "maps": [{"map_id": "upstairs", "room_ids": [4]}],
+                "profiles": [],
+            }
+
+        coordinator._room_selection_store = MagicMock()
+        coordinator._room_selection_store.async_load = AsyncMock(
+            side_effect=delayed_load
+        )
+        coordinator._room_selection_store.async_save = AsyncMock()
+
+        poll_task = asyncio.create_task(coordinator._async_update_data())
+        await read_started.wait()
+        coordinator.set_room_selected_for_clean(5, True, map_id="upstairs")
+        save_task = asyncio.create_task(coordinator._async_save_room_selections())
+        release_read.set()
+        await poll_task
+        await save_task
+
+        assert coordinator.selected_clean_rooms == {"upstairs": {5}}
+        coordinator._room_selection_store.async_save.assert_awaited_once()
+        saved = coordinator._room_selection_store.async_save.await_args.args[0]
+        assert saved["maps"] == [{"map_id": "upstairs", "room_ids": [5]}]
 
     async def test_stale_data_on_consecutive_failures_below_threshold(self) -> None:
         """_async_update_data returns stale state for failures 1-4."""
@@ -178,6 +1000,21 @@ class TestCoordinatorResilience:
 
         assert coordinator._consecutive_failures == 0
         assert not coordinator.has_fresh_state
+
+    async def test_idle_push_clears_active_clean_work_mode(self) -> None:
+        """Accepted-task mode metadata is only kept for active clean contexts."""
+        coordinator = self._make_coordinator()
+        coordinator.active_clean_work_mode = WorkMode.MOP
+        coordinator.active_room_clean_settings = {4: RoomCleanSettings()}
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator._prev_working_status = WorkingStatus.CLEANING
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": int(WorkingStatus.DOCKED), "3": 6}})
+
+        coordinator._on_state_update(state)
+
+        assert coordinator.active_clean_work_mode is None
+        assert coordinator.active_room_clean_settings == {}
 
     async def test_poll_does_not_call_connect(self) -> None:
         """_async_update_data does NOT call client.connect() when disconnected."""
@@ -367,10 +1204,15 @@ class TestTopicSubscriptionRenewal:
         c._consumable_poll_countdown = 99
         c._fast_poll_remaining = 0
         c._listen_task = None
-        c._map_fetch_pending = False
+        # This fixture exercises subscription renewal, not deferred map fetches.
+        # Keep that background path suppressed so its mocked task creator does
+        # not leave an unconsumed coroutine behind.
+        c._map_fetch_pending = True
         c._last_display_map_resub = 0.0
         c._last_topic_subscribe = last_subscribe
         c._prev_working_status = MagicMock()
+        c.active_clean_work_mode = None
+        c.active_room_clean_settings = {}
         c.update_interval = None
         return c
 

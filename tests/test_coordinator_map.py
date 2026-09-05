@@ -15,6 +15,7 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
+from custom_components.narwal.camera import NarwalMapCamera  # noqa: E402
 from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
 from custom_components.narwal.narwal_client import NarwalState  # noqa: E402
 from custom_components.narwal.narwal_client.const import WorkingStatus  # noqa: E402
@@ -47,6 +48,8 @@ class TestCoordinatorMapRefresh:
         coordinator._last_display_map_resub = 0.0
         coordinator._last_status_resub = 0.0
         coordinator._prev_working_status = WorkingStatus.UNKNOWN
+        coordinator.active_clean_work_mode = None
+        coordinator.active_room_clean_settings = {}
         coordinator.update_interval = None
         coordinator.async_set_updated_data = MagicMock()
         def _close_background_task(*args: object) -> None:
@@ -176,3 +179,35 @@ class TestCoordinatorMapRefresh:
 
         assert coordinator._fast_poll_remaining == 0
         assert coordinator.update_interval == POLL_INTERVAL
+
+
+def test_custom_cleaning_starts_a_new_camera_trail() -> None:
+    """A custom room clean must reset the sampled trail like every clean status."""
+    state = NarwalState(working_status=WorkingStatus.CUSTOM_CLEANING)
+    coordinator = MagicMock()
+    coordinator.client.state = state
+    camera = NarwalMapCamera.__new__(NarwalMapCamera)
+    camera.coordinator = coordinator
+    camera._last_cleaning_status = WorkingStatus.STANDBY
+    camera._reset_trail = MagicMock()
+    camera.async_write_ha_state = MagicMock()
+
+    camera._handle_coordinator_update()
+
+    camera._reset_trail.assert_called_once_with()
+
+
+def test_remapping_does_not_start_a_cleaning_trail() -> None:
+    """Map exploration must not be recorded as cleaning history."""
+    state = NarwalState(working_status=WorkingStatus.REMAPPING)
+    coordinator = MagicMock()
+    coordinator.client.state = state
+    camera = NarwalMapCamera.__new__(NarwalMapCamera)
+    camera.coordinator = coordinator
+    camera._last_cleaning_status = WorkingStatus.STANDBY
+    camera._reset_trail = MagicMock()
+    camera.async_write_ha_state = MagicMock()
+
+    camera._handle_coordinator_update()
+
+    camera._reset_trail.assert_not_called()

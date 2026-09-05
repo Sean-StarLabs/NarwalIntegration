@@ -36,12 +36,13 @@ This integration uses a **local WebSocket connection on port 9002**. Only models
 | Model | Status | Notes |
 |-------|--------|-------|
 | **Narwal Flow** (AX12) | **Working** | Primary development target. Room cleaning confirmed on firmware v01.08.03.07 with [#49](https://github.com/sjmotew/NarwalIntegration/pull/49). On v01.07.22+, `vacuum.start` needs a loaded map ([#36](https://github.com/sjmotew/NarwalIntegration/issues/36)). |
-| **Narwal Flow 2** (QxMSPG6VSO) | **Working** | Room cleaning fixed by [#49](https://github.com/sjmotew/NarwalIntegration/pull/49); on v1.0.1 see the warning above before using `vacuum.clean_area` |
+| **Narwal Flow 2** (QxMSPG6VSO, iSuVlI1If2, mkbqaprvrb) | **Working** | Room cleaning fixed by [#49](https://github.com/sjmotew/NarwalIntegration/pull/49); on v1.0.1 see the warning above before using `vacuum.clean_area` |
 | **Freo Z10 Ultra** (CX4) | **Working** | Community confirmed |
 | **Freo Z10 Pro / Turbo** (AX26) | **Working** | Same product key and firmware (v01.02.00.15) reported under both names ([#40](https://github.com/sjmotew/NarwalIntegration/issues/40), [#70](https://github.com/sjmotew/NarwalIntegration/issues/70)). Room cleaning confirmed working with [#49](https://github.com/sjmotew/NarwalIntegration/pull/49). |
 | **Freo X10 Pro** (AX15) | **Working** | Community confirmed ([#12](https://github.com/sjmotew/NarwalIntegration/issues/12)) |
 | **Narwal JX** | **Working** | Confirmed by [@Smiorld](https://github.com/sjmotew/NarwalIntegration/issues/42) — port 9002 open, connects, map loads. Selectable in the model list; commands beyond connect/map not yet exercised ([#42](https://github.com/sjmotew/NarwalIntegration/issues/42)) |
 | **Freo Z Ultra** (hardware CX7, cloud identity J5) | **Working on tested variant** | Confirmed with product key `hEA7OEshlx` on firmware `v01.13.11.02`. Requires the cloud-assigned Device ID because this model does not broadcast. Base status, maps, consumables, and commands work locally; live cleaning position/progress is unavailable. See the variant note below. |
+| **Freo Z10** (plain, non-Ultra / non-Pro) | **Under investigation** | Advertises `_narwal_sweeper._tcp` over mDNS and is picked up by discovery, but port 9002 returns `ECONNREFUSED` in every device state — the host is healthy and nothing is listening. Distinct from the Z10 Pro / Turbo and Z10 Ultra above, both of which work ([#92](https://github.com/sjmotew/NarwalIntegration/issues/92)) |
 | **Freo X Ultra** (AX18/AX19) | **Not Compatible** | Uses ZeroMQ (port 6789) + Tuya cloud, not WebSocket ([#4](https://github.com/sjmotew/NarwalIntegration/issues/4)) |
 | **Freo X Plus** | **Not Compatible** | Cloud-only — no local API |
 | **Narwal J-series** (J1/J4) | **Not Compatible** | J1: HTTP-only (port 8080); J4: cloud-only (Tuya). J5 is the cloud identity of the supported global CX7 listed above. |
@@ -436,6 +437,24 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 ## Reporting Issues
 
 Use the [issue templates](https://github.com/sjmotew/NarwalIntegration/issues/new/choose) — they collect your HA version, model, and debug logs for faster diagnosis.
+
+### Attach diagnostics
+
+**Settings → Devices & Services → Narwal → ⋮ next to your device → Download diagnostics.**
+
+Attaching that file answers most of what would otherwise be asked one question at a time. It contains:
+
+| Section | What it settles |
+|---------|-----------------|
+| `model_resolution` | Your robot's product key, and **whether this build recognises it at all** |
+| `device` | Firmware version, and the six-character device suffix that matches your logs |
+| `connection` | Whether the robot is connected, awake, and broadcasting |
+| `feature_list` | What the robot says it supports — or why it refused to answer |
+| `raw_base_status` | The undecoded protobuf fields new model support is built from |
+
+**Redacted automatically:** your IP address, full device ID, and Narwal account UUID. The **product key is deliberately kept** — it identifies a model, not a person, and it is usually the answer.
+
+If your robot reports a product key this integration doesn't know, say so in the issue — that alone is often a one-line fix.
 
 ## Protocol Documentation
 

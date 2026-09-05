@@ -753,6 +753,19 @@ class NarwalState:
         )
 
     @property
+    def has_paused_clean_task_context(self) -> bool:
+        """True when a paused overlay still has retained robot clean details."""
+        if not self.is_paused or self.is_docked:
+            return False
+        return (
+            getattr(self, "task_progress_percent", None) is not None
+            or getattr(self, "task_elapsed_time", self.cleaning_time) > 0
+            or getattr(self, "task_remaining_time", 0) > 0
+            or self.current_room_id is not None
+            or bool(getattr(self, "current_room_aux_name", ""))
+        )
+
+    @property
     def is_cleaning(self) -> bool:
         """True when actively cleaning (not paused, not returning to dock)."""
         if self.has_recent_active_working_status:
@@ -1113,7 +1126,8 @@ class NarwalState:
             except (ValueError, TypeError):
                 pass
         if active_payload:
-            self.working_status = WorkingStatus.CLEANING
+            if self.working_status != WorkingStatus.CUSTOM_CLEANING:
+                self.working_status = WorkingStatus.CLEANING
             self.last_active_working_status_time = time.monotonic()
             self.clear_assumed_robot_clean()
             self.is_paused = False
@@ -1193,6 +1207,11 @@ class NarwalState:
                     self.working_status = WorkingStatus.UNKNOWN
                 if self.working_status not in ACTIVE_CLEANING_STATUSES:
                     self.last_active_working_status_time = 0.0
+                if self.working_status in {
+                    WorkingStatus.TASK_COMPLETED,
+                    WorkingStatus.ERROR,
+                }:
+                    self.clear_assumed_robot_clean()
             # Sub-field 2: paused overlay (0 or absent = not paused, 1 = paused)
             self.is_paused = bool(field3.get("2"))
             # Sub-field 7: returning to dock on old FW (value 1 = returning).

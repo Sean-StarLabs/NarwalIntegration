@@ -17,6 +17,7 @@ from .const import (
     CONF_PRODUCT_KEY,
     DEFAULT_PORT,
     DOMAIN,
+    MODEL_AUTO_LABEL,
     NARWAL_MODELS,
     model_label_for_product_key,
     NO_BROADCAST_PRODUCT_KEYS,
@@ -27,6 +28,12 @@ _LOGGER = logging.getLogger(__name__)
 
 MODEL_OPTIONS = list(NARWAL_MODELS.keys())
 
+# Pre-select auto-detect rather than the first model in the list. mDNS carries
+# no model information, so whatever sits first is a guess, and accepting it is
+# the normal path -- which is how a Flow 2 came to be called "Narwal Flow"
+# (#81). Auto-detect reads the key off the robot and names the entry from that.
+MODEL_DEFAULT = MODEL_AUTO_LABEL
+
 # `NARWAL_7bb53c.local.` (DHCP/mDNS hostname) and the zeroconf instance name
 # `_app_wss_server_7bb53c._narwal_sweeper._tcp.local.` both end in the last six
 # hex characters of the robot's device_id.
@@ -36,7 +43,7 @@ STEP_USER_DATA_SCHEMA = vol.Schema(
     {
         vol.Required("host"): str,
         vol.Optional("port", default=DEFAULT_PORT): int,
-        vol.Required(CONF_MODEL, default=MODEL_OPTIONS[0]): vol.In(MODEL_OPTIONS),
+        vol.Required(CONF_MODEL, default=MODEL_DEFAULT): vol.In(MODEL_OPTIONS),
     }
 )
 
@@ -72,7 +79,7 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
             {
                 vol.Required("host", default=default_host): str,
                 vol.Optional("port", default=DEFAULT_PORT): int,
-                vol.Required(CONF_MODEL, default=MODEL_OPTIONS[0]): vol.In(MODEL_OPTIONS),
+                vol.Required(CONF_MODEL, default=MODEL_DEFAULT): vol.In(MODEL_OPTIONS),
             }
         )
 

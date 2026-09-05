@@ -116,14 +116,6 @@ Progress: Phase 15 executed as issue/PR work, not formal plans — 8 of 9 merge 
 
 ## Session Continuity
 
-Last session: 2026-08-08
-Stopped at: **v1.0.2 and v1.0.3 both shipped.** master `a28e73e`, 230 tests, CI green, running on the live HA instance.
-- Drained the merge queue (#53, #54, #50, #62, #61, #24, #63 merged maintainer-side), fixed #69, released v1.0.2.
-- Live-deploy before tagging caught two release blockers CI structurally cannot see (switch.py EntityCategory import; camera.py's 4 undeclared const names from #62). Two AST guards added: test_intra_package_imports, test_translation_keys.
-- **#73 root-caused on hardware during a live Pantry clean and CLOSED**: the active_robot_publish subscription lasts 600s and was never renewed; once lapsed the robot stops broadcasting working_status/display_map. Renewal now runs unconditionally every 240s. See [[broadcast-subscription-expires]]. v1.0.2's "does not reproduce" claim was wrong and is corrected in the repo and on the published release.
-- Room cleaning verified end to end: segment 12 = Pantry, clean/start_clean, mode=VACUUM fan=STRONG passes=2 all applied, entity tracked 2.58 -> 9.5 m2 then docked.
-- HA side: new top-level "Narwal" dashboard (YAML mode, /config/narwal-dashboard.yaml, 4 views), Vacuum Test view removed from Overview_old. Clean-a-room buttons are generated from the live area_mapping by scratchpad/gen_rooms.py — re-run it after mapping more rooms.
-- 6 of 22 rooms mapped. User plans a fresh full-house map in the Narwal app, then will align HA areas/floors. Remap renumbers segments and invalidates the mapping (repair issue fires).
-Next: **#75** (new) — cleaning trail does not persist across a session; trail is entity-local state on the camera and any not-cleaning->cleaning flap calls _reset_trail(); also hardcodes (CLEANING, CLEANING_ALT) instead of ACTIVE_CLEANING_STATUSES. Diagnosis is from source only, unverified. Then #74 (China-region Flow); #35 awaits @StratoGh0st99's narrowed zeroconf/DHCP PR; #43 (multi-floor) matters if the remap produces more than one map.
-HA access: `claude_debug_token` stays in HA secrets.yaml **deliberately** — user accepted the risk for ongoing direct access (log reads via /api/hassio/core/logs, websocket for segments/mapping). Do not remove it.
-Resume file: `.planning/.continue-here.md` — **rewritten as the #75 trail-persistence plan** (6 tasks, verify-first; task 1 must reproduce before any refactor). Phase 15 material now lives in phases/15-*/15-LEARNINGS.md.
+Last session: 2026-09-04
+Stopped at: Resumed via /gsd:resume-work. #81 root-caused and fixed, #92 answered, PR #86 merged, #87-#91 stack reviewed. Master 2ad8b68, 422 tests, CI green, unreleased.
+Resume file: .planning/.continue-here.md

@@ -6,12 +6,17 @@ import tests.ha_stubs
 
 tests.ha_stubs.install()
 
+from narwal_client.const import KNOWN_PRODUCT_KEYS  # noqa: E402
+
 from custom_components.narwal.const import (  # noqa: E402
     CONF_DOCK_LIGHT_SUPPORTED,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
+    DOCK_LIGHT_PRODUCT_KEYS,
     NARWAL_MODELS,
     NO_BROADCAST_PRODUCT_KEYS,
+    PRODUCT_KEY_ALIASES,
+    model_label_for_product_key,
     configured_model_name,
     is_dock_light_supported,
 )
@@ -79,3 +84,52 @@ def test_jx_is_a_selectable_model_and_broadcasts() -> None:
     assert configured_model_name(
         {CONF_MODEL: "Narwal JX", CONF_PRODUCT_KEY: product_key}
     ) == "JX"
+
+
+def test_every_alias_names_a_real_selector_model() -> None:
+    """An alias exists to reuse a selector label, so it must match one exactly.
+
+    A typo here would silently store a model string no other code recognises --
+    `configured_model_name` would hand the device registry a name that is not a
+    model, and it would look like working behaviour.
+    """
+    for product_key, label in PRODUCT_KEY_ALIASES.items():
+        assert label in NARWAL_MODELS, f"{product_key} names unknown model {label!r}"
+
+
+def test_alias_keys_are_discoverable() -> None:
+    """An alias the client never tries cannot be resolved in the first place.
+
+    Auto-detect cycles KNOWN_PRODUCT_KEYS to provoke a response. A key that
+    names a model but is absent from that list resolves only by luck, via the
+    bare-topic frame or a broadcast.
+    """
+    for product_key in PRODUCT_KEY_ALIASES:
+        assert product_key in KNOWN_PRODUCT_KEYS
+
+
+def test_flow2_alternate_keys_resolve_to_flow_2() -> None:
+    """All three known Flow 2 keys name the same model (#81).
+
+    Only QxMSPG6VSO is reachable through the selector; iSuVlI1If2 and
+    mkbqaprvrb are equally real and were previously unnamed.
+    """
+    for product_key in ("QxMSPG6VSO", "iSuVlI1If2", "mkbqaprvrb"):
+        assert model_label_for_product_key(product_key) == "Narwal Flow 2"
+
+
+def test_unknown_key_has_no_label() -> None:
+    """An unrecognised key must not be guessed at -- the raw key is the honest answer."""
+    assert model_label_for_product_key("zzzzUNKNOWN") is None
+    assert model_label_for_product_key(None) is None
+
+
+def test_dock_light_follows_every_flow2_key() -> None:
+    """The dock light belongs to the model, not to one of its keys (#81).
+
+    A hardcoded list meant @DeNo64's Flow 2, reporting an unlisted key, lost a
+    feature its hardware has. Deriving the set keeps a new key from silently
+    disabling it again.
+    """
+    assert DOCK_LIGHT_PRODUCT_KEYS == {"QxMSPG6VSO", "iSuVlI1If2", "mkbqaprvrb"}
+    assert is_dock_light_supported({CONF_PRODUCT_KEY: "mkbqaprvrb"})

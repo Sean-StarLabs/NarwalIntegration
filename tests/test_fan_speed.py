@@ -19,8 +19,14 @@ FLOW_2 = "QxMSPG6VSO"
 
 
 def test_canonical_labels_are_the_offered_list() -> None:
-    """The offered labels are the short forms, in ascending suction order."""
-    assert FAN_SPEED_LIST == ["Quiet", "Standard", "Strong", "Super", "Ultra"]
+    """The offered labels match the app, in ascending suction order."""
+    assert FAN_SPEED_LIST == [
+        "Quiet",
+        "Standard",
+        "Strong",
+        "Super Powerful",
+        "Ultra",
+    ]
 
 
 def test_canonical_labels_map_to_the_proto_enum() -> None:
@@ -29,13 +35,14 @@ def test_canonical_labels_map_to_the_proto_enum() -> None:
     assert FAN_SPEED_MAP["Standard"] is FanLevel.NORMAL
     assert FAN_SPEED_MAP["Strong"] is FanLevel.STRONG
     # #70 capture: the app's top tier ("super puissant") sends tag 2 = 4.
-    assert FAN_SPEED_MAP["Super"] is FanLevel.DEEP
-    assert int(FAN_SPEED_MAP["Super"]) == 4
+    assert FAN_SPEED_MAP["Super Powerful"] is FanLevel.DEEP
+    assert int(FAN_SPEED_MAP["Super Powerful"]) == 4
     assert FAN_SPEED_MAP["Ultra"] is FanLevel.SUPER
 
 
 def test_pre_rename_labels_still_resolve() -> None:
     """Labels shipped through v1.0.3 keep working in existing automations."""
+    assert FAN_SPEED_MAP["Super"] is FanLevel.DEEP
     assert FAN_SPEED_MAP["Super powerful"] is FanLevel.DEEP
     assert FAN_SPEED_MAP["Ultra powerful"] is FanLevel.SUPER
 
@@ -50,7 +57,7 @@ def test_lowercase_aliases_still_resolve() -> None:
 
 def test_aliases_are_not_offered_as_options() -> None:
     """Back-compat spellings are accepted but never shown in the picker."""
-    for alias in ("Super powerful", "Ultra powerful", "quiet", "max"):
+    for alias in ("Super", "Super powerful", "Ultra powerful", "quiet", "max"):
         assert alias not in FAN_SPEED_LIST
 
 
@@ -66,7 +73,7 @@ def test_ultra_withheld_where_the_app_cannot_reach_it() -> None:
         "Quiet",
         "Standard",
         "Strong",
-        "Super",
+        "Super Powerful",
     ]
 
 

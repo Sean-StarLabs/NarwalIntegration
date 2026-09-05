@@ -6,14 +6,16 @@ CleanParam tag for the current mode (sweep->5, mop->6, sweep_then_mop->5+6, sync
 
 from __future__ import annotations
 
+import voluptuous as vol
 from homeassistant.components.number import NumberMode, RestoreNumber
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers.entity_platform import AddConfigEntryEntitiesCallback
 
-from . import NarwalConfigEntry
+from . import NarwalConfigEntry, _validate_pass_count
 from .const import PASSES_MAX, PASSES_MIN
-from .coordinator import NarwalCoordinator
+from .coordinator import NarwalCoordinator, can_edit_pending_clean_settings
 from .entity import NarwalEntity
 
 
@@ -50,8 +52,11 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
 
     @property
     def available(self) -> bool:
-        """Editable even while the robot sleeps — this is a pending setting."""
-        return True
+        """Return True when the pass count can be changed now."""
+        return (
+            can_edit_pending_clean_settings(self.coordinator.data)
+            and not self.coordinator.has_selected_clean_rooms()
+        )
 
     @property
     def native_value(self) -> float:
@@ -60,5 +65,15 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
 
     async def async_set_native_value(self, value: float) -> None:
         """Store the pass count."""
-        self.coordinator.clean_settings.passes = int(value)
+        if (
+            not can_edit_pending_clean_settings(self.coordinator.data)
+            or self.coordinator.has_selected_clean_rooms()
+        ):
+            raise HomeAssistantError("Narwal pass count cannot be changed right now")
+        try:
+            passes = _validate_pass_count(value)
+        except vol.Invalid as err:
+            raise HomeAssistantError(str(err)) from err
+        self.coordinator.clean_settings.passes = passes
         self.async_write_ha_state()
+        self.coordinator.async_update_listeners()
