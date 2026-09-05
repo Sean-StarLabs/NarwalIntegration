@@ -184,8 +184,11 @@ def is_clean_session_context(state: NarwalState | None) -> bool:
         return False
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
-        or state.working_status
-        in {WorkingStatus.REMAPPING, WorkingStatus.TASK_COMPLETED}
+        or state.working_status == WorkingStatus.REMAPPING
+        or (
+            state.working_status == WorkingStatus.TASK_COMPLETED
+            and not state.has_current_dock_presence_signal
+        )
         or _state_attr_is_true(state, "has_assumed_robot_clean")
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
@@ -222,8 +225,11 @@ def is_narwal_task_busy(state: NarwalState | None) -> bool:
         return False
     return (
         state.working_status in ACTIVE_CLEANING_STATUSES
-        or state.working_status
-        in {WorkingStatus.REMAPPING, WorkingStatus.TASK_COMPLETED}
+        or state.working_status == WorkingStatus.REMAPPING
+        or (
+            state.working_status == WorkingStatus.TASK_COMPLETED
+            and not state.has_current_dock_presence_signal
+        )
         or _state_attr_is_true(state, "has_assumed_robot_clean")
         or _state_attr_is_true(state, "has_recent_active_working_status")
         or _state_attr_is_true(state, "has_paused_clean_task_context")
@@ -528,6 +534,19 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     def _sync_active_clean_context(self, state: NarwalState) -> None:
         """Clear accepted-task metadata once the robot is no longer in a clean context."""
+        # A robot-side fault can interrupt an accepted clean without ending it.
+        # Keep the dispatched profile while commands are blocked so a later
+        # recovery can expose only the runtime settings that apply to the task.
+        if (
+            has_blocking_error(state)
+            and state.has_explicit_off_dock_signal
+            and (
+                self.active_clean_work_mode is not None
+                or bool(self.active_room_clean_settings)
+                or bool(getattr(self, "active_clean_setting_overrides", {}))
+            )
+        ):
+            return
         if not is_clean_session_context(state):
             self.active_clean_work_mode = None
             self.active_room_clean_settings.clear()
