@@ -440,6 +440,7 @@ def _async_register_services(hass: HomeAssistant) -> None:
             coordinator.clean_settings.route = requested_settings.route
             coordinator.record_accepted_clean_start(room_settings)
             client.state.assume_robot_clean()
+            await coordinator.async_clear_map_display_cache()
             coordinator.async_set_updated_data(client.state)
 
     hass.services.async_register(

@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import math
 import struct
 import time
+import zlib
 from dataclasses import dataclass, field
 from typing import Any, ClassVar
 
@@ -251,12 +253,132 @@ def _to_float32(val: Any) -> float | None:
     return None
 
 
+def overlay_to_grid(value: float, origin: int) -> float | None:
+    """Convert a Narwal map/display_map coordinate to a grid coordinate."""
+    if not math.isfinite(value):
+        return None
+    return value - origin
+
+
 def _optional_int(value: Any) -> int | None:
     """Coerce a protobuf scalar to int when possible."""
     try:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _packed_float32_values(value: Any) -> list[float]:
+    """Decode a protobuf packed fixed32/float stream."""
+    if isinstance(value, (bytes, bytearray)):
+        raw = bytes(value)
+        return [
+            struct.unpack_from("<f", raw, offset)[0]
+            for offset in range(0, len(raw) - len(raw) % 4, 4)
+        ]
+    if isinstance(value, str):
+        raw = value.encode("latin-1", "ignore")
+        return [
+            struct.unpack_from("<f", raw, offset)[0]
+            for offset in range(0, len(raw) - len(raw) % 4, 4)
+        ]
+    if isinstance(value, list):
+        values: list[float] = []
+        for item in value:
+            parsed = _to_float32(item)
+            if parsed is not None:
+                values.append(parsed)
+        return values
+    return []
+
+
+def _packed_float32_bytes(value: Any) -> bytes:
+    """Return raw packed float32 bytes from a protobuf field."""
+    if isinstance(value, (bytes, bytearray)):
+        return bytes(value)
+    if isinstance(value, str):
+        return value.encode("latin-1", "ignore")
+    if isinstance(value, list):
+        raw = bytearray()
+        for item in value:
+            parsed = _to_float32(item)
+            raw.extend(struct.pack("<f", parsed if parsed is not None else float("nan")))
+        return bytes(raw)
+    return b""
+
+
+def _decode_trajectory(
+    x_values: bytes,
+    y_values: bytes,
+) -> list[tuple[float, float]]:
+    """Decode map/display_map field 2 into Narwal-native trajectory points."""
+    import math
+
+    xs = _packed_float32_values(x_values)
+    ys = _packed_float32_values(y_values)
+    # X/Y are parallel streams. Filter after zipping so one invalid value
+    # drops that coordinate pair instead of shifting the axes.
+    return [
+        (x, y)
+        for x, y in zip(xs, ys, strict=False)
+        if math.isfinite(x) and math.isfinite(y)
+    ]
+
+
+def _trajectory_window_streams(
+    decoded: dict[str, Any],
+) -> tuple[
+    bytes,
+    bytes,
+    tuple[int, int, int] | tuple[()],
+    tuple[int, ...],
+]:
+    """Return one native trajectory window and its deterministic signature."""
+    raw = decoded.get("2")
+    if not isinstance(raw, dict):
+        return b"", b"", (), ()
+    x_values = _packed_float32_bytes(raw.get("1"))
+    y_values = _packed_float32_bytes(raw.get("2"))
+    pair_bytes = min(len(x_values), len(y_values))
+    pair_bytes -= pair_bytes % 4
+    if pair_bytes <= 0:
+        return b"", b"", (), ()
+    finite_x = bytearray()
+    finite_y = bytearray()
+    breaks: list[int] = []
+    pending_break = False
+    for offset in range(0, pair_bytes, 4):
+        x_chunk = x_values[offset : offset + 4]
+        y_chunk = y_values[offset : offset + 4]
+        x = struct.unpack("<f", x_chunk)[0]
+        y = struct.unpack("<f", y_chunk)[0]
+        if not (math.isfinite(x) and math.isfinite(y)):
+            pending_break = bool(finite_x)
+            continue
+        if pending_break:
+            breaks.append(len(finite_x) // 4)
+            pending_break = False
+        finite_x.extend(x_chunk)
+        finite_y.extend(y_chunk)
+    if not finite_x:
+        return b"", b"", (), ()
+    x_values = bytes(finite_x)
+    y_values = bytes(finite_y)
+    trajectory_breaks = tuple(breaks)
+    break_bytes = b"".join(
+        index.to_bytes(4, "little", signed=False) for index in trajectory_breaks
+    )
+    return (
+        x_values,
+        y_values,
+        (
+            len(x_values) // 4,
+            zlib.crc32(x_values) & 0xFFFFFFFF,
+            zlib.crc32(break_bytes, zlib.crc32(y_values)) & 0xFFFFFFFF,
+        ),
+        trajectory_breaks,
+    )
+
 
 
 def _dock_drying_timers(decoded: dict[str, Any]) -> dict[str, DockTaskTimer]:
@@ -447,7 +569,8 @@ class MapData:
 
         # Extract origin offsets from field 6 (coordinate transform).
         # Field 6: {1: origin_y, 2: ?, 3: origin_x, 4: resolution}
-        # Positions are in grid-offset units: pixel = raw - origin
+        # field 6 provides grid origin offsets used by live map overlays:
+        # pixel = value - origin
         origin_x = 0
         origin_y = 0
         field6 = payload.get("6")
@@ -458,10 +581,10 @@ class MapData:
                 origin_y = int(field6.get("1", 0))
 
         # Parse dock position from field 8 (dock/charging station location).
-        # Field 8 structure: {1: {1: x_dm, 2: y_dm}, 2: heading_rad}
-        # Coordinates are in decimeters (same as display_map field 5).
+        # Field 8 structure: {1: {1: x, 2: y}, 2: heading_rad}
+        # Coordinates use the same live map units as display_map field 5.
         # Matches display_map field 5 (confirmed via live capture cross-reference).
-        # Pixel transform: px = (x_dm * 10) / cm_per_pixel - origin
+        # Pixel transform: px = value - origin
         dock_x = None
         dock_y = None
         field8 = payload.get("8")
@@ -469,11 +592,11 @@ class MapData:
             pos = field8.get("1")
             if isinstance(pos, dict) and "1" in pos and "2" in pos:
                 try:
-                    x_dm = _to_float32(pos["1"])
-                    y_dm = _to_float32(pos["2"])
-                    if x_dm is not None and y_dm is not None:
-                        dock_x = x_dm - origin_x
-                        dock_y = y_dm - origin_y
+                    x_pos = _to_float32(pos["1"])
+                    y_pos = _to_float32(pos["2"])
+                    if x_pos is not None and y_pos is not None:
+                        dock_x = overlay_to_grid(x_pos, origin_x)
+                        dock_y = overlay_to_grid(y_pos, origin_y)
                 except (struct.error, OverflowError, ValueError, TypeError):
                     pass
 
@@ -505,35 +628,60 @@ class MapData:
 class MapDisplayData:
     """Real-time robot position from map/display_map broadcasts.
 
-    Sent every ~1.5s during active cleaning. Contains robot position in cm,
+    Sent every ~1.5s during active cleaning. Contains robot position,
     heading in radians, and a small cleaned-area grid overlay (NOT the full
     house map — that comes from get_map).
 
     Validated field layout (live capture 2026-02-28, 13 broadcasts):
-      field 1.1: {1: x_cm, 2: y_cm} — robot position as float32 centimeters
+      field 1.1: {1: x, 2: y} — robot position as float32 map coordinates
       field 1.2: heading as float32 radians
+      field 2: rolling trajectory window {1: x_bytes, 2: y_bytes}
       field 5: dock/reference position (constant, same format)
       field 7: cleaned-area grid {1: width, 2: height, 3: compressed_bytes}
       field 10: timestamp in milliseconds since epoch
       field 12: active room list
     """
 
-    robot_x: float = 0.0  # decimeters, world coordinates
-    robot_y: float = 0.0  # decimeters, world coordinates
+    robot_x: float = 0.0  # live map X coordinate
+    robot_y: float = 0.0  # live map Y coordinate
     robot_heading: float = 0.0  # degrees (converted from radians for renderer)
     timestamp: int = 0  # milliseconds since epoch (field 10)
     # Dock/reference position from field 5 (same coordinate system as robot)
     dock_ref_x: float = 0.0
     dock_ref_y: float = 0.0
+    trajectory_x_values: bytes = b""
+    trajectory_y_values: bytes = b""
+    trajectory_signature: tuple[int, int, int] | tuple[()] = ()
+    trajectory_breaks: tuple[int, ...] = ()
+
+    @property
+    def has_trajectory(self) -> bool:
+        """Return true when display_map carried a native trajectory."""
+        return bool(self.trajectory_signature)
+
+    def trajectory_points(self) -> list[tuple[float, float]]:
+        """Decode Narwal-native trajectory points from display_map field 2."""
+        return _decode_trajectory(
+            self.trajectory_x_values,
+            self.trajectory_y_values,
+        )
+
+    def trajectory_render_points(self) -> list[tuple[float, float]]:
+        """Return trajectory points with invalid sentinels at segment breaks."""
+        points = self.trajectory_points()
+        for index in reversed(self.trajectory_breaks):
+            if 0 < index < len(points):
+                points.insert(index, (float("nan"), float("nan")))
+        return points
 
     def to_grid_coords(
         self, resolution: int, origin_x: int, origin_y: int,
     ) -> tuple[float, float] | None:
-        """Convert world-coordinate position (dm) to grid pixel coordinates.
+        """Convert live map position to grid pixel coordinates.
 
-        display_map positions are in decimeters (validated via live capture).
+        display_map positions already use the static map coordinate scale.
         Same coordinate system as get_map field 8 (dock position).
-          pixel = (x_dm * 10) / cm_per_pixel - origin_offset
+          pixel = value - origin_offset
 
         Args:
             resolution: Map resolution in mm/pixel (e.g. 60).
@@ -547,9 +695,10 @@ class MapDisplayData:
             return None
         if resolution <= 0:
             return None
-        # Positions are in grid-offset units: pixel = raw - origin
-        px = self.robot_x - origin_x
-        py = self.robot_y - origin_y
+        px = overlay_to_grid(self.robot_x, origin_x)
+        py = overlay_to_grid(self.robot_y, origin_y)
+        if px is None or py is None:
+            return None
         return (px, py)
 
     @classmethod
@@ -576,6 +725,16 @@ class MapDisplayData:
                 h_f = _to_float32(heading_raw)
                 if h_f is not None and math.isfinite(h_f):
                     result.robot_heading = math.degrees(h_f)
+
+        # Rolling cleaning trajectory window from Narwal itself. Keep raw
+        # streams here so HA can join exact overlapping windows without
+        # sampling robot positions or decoding the route on the event loop.
+        (
+            result.trajectory_x_values,
+            result.trajectory_y_values,
+            result.trajectory_signature,
+            result.trajectory_breaks,
+        ) = _trajectory_window_streams(decoded)
 
         # Dock/reference position — field 5 (same format as field 1)
         field5 = decoded.get("5", {})
@@ -1043,6 +1202,7 @@ class NarwalState:
     def assume_robot_clean(self) -> None:
         """Temporarily reserve robot-clean command context after an accepted start."""
         self.assumed_robot_clean_until = time.monotonic() + _ROBOT_START_ASSUME_TTL
+        self.map_display_data = None
 
     def clear_assumed_robot_clean(self) -> None:
         """Clear the local robot-clean command reservation."""
