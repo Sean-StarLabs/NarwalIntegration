@@ -108,6 +108,18 @@ _DOCK_TASK_FORCE_END_PAYLOADS = {
     # with ParallelTaskType.DRY_BAG to stop robot dust-bin drying.
     DOCK_TASK_DRY_DUST_BIN: b"\x08\x05",
 }
+_KNOWN_DOCK_TASKS = {
+    DOCK_TASK_EMPTY_DUSTBIN,
+    DOCK_TASK_WASH_MOP,
+    DOCK_TASK_DRY_MOP,
+    DOCK_TASK_DRY_DUST_BIN,
+    DOCK_TASK_DRY_DOCK_BAG,
+}
+_DOCK_DRYING_TASKS = {
+    DOCK_TASK_DRY_MOP,
+    DOCK_TASK_DRY_DUST_BIN,
+    DOCK_TASK_DRY_DOCK_BAG,
+}
 
 
 def _accepted_response(response: CommandResponse) -> bool:
@@ -213,22 +225,26 @@ def _has_dock_status_payload(response: CommandResponse) -> bool:
     return bool({"1", "2", "3", "7", "10", "12", "18"}.intersection(field3))
 
 
-def _dock_status_confirms_idle(state: NarwalState) -> bool:
-    """Return true when fresh dock status reports no active station task."""
-    return (
-        state.station_activity <= 0
-        and state.dock_activity in (0, 2, 6)
-        and state.has_dock_presence_signal
-        and state.working_status
-        in (
-            WorkingStatus.UNKNOWN,
-            WorkingStatus.STANDBY,
-            WorkingStatus.DOCKED,
-            WorkingStatus.CHARGED,
-            WorkingStatus.DOCKED_V2,
-            WorkingStatus.TASK_COMPLETED,
-        )
-    )
+def _apply_accepted_dock_stop(state: NarwalState, task: str) -> None:
+    """Optimistically clear the exact task accepted by a stop command."""
+    state.clear_assumed_dock_task(task)
+    if not state.has_fresh_idle_dock_drying_snapshot:
+        state.clear_dock_drying_task(task)
+    if task == DOCK_TASK_EMPTY_DUSTBIN and state.station_activity == 1:
+        state.station_activity = 0
+    elif task == DOCK_TASK_WASH_MOP:
+        if state.station_activity in (2, 3):
+            state.station_activity = 0
+        if state.dock_activity == 3:
+            state.dock_activity = 0
+    elif (
+        task in {DOCK_TASK_DRY_MOP, DOCK_TASK_DRY_DUST_BIN, DOCK_TASK_DRY_DOCK_BAG}
+        and not state.active_dock_drying_tasks
+    ):
+        if state.station_activity == 4:
+            state.station_activity = 0
+        if state.dock_activity == 4:
+            state.dock_activity = 0
 
 
 class NarwalConnectionError(Exception):
@@ -1646,12 +1662,7 @@ class NarwalClient:
     async def stop_dock_task(self, task: str | None = None) -> CommandResponse:
         """Stop the active dock task without targeting a different task."""
         async with self._dock_task_lock:
-            if (
-                self.state.has_unmapped_active_dock_task
-                and task not in _DOCK_TASK_FORCE_END_PAYLOADS
-                and not _can_force_end_scoped_dock_task(self.state, task)
-            ):
-                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+            initial_active_tasks = self.state.active_dock_task_keys
             refresh = await self._refresh_before_dock_stop(task)
             if not refresh.accepted:
                 return refresh
@@ -1661,14 +1672,26 @@ class NarwalClient:
                     data=refresh.data,
                     raw_payload=refresh.raw_payload,
                 )
+            if self.state.has_error or self.state.working_status in (
+                WorkingStatus.ERROR,
+                WorkingStatus.UNKNOWN,
+            ):
+                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             if self.state.has_unmapped_active_dock_task and not (
                 _can_force_end_scoped_dock_task(self.state, task)
             ):
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             active_tasks = self.state.active_dock_task_keys
             if task is not None and task not in active_tasks:
+                if task in _KNOWN_DOCK_TASKS:
+                    self.state.clear_assumed_dock_task(task)
+                    return CommandResponse(result_code=CommandResult.SUCCESS)
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             if task is None and len(active_tasks) != 1:
+                if len(initial_active_tasks) == 1 and not active_tasks:
+                    completed_task = initial_active_tasks[0]
+                    self.state.clear_assumed_dock_task(completed_task)
+                    return CommandResponse(result_code=CommandResult.SUCCESS)
                 return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
             active_task = task or (active_tasks[0] if active_tasks else None)
             if active_task is None:
@@ -1697,17 +1720,38 @@ class NarwalClient:
                     timeout=15.0,
                 )
 
+            timer_before_verification = self.state.dock_drying_tasks.get(active_task)
+            dock_generation = self.state.dock_activity_generation
+            station_generation = self.state.station_activity_generation
             await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
             refreshed = await self._refresh_after_dock_stop()
-            if _accepted_response(response):
-                self.state.clear_assumed_dock_task(active_task)
-                # Scoped force-end acknowledges the exact drying task. Clear its
-                # cached timer after a fresh dock response instead of waiting for
-                # the old timer snapshot to expire.
-                if refreshed and (
-                    payload is not None or _dock_status_confirms_idle(self.state)
-                ):
-                    self.state.clear_dock_drying_task(active_task)
+            current_timer = self.state.dock_drying_tasks.get(active_task)
+            has_new_coarse_activity = (
+                self.state.dock_activity_generation != dock_generation
+                or self.state.station_activity_generation != station_generation
+            )
+            active_task_is_fresh = (
+                active_task in self.state.active_dock_task_keys
+                and (
+                    (
+                        active_task not in _DOCK_DRYING_TASKS
+                        and (refreshed or has_new_coarse_activity)
+                    )
+                    or (
+                        current_timer is not None
+                        and current_timer is not timer_before_verification
+                    )
+                    or (
+                        active_task == DOCK_TASK_DRY_MOP
+                        and (refreshed or has_new_coarse_activity)
+                        and self.state.dock_activity == 4
+                    )
+                )
+            )
+            # Only newly received task evidence can override an accepted stop;
+            # a base-status response may leave an old drying timer untouched.
+            if _accepted_response(response) and not active_task_is_fresh:
+                _apply_accepted_dock_stop(self.state, active_task)
             return response
 
     async def return_to_base(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
