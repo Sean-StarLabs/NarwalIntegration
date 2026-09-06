@@ -915,10 +915,12 @@ class NarwalState:
 
     # Dock activity (field 3 sub-field 12: 2/6 observed when docked)
     dock_activity: int = 0
+    dock_activity_generation: int = 0
 
     # Station activity (field 3 sub-field 18).
     # Observed: 1 during dust gathering, 4 during dock dry/disinfection work.
     station_activity: int = 0
+    station_activity_generation: int = 0
 
     # Dock task timers from working_status fields 8..13.
     dock_drying_tasks: dict[str, DockTaskTimer] = field(default_factory=dict)
@@ -1919,12 +1921,14 @@ class NarwalState:
             if "12" in field3:
                 with contextlib.suppress(ValueError, TypeError):
                     self.dock_activity = int(field3["12"])
+                    self.dock_activity_generation += 1
             elif self.working_status not in ACTIVE_CLEANING_STATUSES:
                 self.dock_activity = 0
             self.station_activity = 0
             if "18" in field3:
                 with contextlib.suppress(ValueError, TypeError):
                     self.station_activity = int(field3["18"])
+                    self.station_activity_generation += 1
             if self.working_status in ACTIVE_CLEANING_STATUSES:
                 self.has_current_dock_presence_signal = False
                 self.clear_assumed_robot_clean()
