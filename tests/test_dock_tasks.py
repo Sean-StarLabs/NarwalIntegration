@@ -299,6 +299,7 @@ async def test_stale_dock_bag_stop_does_not_force_wake_during_cleaning() -> None
     coordinator.client.stop_dock_task.assert_awaited_once_with(
         DOCK_TASK_DRY_DOCK_BAG
     )
+    coordinator.async_refresh_dock_status.assert_not_awaited()
 
 
 def test_unmapped_dock_activity_blocks_start_and_stop() -> None:
@@ -366,10 +367,11 @@ async def test_active_dry_dust_bin_switch_stops_with_scoped_command() -> None:
     await switch.async_turn_off()
 
     coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
+    coordinator.async_refresh_dock_status.assert_not_awaited()
 
 
-async def test_switch_refreshes_before_stop_validation() -> None:
-    """A stale local status cannot reject a typed stop before refresh."""
+async def test_client_owns_stop_refresh_and_validation() -> None:
+    """The entity delegates the complete stop contract to the client."""
     state = _docked_state()
     state.working_status = WorkingStatus.UNKNOWN
     state.set_dock_drying_task(
@@ -380,11 +382,6 @@ async def test_switch_refreshes_before_stop_validation() -> None:
     )
     coordinator = _coordinator(state)
 
-    async def refresh_dock_status() -> bool:
-        state.working_status = WorkingStatus.DOCKED
-        return True
-
-    coordinator.async_refresh_dock_status = AsyncMock(side_effect=refresh_dock_status)
     coordinator.client.stop_dock_task = AsyncMock(
         return_value=CommandResponse(result_code=CommandResult.SUCCESS)
     )
@@ -392,7 +389,7 @@ async def test_switch_refreshes_before_stop_validation() -> None:
 
     await switch.async_turn_off()
 
-    coordinator.async_refresh_dock_status.assert_awaited()
+    coordinator.async_refresh_dock_status.assert_not_awaited()
     coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
 
 
