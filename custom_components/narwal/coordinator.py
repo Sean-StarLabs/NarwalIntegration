@@ -155,8 +155,13 @@ def has_blocking_error(state: NarwalState | None) -> bool:
 
 def is_confirmed_terminal_clean_state(state: NarwalState) -> bool:
     """Return True when reconciled telemetry confirms the clean has ended."""
-    if has_blocking_error(state) or state.working_status == WorkingStatus.TASK_COMPLETED:
+    if has_blocking_error(state):
         return True
+    if state.working_status == WorkingStatus.TASK_COMPLETED:
+        # TASK_COMPLETED is also emitted while the robot is still off-dock
+        # between task phases and on its return leg.  Only dock telemetry makes
+        # that status a confirmed session boundary.
+        return state.has_current_dock_presence_signal
     if _state_attr_is_true(state, "has_paused_clean_task_context"):
         return False
     return (
@@ -406,6 +411,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._fast_poll_remaining = 0
         self._prev_working_status = WorkingStatus.UNKNOWN
         self._clean_session_active = False
+        self._clean_session_terminal = False
         self._map_fetch_pending = False
         self._last_display_map_resub: float = 0.0
         self._last_topic_subscribe: float = 0.0
@@ -478,6 +484,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         """Record effective room profiles for the accepted robot task."""
         self.active_clean_setting_overrides = {}
         self._clean_session_active = True
+        self._clean_session_terminal = False
         self.active_clean_work_mode = self.shared_room_clean_work_mode(
             room_settings
         )
@@ -1049,7 +1056,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if display is None or not display.has_trajectory:
             return None
         static_map = state.map_data
-        confirmed_terminal = (
+        confirmed_terminal = getattr(self, "_clean_session_terminal", False) or (
             is_confirmed_terminal_clean_state(state)
             and not self._stale_startup_dock_may_await_trajectory(state)
         )
@@ -1266,11 +1273,10 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._retained_map_identity = self._static_map_identity(self.client.state)
         self._map_display_cache_signature = display.trajectory_signature
         self._map_display_cache_active_clean = cached_active_clean
+        self._clean_session_terminal = not cached_active_clean
         self._map_display_cache_restored = True
         self._map_display_cache_restored_from_active = cached_active_clean
-        self._map_display_cache_restored_at = (
-            time.monotonic() if cached_active_clean else 0.0
-        )
+        self._map_display_cache_restored_at = time.monotonic()
         _LOGGER.debug(
             "Restored Narwal display-map trajectory cache with %d bytes",
             len(display.trajectory_x_values) + len(display.trajectory_y_values),
@@ -2080,9 +2086,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         finally:
             self._finish_map_display_cache_clear()
 
-    @staticmethod
-    def _has_clean_session_signal(state: NarwalState) -> bool:
+    def _has_clean_session_signal(self, state: NarwalState) -> bool:
         """Return true when current telemetry describes an active clean session."""
+        if (
+            getattr(self, "_clean_session_terminal", False)
+            and state.working_status == WorkingStatus.TASK_COMPLETED
+        ):
+            return False
         if (
             state.working_status == WorkingStatus.REMAPPING
             or is_confirmed_terminal_clean_state(state)
@@ -2090,6 +2100,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return False
         return (
             state.working_status in ACTIVE_CLEANING_STATUSES
+            or (
+                state.working_status == WorkingStatus.TASK_COMPLETED
+                and not state.has_current_dock_presence_signal
+                and (
+                    getattr(self, "_clean_session_active", False)
+                    or state.has_explicit_off_dock_signal
+                )
+            )
             or state.has_assumed_robot_clean
             or state.has_paused_clean_task_context
             or (
@@ -2145,20 +2163,40 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             and not has_blocking_error(state)
         )
 
-    def _clear_map_display_cache_for_new_clean(self) -> None:
+    def _clear_map_display_cache_for_new_clean(
+        self,
+        initial_display: MapDisplayData | None = None,
+    ) -> None:
         """Clear stale trail data when a clean starts outside HA."""
         self._reset_map_display_cache_state(clear_memory=True)
-        self._schedule_map_display_cache_clear(None)
+        snapshot = None
+        if initial_display is not None:
+            self.client.state.map_display_data = initial_display
+            self._retained_map_display = initial_display
+            self._retained_map_identity = self._static_map_identity(self.client.state)
+            snapshot = self._map_display_cache_snapshot(self.client.state)
+        self._schedule_map_display_cache_clear(snapshot)
         _LOGGER.debug("Cleared Narwal display-map trajectory cache for new clean")
 
-    def _handle_working_status_transition(self, state: NarwalState) -> None:
+    def _handle_working_status_transition(
+        self,
+        state: NarwalState,
+        *,
+        initial_new_clean_display: MapDisplayData | None = None,
+    ) -> None:
         """Apply transition side effects and record the latest working status."""
-        if (
+        confirmed_terminal = (
             is_confirmed_terminal_clean_state(state)
             and not self._stale_startup_dock_may_await_trajectory(state)
-        ):
+        )
+        if confirmed_terminal:
+            self._clean_session_terminal = True
+            restored_active = getattr(
+                self, "_map_display_cache_restored_from_active", False
+            )
             self._map_display_cache_restored_from_active = False
-            self._map_display_cache_restored_at = 0.0
+            if restored_active:
+                self._map_display_cache_restored_at = 0.0
             pending_restore = getattr(
                 self, "_pending_map_display_cache_restore", None
             )
@@ -2170,7 +2208,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     "active_clean": False,
                 }
         if self._is_new_clean_transition(state):
-            self._clear_map_display_cache_for_new_clean()
+            self._clean_session_terminal = False
+            if initial_new_clean_display is None:
+                self._clear_map_display_cache_for_new_clean()
+            else:
+                self._clear_map_display_cache_for_new_clean(
+                    initial_new_clean_display
+                )
         self._clean_session_active = self._has_clean_session_signal(state)
         self._prev_working_status = state.working_status
 
@@ -2217,16 +2261,28 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             await self._async_restore_map_display_cache()
         except Exception:
             _LOGGER.debug("Could not restore display-map trajectory cache")
-        if (
-            self._has_clean_session_signal(self.client.state)
+        has_unrestored_initial_trajectory = (
+            self._has_current_map_display_trajectory()
             and not getattr(self, "_map_display_cache_restored", False)
             and getattr(self, "_pending_map_display_cache_restore", None) is None
+        )
+        if (
+            has_unrestored_initial_trajectory
+            and self._has_clean_session_signal(self.client.state)
         ):
             # Initial map fetches can already have delivered this clean's first
             # native window. Treat it as the current session, not stale history.
             self._clean_session_active = True
+        if has_unrestored_initial_trajectory:
+            # A completed route may arrive before a later terminal pose-only
+            # packet. Retain the device-owned geometry before that update.
+            self._retain_native_trajectory(self.client.state)
         self._handle_working_status_transition(self.client.state)
-        self._retain_native_trajectory(self.client.state)
+        if (
+            self._has_clean_session_signal(self.client.state)
+            or self._retained_map_display is not None
+        ):
+            self._retain_native_trajectory(self.client.state)
 
         try:
             await self.client.get_consumable_info()
@@ -2242,11 +2298,42 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             except Exception:
                 _LOGGER.debug("Could not send topic subscription at startup")
 
-        self._retain_native_trajectory(self.client.state)
+        # Setup awaits can receive push state before the listener starts. Merge a
+        # live native window before replacing stale persisted history, then
+        # reconcile the clean transition without discarding that first window.
+        initial_new_clean_display = None
+        if (
+            self._is_new_clean_transition(self.client.state)
+            and self._has_current_map_display_trajectory()
+        ):
+            current_display = self.client.state.map_display_data
+            fresh_after_inactive_restore = (
+                self._map_display_cache_restored
+                and not self._map_display_cache_restored_from_active
+                and current_display is not None
+                and self._map_display_cache_restored_at > 0
+                and self.client.last_clean_start_received_at
+                >= self._map_display_cache_restored_at
+                and self.client.last_display_map_received_at
+                >= self._map_display_cache_restored_at
+            )
+            if not self._map_display_cache_restored:
+                initial_new_clean_display = current_display
+            elif fresh_after_inactive_restore:
+                # Replace completed history atomically with the first native
+                # window of the new clean; never merge the two sessions.
+                initial_new_clean_display = current_display
+        self._handle_working_status_transition(
+            self.client.state,
+            initial_new_clean_display=initial_new_clean_display,
+        )
+        if (
+            self._has_clean_session_signal(self.client.state)
+            or self._retained_map_display is not None
+        ):
+            self._retain_native_trajectory(self.client.state)
         self._schedule_map_display_cache_save(self.client.state)
         self.async_set_updated_data(self.client.state)
-        self._prev_working_status = self.client.state.working_status
-        self._clean_session_active = self._has_clean_session_signal(self.client.state)
 
         # Set up push callback and start persistent listener
         self.client.on_state_update = self._on_state_update

@@ -2161,6 +2161,302 @@ async def test_setup_retains_trajectory_received_with_initial_map() -> None:
     )
 
 
+async def test_setup_reconciles_clean_started_during_final_refresh() -> None:
+    """A clean beginning during setup clears a restored terminal session latch."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.hass = MagicMock()
+    coordinator.config_entry = MagicMock()
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator.client.state.map_display_data = _trajectory_display(
+        *((float(index), float(index)) for index in range(1, 31)),
+        timestamp=100,
+    )
+    coordinator.client.state.working_status = WorkingStatus.DOCKED_V2
+    coordinator.client.state.dock_presence = 6
+    coordinator.client.connect = AsyncMock()
+    coordinator.client.get_device_info = AsyncMock()
+    coordinator.client.get_status = AsyncMock(
+        return_value=CommandResponse(
+            data={"2": {"3": {"1": int(WorkingStatus.DOCKED_V2)}}}
+        )
+    )
+    coordinator.client.get_map = AsyncMock()
+
+    async def get_consumable_info() -> None:
+        coordinator.client.state.working_status = WorkingStatus.CLEANING
+        coordinator.client.state.dock_presence = None
+        coordinator.client.state.map_display_data = _trajectory_display(
+            *((float(index), float(index)) for index in range(27, 57)),
+            timestamp=200,
+        )
+
+    coordinator.client.get_consumable_info = AsyncMock(side_effect=get_consumable_info)
+    coordinator.client.supports_broadcasts = False
+    coordinator.client.robot_awake = True
+    coordinator.client.start_listening = AsyncMock()
+    coordinator._async_restore_room_selections = AsyncMock()
+    coordinator._async_restore_map_display_cache = AsyncMock()
+    coordinator._mark_dock_status_refresh_succeeded = MagicMock()
+    coordinator._mark_dock_status_refresh_failed = MagicMock()
+    coordinator._schedule_map_display_cache_save = MagicMock()
+    coordinator.async_set_updated_data = MagicMock()
+    coordinator._retained_map_display = None
+    coordinator._retained_map_identity = None
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._map_display_cache_restored = False
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clean_session_active = False
+    coordinator._clean_session_terminal = False
+    coordinator._prev_working_status = WorkingStatus.UNKNOWN
+    coordinator._schedule_map_display_cache_clear = MagicMock()
+    coordinator._cloud_client = None
+    coordinator._listen_task = None
+    coordinator._fast_poll_remaining = 0
+    coordinator.config_entry.async_create_background_task.side_effect = (
+        lambda _hass, coro, _name: (coro.close(), MagicMock(done=lambda: False))[1]
+    )
+
+    await coordinator.async_setup()
+
+    assert coordinator._clean_session_active
+    assert not coordinator._clean_session_terminal
+    assert coordinator._retained_map_display.trajectory_points() == [
+        (float(index), float(index)) for index in range(27, 57)
+    ]
+    snapshot = coordinator._schedule_map_display_cache_clear.call_args.args[0]
+    assert snapshot.active_clean
+    assert snapshot.display is coordinator._retained_map_display
+
+
+@pytest.mark.parametrize(
+    "initial_status", (WorkingStatus.CLEANING, WorkingStatus.TASK_COMPLETED)
+)
+async def test_setup_reconciles_terminal_pose_with_retained_trajectory(
+    initial_status: WorkingStatus,
+) -> None:
+    """A terminal pose-only startup packet cannot hide the completed route."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.hass = MagicMock()
+    coordinator.config_entry = MagicMock()
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    initial_display = _trajectory_display(
+        *((float(index), float(index)) for index in range(1, 31)),
+        timestamp=100,
+    )
+    coordinator.client.state.map_display_data = initial_display
+    coordinator.client.state.working_status = initial_status
+    if initial_status == WorkingStatus.TASK_COMPLETED:
+        coordinator.client.state.dock_presence = 6
+    coordinator.client.connect = AsyncMock()
+    coordinator.client.get_device_info = AsyncMock()
+    coordinator.client.get_status = AsyncMock(
+        return_value=CommandResponse(
+            data={"2": {"3": {"1": int(initial_status)}}}
+        )
+    )
+    coordinator.client.get_map = AsyncMock()
+
+    async def finish_clean() -> None:
+        coordinator.client.state.working_status = WorkingStatus.TASK_COMPLETED
+        coordinator.client.state.dock_presence = 6
+        coordinator.client.state.map_display_data = MapDisplayData(
+            robot_x=9.0,
+            robot_y=8.0,
+            timestamp=200,
+        )
+
+    coordinator.client.get_consumable_info = AsyncMock(side_effect=finish_clean)
+    coordinator.client.supports_broadcasts = False
+    coordinator.client.robot_awake = True
+    coordinator.client.start_listening = AsyncMock()
+    coordinator._async_restore_room_selections = AsyncMock()
+    coordinator._async_restore_map_display_cache = AsyncMock()
+    coordinator._mark_dock_status_refresh_succeeded = MagicMock()
+    coordinator._mark_dock_status_refresh_failed = MagicMock()
+    coordinator._schedule_map_display_cache_save = MagicMock()
+    coordinator.async_set_updated_data = MagicMock()
+    coordinator._retained_map_display = None
+    coordinator._retained_map_identity = None
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._map_display_cache_restored = False
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clean_session_active = False
+    coordinator._clean_session_terminal = False
+    coordinator._prev_working_status = WorkingStatus.UNKNOWN
+    coordinator._cloud_client = None
+    coordinator._listen_task = None
+    coordinator._fast_poll_remaining = 0
+    coordinator.config_entry.async_create_background_task.side_effect = (
+        lambda _hass, coro, _name: (coro.close(), MagicMock(done=lambda: False))[1]
+    )
+
+    await coordinator.async_setup()
+
+    display = coordinator.client.state.map_display_data
+    assert display is not None
+    assert display.trajectory_points() == initial_display.trajectory_points()
+    assert (display.robot_x, display.robot_y, display.timestamp) == (9.0, 8.0, 200)
+    coordinator._schedule_map_display_cache_save.assert_called_once_with(
+        coordinator.client.state
+    )
+
+
+@pytest.mark.parametrize(
+    ("fresh_points", "received_at", "accepted"),
+    (
+        (((8.0, 8.0), (9.0, 9.0)), 101.0, True),
+        (((1.0, 1.0), (2.0, 2.0)), 101.0, True),
+        (((8.0, 8.0), (9.0, 9.0)), 100.25, True),
+        (((8.0, 8.0), (9.0, 9.0)), 99.0, False),
+    ),
+    ids=(
+        "fresh-different-signature",
+        "fresh-equal-signature",
+        "fresh-map-before-status",
+        "stale-different-signature",
+    ),
+)
+async def test_setup_replaces_inactive_cache_with_first_new_clean_window(
+    fresh_points: tuple[tuple[float, float], ...],
+    received_at: float,
+    accepted: bool,
+) -> None:
+    """A restored completed route cannot discard or absorb a fresh route window."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.hass = MagicMock()
+    coordinator.config_entry = MagicMock()
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    old_display = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
+    coordinator.client.state.map_display_data = old_display
+    coordinator.client.state.working_status = WorkingStatus.DOCKED_V2
+    coordinator.client.state.dock_presence = 6
+    coordinator.client.last_display_map_age = float("inf")
+    coordinator.client.last_display_map_received_at = 0.0
+    coordinator.client.last_clean_start_received_at = 0.0
+    coordinator.client.connect = AsyncMock()
+    coordinator.client.get_device_info = AsyncMock()
+    coordinator.client.get_status = AsyncMock(
+        return_value=CommandResponse(
+            data={"2": {"3": {"1": int(WorkingStatus.DOCKED_V2)}}}
+        )
+    )
+    coordinator.client.get_map = AsyncMock()
+
+    async def restore_inactive_cache() -> None:
+        coordinator._map_display_cache_restored = True
+        coordinator._map_display_cache_restored_from_active = False
+        coordinator._map_display_cache_restored_at = 100.0
+        coordinator._map_display_cache_signature = old_display.trajectory_signature
+        coordinator._retained_map_display = old_display
+
+    fresh_display = _trajectory_display(*fresh_points, timestamp=200)
+
+    async def start_clean() -> None:
+        coordinator.client.state.working_status = WorkingStatus.CLEANING
+        coordinator.client.state.dock_presence = 2
+        coordinator.client.state.map_display_data = fresh_display
+        coordinator.client.last_clean_start_received_at = 100.5
+        coordinator.client.last_display_map_received_at = received_at
+
+    coordinator.client.get_consumable_info = AsyncMock(side_effect=start_clean)
+    coordinator.client.supports_broadcasts = False
+    coordinator.client.robot_awake = True
+    coordinator.client.start_listening = AsyncMock()
+    coordinator._async_restore_room_selections = AsyncMock()
+    coordinator._async_restore_map_display_cache = AsyncMock(
+        side_effect=restore_inactive_cache
+    )
+    coordinator._mark_dock_status_refresh_succeeded = MagicMock()
+    coordinator._mark_dock_status_refresh_failed = MagicMock()
+    coordinator._schedule_map_display_cache_save = MagicMock()
+    coordinator.async_set_updated_data = MagicMock()
+    coordinator._retained_map_identity = None
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clean_session_active = False
+    coordinator._clean_session_terminal = False
+    coordinator._prev_working_status = WorkingStatus.UNKNOWN
+    coordinator._schedule_map_display_cache_clear = MagicMock()
+    coordinator._cloud_client = None
+    coordinator._listen_task = None
+    coordinator._fast_poll_remaining = 0
+    coordinator.config_entry.async_create_background_task.side_effect = (
+        lambda _hass, coro, _name: (coro.close(), MagicMock(done=lambda: False))[1]
+    )
+
+    await coordinator.async_setup()
+
+    snapshot = coordinator._schedule_map_display_cache_clear.call_args.args[0]
+    if accepted:
+        assert coordinator._retained_map_display is fresh_display
+        assert coordinator._retained_map_display.trajectory_points() == list(fresh_points)
+        assert snapshot.display is fresh_display
+    else:
+        assert coordinator._retained_map_display is None
+        assert snapshot is None
+
+
+async def test_setup_reconciles_dock_completion_before_sparse_refresh() -> None:
+    """Sparse setup telemetry cannot hide an earlier dock-confirmed completion."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator.hass = MagicMock()
+    coordinator.config_entry = MagicMock()
+    coordinator.client = MagicMock()
+    coordinator.client.state = _trajectory_state()
+    coordinator.client.state.working_status = WorkingStatus.CLEANING
+    coordinator.client.connect = AsyncMock()
+    coordinator.client.get_device_info = AsyncMock()
+    coordinator.client.get_status = AsyncMock(
+        return_value=CommandResponse(
+            data={"2": {"3": {"1": int(WorkingStatus.CLEANING)}}}
+        )
+    )
+    coordinator.client.get_map = AsyncMock()
+
+    async def get_consumable_info() -> None:
+        coordinator.client.state.update_from_base_status(
+            {"3": {"1": int(WorkingStatus.TASK_COMPLETED), "3": 6}}
+        )
+        coordinator.client.state.update_from_base_status(
+            {"2": struct.unpack("<I", struct.pack("<f", 80.0))[0]}
+        )
+
+    coordinator.client.get_consumable_info = AsyncMock(side_effect=get_consumable_info)
+    coordinator.client.supports_broadcasts = False
+    coordinator.client.robot_awake = True
+    coordinator.client.start_listening = AsyncMock()
+    coordinator._async_restore_room_selections = AsyncMock()
+    coordinator._async_restore_map_display_cache = AsyncMock()
+    coordinator._mark_dock_status_refresh_succeeded = MagicMock()
+    coordinator._mark_dock_status_refresh_failed = MagicMock()
+    coordinator._schedule_map_display_cache_save = MagicMock()
+    coordinator.async_set_updated_data = MagicMock()
+    coordinator._retained_map_display = None
+    coordinator._retained_map_identity = None
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._map_display_cache_restored = False
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clean_session_active = False
+    coordinator._clean_session_terminal = False
+    coordinator._prev_working_status = WorkingStatus.UNKNOWN
+    coordinator._cloud_client = None
+    coordinator._listen_task = None
+    coordinator._fast_poll_remaining = 0
+    coordinator.config_entry.async_create_background_task.side_effect = (
+        lambda _hass, coro, _name: (coro.close(), MagicMock(done=lambda: False))[1]
+    )
+
+    await coordinator.async_setup()
+
+    assert coordinator._clean_session_terminal
+    assert not coordinator._clean_session_active
+    assert not coordinator._map_display_cache_snapshot(
+        coordinator.client.state
+    ).active_clean
+
+
 async def test_clear_map_display_cache_clears_memory_and_store() -> None:
     """Accepted clean starts clear both memory and persisted trail state."""
     coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
@@ -2412,13 +2708,8 @@ def test_restored_active_trail_validation_grace_expires() -> None:
     assert not coordinator._map_display_cache_restored_from_active
 
 
-@pytest.mark.parametrize(
-    "working_status", (WorkingStatus.TASK_COMPLETED, WorkingStatus.ERROR)
-)
-def test_explicit_terminal_status_bypasses_active_trail_restore_grace(
-    working_status: WorkingStatus,
-) -> None:
-    """Completion and fault packets end a restored session immediately."""
+def test_error_status_bypasses_active_trail_restore_grace() -> None:
+    """A fault packet ends a restored session immediately."""
     coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
     coordinator._prev_working_status = WorkingStatus.UNKNOWN
     coordinator._clean_session_active = False
@@ -2428,7 +2719,7 @@ def test_explicit_terminal_status_bypasses_active_trail_restore_grace(
     coordinator._pending_map_display_cache_restore = None
     coordinator._clear_map_display_cache_for_new_clean = MagicMock()
     state = _trajectory_state()
-    state.working_status = working_status
+    state.working_status = WorkingStatus.ERROR
 
     with patch(
         "custom_components.narwal.coordinator.time.monotonic", return_value=101.0
@@ -2443,6 +2734,129 @@ def test_explicit_terminal_status_bypasses_active_trail_restore_grace(
     coordinator._handle_working_status_transition(
         NarwalState(working_status=WorkingStatus.CLEANING)
     )
+    coordinator._clear_map_display_cache_for_new_clean.assert_called_once_with()
+
+
+def test_off_dock_task_completed_to_cleaning_keeps_current_trajectory() -> None:
+    """A room handoff cannot split one multi-room cleaning session."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator._prev_working_status = WorkingStatus.CLEANING
+    coordinator._clean_session_active = True
+    coordinator._map_display_cache_restored = False
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clear_map_display_cache_for_new_clean = MagicMock()
+
+    handoff = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
+    handoff.dock_presence = 2
+    coordinator._handle_working_status_transition(handoff)
+    coordinator._handle_working_status_transition(
+        NarwalState(working_status=WorkingStatus.CLEANING)
+    )
+
+    assert coordinator._clean_session_active
+    coordinator._clear_map_display_cache_for_new_clean.assert_not_called()
+
+
+def test_restart_during_off_dock_task_completed_keeps_current_session() -> None:
+    """Explicit off-dock handoff telemetry rebuilds the session latch."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator._prev_working_status = WorkingStatus.UNKNOWN
+    coordinator._clean_session_active = False
+    coordinator._map_display_cache_restored = True
+    coordinator._map_display_cache_restored_from_active = True
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clear_map_display_cache_for_new_clean = MagicMock()
+
+    handoff = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
+    handoff.dock_presence = 2
+    coordinator._handle_working_status_transition(handoff)
+    coordinator._handle_working_status_transition(
+        NarwalState(working_status=WorkingStatus.CLEANING)
+    )
+
+    assert coordinator._clean_session_active
+    coordinator._clear_map_display_cache_for_new_clean.assert_not_called()
+
+
+def test_docked_task_completed_ends_session_before_next_clean() -> None:
+    """Dock evidence makes TASK_COMPLETED a genuine clean boundary."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator._prev_working_status = WorkingStatus.CLEANING
+    coordinator._clean_session_active = True
+    coordinator._map_display_cache_restored = False
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clear_map_display_cache_for_new_clean = MagicMock()
+
+    completed = NarwalState()
+    completed.update_from_base_status(
+        {"3": {"1": int(WorkingStatus.TASK_COMPLETED), "3": 6}}
+    )
+    coordinator._handle_working_status_transition(completed)
+    coordinator._handle_working_status_transition(
+        NarwalState(working_status=WorkingStatus.CLEANING)
+    )
+
+    coordinator._clear_map_display_cache_for_new_clean.assert_called_once_with()
+
+
+def test_sparse_completion_cannot_reopen_dock_confirmed_session() -> None:
+    """A sparse late completion packet cannot make a finished route active."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator._prev_working_status = WorkingStatus.CLEANING
+    coordinator._clean_session_active = True
+    coordinator._clean_session_terminal = False
+    coordinator._map_display_cache_restored = False
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clear_map_display_cache_for_new_clean = MagicMock()
+
+    completed = _trajectory_state()
+    completed.update_from_base_status(
+        {"3": {"1": int(WorkingStatus.TASK_COMPLETED), "3": 6}}
+    )
+    coordinator._handle_working_status_transition(completed)
+    assert coordinator._clean_session_terminal
+    assert not coordinator._map_display_cache_snapshot(completed).active_clean
+
+    completed.update_from_base_status(
+        {"3": {"1": int(WorkingStatus.TASK_COMPLETED)}}
+    )
+    coordinator._handle_working_status_transition(completed)
+
+    assert coordinator._clean_session_terminal
+    assert not coordinator._map_display_cache_snapshot(completed).active_clean
+    coordinator._clear_map_display_cache_for_new_clean.assert_not_called()
+
+
+def test_delayed_off_dock_completion_cannot_reopen_confirmed_session() -> None:
+    """Off-dock completion received after docking remains terminal."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator._prev_working_status = WorkingStatus.CLEANING
+    coordinator._clean_session_active = True
+    coordinator._clean_session_terminal = False
+    coordinator._map_display_cache_restored = False
+    coordinator._map_display_cache_restored_from_active = False
+    coordinator._pending_map_display_cache_restore = None
+    coordinator._clear_map_display_cache_for_new_clean = MagicMock()
+
+    terminal = NarwalState(working_status=WorkingStatus.DOCKED_V2)
+    terminal.dock_presence = 6
+    coordinator._handle_working_status_transition(terminal)
+
+    delayed = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
+    delayed.dock_presence = 2
+    coordinator._handle_working_status_transition(delayed)
+
+    assert coordinator._clean_session_terminal
+    assert not coordinator._clean_session_active
+    coordinator._clear_map_display_cache_for_new_clean.assert_not_called()
+
+    coordinator._handle_working_status_transition(
+        NarwalState(working_status=WorkingStatus.CLEANING)
+    )
+    assert not coordinator._clean_session_terminal
     coordinator._clear_map_display_cache_for_new_clean.assert_called_once_with()
 
 
@@ -3140,7 +3554,15 @@ class TestCoordinatorResilience:
 
         async def get_status(*, full_update: bool) -> CommandResponse:
             assert full_update
-            state.working_status = WorkingStatus.TASK_COMPLETED
+            state.update_from_base_status(
+                {
+                    "3": {
+                        "1": int(WorkingStatus.TASK_COMPLETED),
+                        "3": 6,
+                    },
+                    "11": 2,
+                }
+            )
             return CommandResponse(
                 data={
                     "2": {
