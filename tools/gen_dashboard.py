@@ -149,7 +149,13 @@ def rooms_section(rooms, globals_, vacuum, picker, script) -> dict:
         ents = room["entities"]
         cards = [tile(ents["selected"], "Include in next start", "toggle")]
         if "clean_order" in ents:
-            cards.append(tile(ents["clean_order"], "Cleaning order", "numeric-input"))
+            cards.append(
+                tile(
+                    ents["clean_order"],
+                    "Cleaning order",
+                    features=[{"type": "numeric-input", "style": "buttons"}],
+                )
+            )
         cards += [tile(ents[k], LABELS[k], "select-options") for k in PROFILE_KEYS if k in ents]
         cards.append(
             button(
