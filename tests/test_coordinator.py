@@ -4461,6 +4461,21 @@ class TestCoordinatorResilience:
         assert await coordinator.async_refresh_dock_status()
         assert seen == [True]
 
+    def test_set_refreshed_dock_data_marks_fresh_before_notifying(self) -> None:
+        """Client-owned dock refreshes clear stale state before notifying listeners."""
+        coordinator = self._make_coordinator()
+        coordinator._dock_status_refresh_failed = True
+        seen: list[bool] = []
+
+        def capture_update(_state):
+            seen.append(coordinator.has_fresh_state)
+
+        coordinator.async_set_updated_data = MagicMock(side_effect=capture_update)
+
+        coordinator.async_set_refreshed_dock_data()
+
+        assert seen == [True]
+
     async def test_refresh_dock_status_refreshes_queued_cache_metadata(self) -> None:
         """A direct terminal refresh replaces queued active route metadata."""
         coordinator = self._make_coordinator()

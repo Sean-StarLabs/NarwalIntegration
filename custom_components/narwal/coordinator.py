@@ -530,6 +530,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         """Record that dock-control state came from a current base-status payload."""
         self._dock_status_refresh_failed = False
 
+    def async_set_refreshed_dock_data(self) -> None:
+        """Publish dock state that the client has already refreshed."""
+        self._mark_dock_status_refresh_succeeded()
+        self._sync_active_clean_context(self.client.state)
+        self.async_set_updated_data(self.client.state)
+
     def default_room_clean_settings(self) -> RoomCleanSettings:
         """Return a room-clean profile copied from the current global defaults."""
         return RoomCleanSettings(
