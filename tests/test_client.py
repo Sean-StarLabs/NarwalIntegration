@@ -2093,6 +2093,36 @@ class TestDockTaskCommands:
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is None
 
     @pytest.mark.asyncio
+    async def test_stop_clears_assumed_non_drying_task_without_telemetry(self) -> None:
+        """A local start reservation cannot keep an accepted stop active."""
+        client = self._docked_client()
+        client.state.assume_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+
+        with patch.object(
+            client,
+            "get_status",
+            new_callable=AsyncMock,
+            return_value=self._docked_status_response(),
+        ), patch.object(
+            client,
+            "stop",
+            new_callable=AsyncMock,
+            return_value=success,
+        ), patch.object(
+            client,
+            "_refresh_after_dock_stop",
+            new_callable=AsyncMock,
+            return_value=True,
+        ), patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ):
+            result = await client.stop_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        assert result is success
+        assert client.state.assumed_active_dock_task is None
+
+    @pytest.mark.asyncio
     async def test_stop_dock_task_is_idempotent_when_task_finishes_during_refresh(
         self,
     ) -> None:

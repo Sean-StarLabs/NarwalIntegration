@@ -247,12 +247,16 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
             force_wake = stale_state and not is_robot_work_context(client.state)
             if not client.robot_awake or force_wake:
                 await client.wake(timeout=10.0, force=force_wake)
+            full_dock_refresh = not client.state.has_recent_active_working_status
             # The client refreshes, validates, sends, and verifies the scoped
             # stop atomically. Extra entity-layer refreshes only add network
             # round trips and can briefly replace actionable push telemetry.
             response = await client.stop_dock_task(self.entity_description.key)
             self._raise_if_command_failed(response, "stop")
-            self.coordinator.async_set_refreshed_dock_data()
+            if full_dock_refresh:
+                self.coordinator.async_set_refreshed_dock_data()
+            else:
+                self.coordinator.async_set_updated_data(client.state)
 
     def _raise_if_command_failed(self, response: CommandResponse, action: str) -> None:
         """Raise a Home Assistant service error for rejected dock commands."""

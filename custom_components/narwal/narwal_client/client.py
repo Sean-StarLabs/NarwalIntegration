@@ -1883,7 +1883,7 @@ class NarwalClient:
                 or self.state.station_activity_generation != station_generation
             )
             active_task_is_fresh = (
-                active_task in self.state.active_dock_task_keys
+                active_task in self.state.telemetry_dock_task_keys
                 and (
                     (
                         active_task not in _DOCK_DRYING_TASKS

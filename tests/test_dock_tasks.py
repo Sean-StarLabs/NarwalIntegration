@@ -395,6 +395,29 @@ async def test_client_owns_stop_refresh_and_validation() -> None:
     coordinator.async_set_refreshed_dock_data.assert_called_once_with()
 
 
+async def test_partial_stop_refresh_does_not_mark_stale_dock_state_fresh() -> None:
+    """Working-state preservation cannot promote partial status to fresh dock data."""
+    state = _docked_state()
+    state.update_from_working_status({"3": int(WorkingStatus.CLEANING)})
+    state.set_dock_drying_task(
+        DOCK_TASK_DRY_DOCK_BAG,
+        elapsed=61,
+        target=180,
+        fields=("12", "13"),
+    )
+    coordinator = _coordinator(state)
+    coordinator.has_fresh_state = False
+    coordinator.client.stop_dock_task = AsyncMock(
+        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+    )
+    switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[4])
+
+    await switch.async_turn_off()
+
+    coordinator.async_set_refreshed_dock_data.assert_not_called()
+    coordinator.async_set_updated_data.assert_called_once_with(state)
+
+
 def test_multiple_tasks_only_allow_scoped_stop() -> None:
     """Generic stop is unavailable for ambiguous multi-task dock activity."""
     state = _docked_state()
