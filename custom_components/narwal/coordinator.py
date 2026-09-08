@@ -536,6 +536,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._sync_active_clean_context(self.client.state)
         self.async_set_updated_data(self.client.state)
 
+    def async_set_stale_dock_data(self) -> None:
+        """Publish client state while recording that dock telemetry is stale."""
+        self._mark_dock_status_refresh_failed()
+        self._sync_active_clean_context(self.client.state)
+        self.async_set_updated_data(self.client.state)
+
     def default_room_clean_settings(self) -> RoomCleanSettings:
         """Return a room-clean profile copied from the current global defaults."""
         return RoomCleanSettings(

@@ -2123,6 +2123,23 @@ class TestDockTaskCommands:
         assert client.state.assumed_active_dock_task is None
 
     @pytest.mark.asyncio
+    async def test_stop_normalises_rejected_status_preflight_to_not_ready(self) -> None:
+        """A rejected status query is reported as stale state, not a stop result."""
+        client = self._docked_client()
+        client.state.assume_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        with patch.object(
+            client,
+            "get_status",
+            new_callable=AsyncMock,
+            return_value=CommandResponse(result_code=CommandResult.NOT_APPLICABLE),
+        ), patch.object(client, "stop", new_callable=AsyncMock) as mock_stop:
+            result = await client.stop_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
+
+        assert result.result_code == CommandResult.NOT_READY
+        mock_stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_stop_dock_task_is_idempotent_when_task_finishes_during_refresh(
         self,
     ) -> None:

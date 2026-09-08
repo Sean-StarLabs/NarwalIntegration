@@ -19,6 +19,7 @@ from custom_components.narwal.dock_tasks import (  # noqa: E402
     can_stop_dock_task,
     dock_task_blocks_robot_return,
 )
+from custom_components.narwal.narwal_client import NarwalConnectionError  # noqa: E402
 from custom_components.narwal.switch import (  # noqa: E402
     DOCK_TASK_SWITCHES,
     NarwalDockTaskSwitch,
@@ -416,6 +417,34 @@ async def test_partial_stop_refresh_does_not_mark_stale_dock_state_fresh() -> No
 
     coordinator.async_set_refreshed_dock_data.assert_not_called()
     coordinator.async_set_updated_data.assert_called_once_with(state)
+
+
+async def test_failed_stop_preflight_marks_dock_state_stale() -> None:
+    """A failed client preflight preserves coordinator recovery bookkeeping."""
+    coordinator = _coordinator()
+    coordinator.client.stop_dock_task = AsyncMock(
+        return_value=CommandResponse(result_code=CommandResult.NOT_READY)
+    )
+    switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[4])
+
+    with pytest.raises(HomeAssistantError):
+        await switch.async_turn_off()
+
+    coordinator.async_set_stale_dock_data.assert_called_once_with()
+
+
+async def test_stop_preflight_exception_marks_dock_state_stale() -> None:
+    """A transport failure preserves coordinator recovery bookkeeping."""
+    coordinator = _coordinator()
+    coordinator.client.stop_dock_task = AsyncMock(
+        side_effect=NarwalConnectionError("status timeout")
+    )
+    switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[4])
+
+    with pytest.raises(NarwalConnectionError):
+        await switch.async_turn_off()
+
+    coordinator.async_set_stale_dock_data.assert_called_once_with()
 
 
 def test_multiple_tasks_only_allow_scoped_stop() -> None:

@@ -1816,9 +1816,7 @@ class NarwalClient:
         async with self._dock_task_lock:
             initial_active_tasks = self.state.active_dock_task_keys
             refresh = await self._refresh_before_dock_stop(task)
-            if not refresh.accepted:
-                return refresh
-            if not _has_dock_status_payload(refresh):
+            if not refresh.accepted or not _has_dock_status_payload(refresh):
                 return CommandResponse(
                     result_code=CommandResult.NOT_READY,
                     data=refresh.data,
