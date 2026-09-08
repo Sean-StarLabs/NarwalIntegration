@@ -447,18 +447,25 @@ class TestLegacyNarwalSettingSelect:
         assert LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"]).available
         assert LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["water"]).available
 
-    def test_suction_options_stay_stable_while_cleaning(self) -> None:
+    def test_suction_options_hide_ai_while_cleaning(self) -> None:
         coord = _coordinator(state=_state(WorkingStatus.CLEANING))
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
-        assert "AI" in sel.options
+        assert "AI" not in sel.options
         assert "Standard" in sel.options
+
+    def test_suction_options_keep_active_ai_while_cleaning(self) -> None:
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.clean_settings.fan = FanLevel.UNSPECIFIED
+        sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+
+        assert "AI" in sel.options
 
     def test_ax26_legacy_suction_omits_ultra(self) -> None:
         coord = _coordinator(product_key="qV6BujoYLz")
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
 
         assert "Super Powerful" in sel.options
-        assert sel._normalise_option("Super") == "Super"
+        assert sel._normalise_option("Super") == "Super Powerful"
         assert "Ultra" not in sel.options
         assert sel._normalise_option("Ultra powerful") is None
 
