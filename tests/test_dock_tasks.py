@@ -368,6 +368,7 @@ async def test_active_dry_dust_bin_switch_stops_with_scoped_command() -> None:
 
     coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
     coordinator.async_refresh_dock_status.assert_not_awaited()
+    coordinator.async_set_refreshed_dock_data.assert_called_once_with()
 
 
 async def test_client_owns_stop_refresh_and_validation() -> None:
@@ -391,6 +392,7 @@ async def test_client_owns_stop_refresh_and_validation() -> None:
 
     coordinator.async_refresh_dock_status.assert_not_awaited()
     coordinator.client.stop_dock_task.assert_awaited_once_with(DOCK_TASK_DRY_DUST_BIN)
+    coordinator.async_set_refreshed_dock_data.assert_called_once_with()
 
 
 def test_multiple_tasks_only_allow_scoped_stop() -> None:
