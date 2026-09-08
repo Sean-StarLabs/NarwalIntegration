@@ -886,6 +886,17 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
     @property
     def options(self) -> list[str]:
         """Return the static option list for Home Assistant capabilities."""
+        if (
+            self.entity_description.setting_key == "suction"
+            and self._is_cleaning_or_paused
+            and (
+                self.coordinator.active_clean_setting("fan")
+                or self.coordinator.clean_settings.fan
+            )
+            != FanLevel.UNSPECIFIED
+        ):
+            # AI is a pre-start choice, not a command the robot accepts mid-clean.
+            return [option for option in self._attr_options or [] if option != "AI"]
         return list(self._attr_options or [])
 
     @property
