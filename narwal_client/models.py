@@ -9,6 +9,7 @@ import struct
 import time
 import zlib
 from dataclasses import dataclass, field
+from enum import StrEnum
 from typing import Any, ClassVar
 
 from .const import (
@@ -811,6 +812,14 @@ class Position:
     heading: float = 0.0
 
 
+class DockStatusFreshness(StrEnum):
+    """Authority level of dock state attached to a command response."""
+
+    FRESH = "fresh"
+    PARTIAL = "partial"
+    STALE = "stale"
+
+
 @dataclass
 class CommandResponse:
     """Response from a command sent to the robot."""
@@ -818,6 +827,7 @@ class CommandResponse:
     result_code: int = 0
     data: dict[str, Any] = field(default_factory=dict)
     raw_payload: bytes = b""
+    dock_status_freshness: DockStatusFreshness | None = None
 
     @property
     def success(self) -> bool:

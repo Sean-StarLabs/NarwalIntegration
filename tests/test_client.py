@@ -39,6 +39,7 @@ from narwal_client.models import (
     DOCK_TASK_EMPTY_DUSTBIN,
     DOCK_TASK_WASH_MOP,
     CommandResponse,
+    DockStatusFreshness,
     MapData,
     RoomInfo,
 )
@@ -2137,7 +2138,25 @@ class TestDockTaskCommands:
             result = await client.stop_dock_task(DOCK_TASK_EMPTY_DUSTBIN)
 
         assert result.result_code == CommandResult.NOT_READY
+        assert result.dock_status_freshness is DockStatusFreshness.STALE
         mock_stop.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_stop_preflight_classifies_working_status_as_partial(self) -> None:
+        """A hardware-only refresh does not claim full dock-state authority."""
+        client = self._docked_client()
+        client.state.update_from_working_status({"3": 30, "4": 90})
+
+        with patch.object(
+            client,
+            "get_status",
+            new_callable=AsyncMock,
+            return_value=self._docked_status_response(),
+        ) as mock_status:
+            response = await client._refresh_before_dock_stop(None)
+
+        mock_status.assert_awaited_once_with(full_update=False)
+        assert response.dock_status_freshness is DockStatusFreshness.PARTIAL
 
     @pytest.mark.asyncio
     async def test_stop_dock_task_is_idempotent_when_task_finishes_during_refresh(
@@ -2268,6 +2287,7 @@ class TestDockTaskCommands:
             result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
 
         assert result is success
+        assert result.dock_status_freshness is DockStatusFreshness.FRESH
         mock_status.assert_awaited_once_with(full_update=True)
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is None
 
@@ -2399,6 +2419,7 @@ class TestDockTaskCommands:
             result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
 
         assert result is success
+        assert result.dock_status_freshness is DockStatusFreshness.STALE
         timer = client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG)
         assert timer is not None
         assert timer.elapsed == 66

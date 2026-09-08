@@ -76,6 +76,7 @@ from .models import (
     DOCK_TASK_WASH_MOP,
     CommandResponse,
     DeviceInfo,
+    DockStatusFreshness,
     MapData,
     MapDisplayData,
     NarwalState,
@@ -283,6 +284,17 @@ def _has_dock_status_payload(response: CommandResponse) -> bool:
     if not isinstance(field3, dict):
         return False
     return bool({"1", "2", "3", "7", "10", "12", "18"}.intersection(field3))
+
+
+def _dock_status_freshness(
+    response: CommandResponse, *, full_update: bool
+) -> DockStatusFreshness:
+    """Classify a dock-status response as full, partial, or stale."""
+    if not response.accepted or not _has_dock_status_payload(response):
+        return DockStatusFreshness.STALE
+    if full_update:
+        return DockStatusFreshness.FRESH
+    return DockStatusFreshness.PARTIAL
 
 
 def _apply_accepted_dock_stop(state: NarwalState, task: str) -> None:
@@ -1792,8 +1804,10 @@ class NarwalClient:
         task: str | None,
     ) -> CommandResponse:
         """Refresh dock state, allowing typed scoped-stop telemetry to settle."""
-        response = await self.get_status(
-            full_update=not self.state.has_recent_active_working_status
+        full_update = not self.state.has_recent_active_working_status
+        response = await self.get_status(full_update=full_update)
+        response.dock_status_freshness = _dock_status_freshness(
+            response, full_update=full_update
         )
         if not response.accepted or not _has_dock_status_payload(response):
             return response
@@ -1802,8 +1816,10 @@ class NarwalClient:
 
         for _ in range(_DOCK_TASK_IDENTIFY_ATTEMPTS):
             await asyncio.sleep(_DOCK_TASK_IDENTIFY_DELAY)
-            response = await self.get_status(
-                full_update=not self.state.has_recent_active_working_status
+            full_update = not self.state.has_recent_active_working_status
+            response = await self.get_status(full_update=full_update)
+            response.dock_status_freshness = _dock_status_freshness(
+                response, full_update=full_update
             )
             if not response.accepted or not _has_dock_status_payload(response):
                 return response
@@ -1821,49 +1837,57 @@ class NarwalClient:
                     result_code=CommandResult.NOT_READY,
                     data=refresh.data,
                     raw_payload=refresh.raw_payload,
+                    dock_status_freshness=DockStatusFreshness.STALE,
                 )
+
+            def status_result(result_code: CommandResult) -> CommandResponse:
+                return CommandResponse(
+                    result_code=result_code,
+                    dock_status_freshness=refresh.dock_status_freshness,
+                )
+
             if self.state.has_error or self.state.working_status in (
                 WorkingStatus.ERROR,
                 WorkingStatus.UNKNOWN,
             ):
-                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                return status_result(CommandResult.NOT_APPLICABLE)
             if self.state.has_unmapped_active_dock_task and not (
                 _can_force_end_scoped_dock_task(self.state, task)
             ):
-                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                return status_result(CommandResult.NOT_APPLICABLE)
             active_tasks = self.state.active_dock_task_keys
             if task is not None and task not in active_tasks:
                 if task in _KNOWN_DOCK_TASKS:
                     self.state.clear_assumed_dock_task(task)
-                    return CommandResponse(result_code=CommandResult.SUCCESS)
-                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                    return status_result(CommandResult.SUCCESS)
+                return status_result(CommandResult.NOT_APPLICABLE)
             if task is None and len(active_tasks) != 1:
                 if len(initial_active_tasks) == 1 and not active_tasks:
                     completed_task = initial_active_tasks[0]
                     self.state.clear_assumed_dock_task(completed_task)
-                    return CommandResponse(result_code=CommandResult.SUCCESS)
-                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                    return status_result(CommandResult.SUCCESS)
+                return status_result(CommandResult.NOT_APPLICABLE)
             active_task = task or (active_tasks[0] if active_tasks else None)
             if active_task is None:
-                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                return status_result(CommandResult.NOT_APPLICABLE)
             if (
                 _robot_work_blocks_generic_dock_stop(self.state)
                 and active_task not in _DOCK_TASK_FORCE_END_PAYLOADS
             ):
-                return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                return status_result(CommandResult.NOT_APPLICABLE)
 
             payload = _DOCK_TASK_FORCE_END_PAYLOADS.get(active_task)
             if payload is None:
                 if active_task == DOCK_TASK_DRY_DUST_BIN:
-                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                    return status_result(CommandResult.NOT_APPLICABLE)
                 if not _has_generic_dock_stop_proof(self.state):
-                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                    return status_result(CommandResult.NOT_APPLICABLE)
                 if len(active_tasks) > 1:
-                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                    return status_result(CommandResult.NOT_APPLICABLE)
                 response = await self.stop(timeout=15.0)
             else:
                 if active_task not in self.state.telemetry_dock_task_keys:
-                    return CommandResponse(result_code=CommandResult.NOT_APPLICABLE)
+                    return status_result(CommandResult.NOT_APPLICABLE)
                 response = await self.send_command(
                     TOPIC_CMD_FORCE_END,
                     payload=payload,
@@ -1874,7 +1898,16 @@ class NarwalClient:
             dock_generation = self.state.dock_activity_generation
             station_generation = self.state.station_activity_generation
             await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
+            verification_full_update = not self.state.has_recent_active_working_status
             refreshed = await self._refresh_after_dock_stop()
+            if refreshed:
+                response.dock_status_freshness = (
+                    DockStatusFreshness.FRESH
+                    if verification_full_update
+                    else DockStatusFreshness.PARTIAL
+                )
+            else:
+                response.dock_status_freshness = DockStatusFreshness.STALE
             current_timer = self.state.dock_drying_tasks.get(active_task)
             has_new_coarse_activity = (
                 self.state.dock_activity_generation != dock_generation

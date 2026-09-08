@@ -30,6 +30,7 @@ from .entity import NarwalDockEntity, NarwalEntity
 from .narwal_client import (
     CommandResponse,
     CommandResult,
+    DockStatusFreshness,
     NarwalCommandError,
     NarwalConnectionError,
 )
@@ -252,7 +253,6 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
             force_wake = stale_state and not is_robot_work_context(client.state)
             if not client.robot_awake or force_wake:
                 await client.wake(timeout=10.0, force=force_wake)
-            full_dock_refresh = not client.state.has_recent_active_working_status
             # The client refreshes, validates, sends, and verifies the scoped
             # stop atomically. Extra entity-layer refreshes only add network
             # round trips and can briefly replace actionable push telemetry.
@@ -261,13 +261,13 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
             except (NarwalCommandError, NarwalConnectionError):
                 self.coordinator.async_set_stale_dock_data()
                 raise
-            if response.result_code == CommandResult.NOT_READY:
+            if response.dock_status_freshness is DockStatusFreshness.STALE:
                 self.coordinator.async_set_stale_dock_data()
-            self._raise_if_command_failed(response, "stop")
-            if full_dock_refresh:
+            elif response.dock_status_freshness is DockStatusFreshness.FRESH:
                 self.coordinator.async_set_refreshed_dock_data()
             else:
                 self.coordinator.async_set_updated_data(client.state)
+            self._raise_if_command_failed(response, "stop")
 
     def _raise_if_command_failed(self, response: CommandResponse, action: str) -> None:
         """Raise a Home Assistant service error for rejected dock commands."""
