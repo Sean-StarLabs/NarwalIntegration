@@ -252,7 +252,7 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
             # round trips and can briefly replace actionable push telemetry.
             response = await client.stop_dock_task(self.entity_description.key)
             self._raise_if_command_failed(response, "stop")
-            self.coordinator.async_set_updated_data(client.state)
+            self.coordinator.async_set_refreshed_dock_data()
 
     def _raise_if_command_failed(self, response: CommandResponse, action: str) -> None:
         """Raise a Home Assistant service error for rejected dock commands."""
