@@ -4465,6 +4465,7 @@ class TestCoordinatorResilience:
         """Client-owned dock refreshes clear stale state before notifying listeners."""
         coordinator = self._make_coordinator()
         coordinator._dock_status_refresh_failed = True
+        coordinator._reconcile_map_display_after_status_refresh = MagicMock()
         seen: list[bool] = []
 
         def capture_update(_state):
@@ -4475,6 +4476,7 @@ class TestCoordinatorResilience:
         coordinator.async_set_refreshed_dock_data()
 
         assert seen == [True]
+        coordinator._reconcile_map_display_after_status_refresh.assert_called_once_with()
 
     def test_set_stale_dock_data_marks_stale_before_notifying(self) -> None:
         """Client refresh failures mark dock data stale before notifying listeners."""
