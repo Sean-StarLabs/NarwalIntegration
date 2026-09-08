@@ -27,7 +27,12 @@ from .dock_tasks import (
     is_robot_work_context,
 )
 from .entity import NarwalDockEntity, NarwalEntity
-from .narwal_client import CommandResponse, CommandResult
+from .narwal_client import (
+    CommandResponse,
+    CommandResult,
+    NarwalCommandError,
+    NarwalConnectionError,
+)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -251,7 +256,13 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
             # The client refreshes, validates, sends, and verifies the scoped
             # stop atomically. Extra entity-layer refreshes only add network
             # round trips and can briefly replace actionable push telemetry.
-            response = await client.stop_dock_task(self.entity_description.key)
+            try:
+                response = await client.stop_dock_task(self.entity_description.key)
+            except (NarwalCommandError, NarwalConnectionError):
+                self.coordinator.async_set_stale_dock_data()
+                raise
+            if response.result_code == CommandResult.NOT_READY:
+                self.coordinator.async_set_stale_dock_data()
             self._raise_if_command_failed(response, "stop")
             if full_dock_refresh:
                 self.coordinator.async_set_refreshed_dock_data()
