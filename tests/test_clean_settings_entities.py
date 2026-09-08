@@ -458,7 +458,7 @@ class TestLegacyNarwalSettingSelect:
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
 
         assert "Super Powerful" in sel.options
-        assert sel._normalise_option("Super") == "Super"
+        assert sel._normalise_option("Super") == "Super Powerful"
         assert "Ultra" not in sel.options
         assert sel._normalise_option("Ultra powerful") is None
 
