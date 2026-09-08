@@ -113,4 +113,6 @@ def test_room_panel_includes_numeric_order_control() -> None:
     room_cards = section["cards"][-1]["states"]["Kitchen"]["cards"]
 
     assert room_cards[1]["entity"] == "number.narwal_kitchen_cleaning_order"
-    assert room_cards[1]["features"] == [{"type": "numeric-input"}]
+    assert room_cards[1]["features"] == [
+        {"type": "numeric-input", "style": "buttons"}
+    ]
