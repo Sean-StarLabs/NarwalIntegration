@@ -1742,10 +1742,7 @@ class NarwalClient:
             and self.state.has_explicit_off_dock_signal
         )
         terminal_during_request = (
-            (
-                self.state.terminal_working_status_generation != terminal_generation
-                and not off_dock_handoff
-            )
+            self.state.terminal_working_status_generation != terminal_generation
             or self.state.working_status == WorkingStatus.ERROR
             or (
                 self.state.working_status == WorkingStatus.TASK_COMPLETED

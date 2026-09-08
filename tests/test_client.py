@@ -711,6 +711,34 @@ class TestNarwalClientInit:
         assert client.state.has_recent_active_working_status
         assert client.state.working_status == WorkingStatus.CLEANING
 
+    @pytest.mark.asyncio
+    async def test_resume_does_not_overwrite_new_off_dock_task_completed(self) -> None:
+        """A new off-dock completion received in flight outranks resume acceptance."""
+        client = NarwalClient("10.0.0.1")
+        client.state.working_status = WorkingStatus.CLEANING
+        client.state.is_paused = True
+        client.state.task_progress_percent = 25
+        client.state.dock_field11 = 1
+        client.state.dock_field47 = 2
+
+        async def completed_then_accept(*args, **kwargs) -> CommandResponse:
+            client.state.update_from_base_status(
+                {
+                    "3": {"1": int(WorkingStatus.TASK_COMPLETED)},
+                    "11": 1,
+                    "47": 2,
+                }
+            )
+            return CommandResponse(result_code=CommandResult.SUCCESS)
+
+        with patch.object(client, "send_command", side_effect=completed_then_accept):
+            response = await client.resume()
+
+        assert response.accepted
+        assert client.state.working_status == WorkingStatus.TASK_COMPLETED
+        assert not client.state.has_recent_active_working_status
+        assert not client.state.is_cleaning
+
     def test_suppressed_docked_packet_preserves_return_context(self) -> None:
         """A stale dock label cannot clear a fresh return-to-dock sub-state."""
         client = NarwalClient("10.0.0.1")

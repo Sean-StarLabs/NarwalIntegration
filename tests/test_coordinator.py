@@ -828,6 +828,64 @@ def test_runtime_setting_is_retained_without_reconstructed_room_profiles() -> No
     assert coordinator.active_clean_setting_overrides == {}
 
 
+def test_active_clean_profile_survives_recoverable_robot_error() -> None:
+    """A transient fault must not lose runtime controls when cleaning resumes."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    state = NarwalState(working_status=WorkingStatus.CLEANING)
+    state.current_room_id = 5
+    coordinator.client = MagicMock()
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.active_clean_work_mode = None
+    coordinator.active_room_clean_settings = {}
+    coordinator.active_clean_setting_overrides = {}
+    coordinator.record_accepted_clean_start(
+        {5: RoomCleanSettings(work_mode=WorkMode.MOP, water=MopHumidity.WET)}
+    )
+
+    state.dock_field11 = 1
+    state.dock_field47 = 2
+    state.has_error = True
+    coordinator._sync_active_clean_context(state)
+
+    assert coordinator.active_room_clean_settings[5].work_mode == WorkMode.MOP
+    assert not is_live_clean_setting_available(state)
+
+    state.has_error = False
+    assert is_live_clean_setting_available(state)
+    assert coordinator.clean_setting_applicability_mode(live=True) == WorkMode.MOP
+
+
+@pytest.mark.parametrize(
+    "status", (WorkingStatus.DOCKED, WorkingStatus.TASK_COMPLETED, WorkingStatus.STANDBY)
+)
+def test_fault_at_confirmed_dock_clears_active_clean_profile(
+    status: WorkingStatus,
+) -> None:
+    """Positive dock telemetry must outrank profile retention during a fault."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    state = NarwalState(working_status=status)
+    state.dock_presence = 1
+    state.dock_field11 = 2
+    state.dock_field47 = 3
+    state.has_current_dock_presence_signal = True
+    state.has_error = True
+    coordinator.client = MagicMock()
+    coordinator.client.state = state
+    coordinator.data = state
+    coordinator.active_clean_work_mode = WorkMode.MOP
+    coordinator.active_room_clean_settings = {
+        5: RoomCleanSettings(work_mode=WorkMode.MOP)
+    }
+    coordinator.active_clean_setting_overrides = {"water": MopHumidity.WET}
+
+    coordinator._sync_active_clean_context(state)
+
+    assert coordinator.active_clean_work_mode is None
+    assert coordinator.active_room_clean_settings == {}
+    assert coordinator.active_clean_setting_overrides == {}
+
+
 def test_mixed_active_clean_uses_current_room_mode_for_live_controls() -> None:
     """Runtime control applicability follows the room currently being cleaned."""
     coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
