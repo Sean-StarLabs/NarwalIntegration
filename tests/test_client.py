@@ -2425,6 +2425,54 @@ class TestDockTaskCommands:
         assert timer.elapsed == 66
 
     @pytest.mark.asyncio
+    async def test_stop_preserves_fresh_push_during_command_when_query_fails(
+        self,
+    ) -> None:
+        """Telemetry received while awaiting the stop response remains authoritative."""
+        client = self._docked_client()
+        client.state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+
+        async def command_with_fresh_push(*args, **kwargs):
+            client.state.set_dock_drying_task(
+                DOCK_TASK_DRY_DOCK_BAG,
+                elapsed=66,
+                target=180,
+                fields=("12", "13"),
+            )
+            return success
+
+        with patch.object(
+            client,
+            "get_status",
+            new_callable=AsyncMock,
+            return_value=self._docked_status_response(),
+        ), patch.object(
+            client,
+            "send_command",
+            new_callable=AsyncMock,
+            side_effect=command_with_fresh_push,
+        ), patch.object(
+            client,
+            "_refresh_after_dock_stop",
+            new_callable=AsyncMock,
+            return_value=False,
+        ), patch(
+            "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
+        ):
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+        assert result is success
+        timer = client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG)
+        assert timer is not None
+        assert timer.elapsed == 66
+
+    @pytest.mark.asyncio
     async def test_stop_dry_mop_preserves_fresh_coarse_activity(self) -> None:
         """Current dock activity can confirm mop drying without timer fields."""
         client = self._docked_client()

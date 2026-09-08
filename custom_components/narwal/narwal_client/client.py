@@ -1876,6 +1876,9 @@ class NarwalClient:
             ):
                 return status_result(CommandResult.NOT_APPLICABLE)
 
+            timer_before_command = self.state.dock_drying_tasks.get(active_task)
+            dock_generation = self.state.dock_activity_generation
+            station_generation = self.state.station_activity_generation
             payload = _DOCK_TASK_FORCE_END_PAYLOADS.get(active_task)
             if payload is None:
                 if active_task == DOCK_TASK_DRY_DUST_BIN:
@@ -1894,9 +1897,6 @@ class NarwalClient:
                     timeout=15.0,
                 )
 
-            timer_before_verification = self.state.dock_drying_tasks.get(active_task)
-            dock_generation = self.state.dock_activity_generation
-            station_generation = self.state.station_activity_generation
             await asyncio.sleep(_DOCK_TASK_REFRESH_DELAY)
             verification_full_update = not self.state.has_recent_active_working_status
             refreshed = await self._refresh_after_dock_stop()
@@ -1922,7 +1922,7 @@ class NarwalClient:
                     )
                     or (
                         current_timer is not None
-                        and current_timer is not timer_before_verification
+                        and current_timer is not timer_before_command
                     )
                     or (
                         active_task == DOCK_TASK_DRY_MOP
