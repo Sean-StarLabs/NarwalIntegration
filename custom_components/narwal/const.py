@@ -215,14 +215,7 @@ _FAN_SPEED_NO_LEVEL_5_ALIASES: dict[str, FanLevel] = {
 
 def fan_speed_list_for(data: dict) -> list[str]:
     """Return visible fan_speed options for this configured model."""
-    options = list(fan_speed_map_for(data, include_aliases=False))
-    # HA validates service values before the entity can normalize aliases.
-    # Keep the previously advertised level-4 label available to automations.
-    options.insert(options.index("Super Powerful"), "Super")
-    if data.get(CONF_PRODUCT_KEY) not in NO_LEVEL_5_FAN_PRODUCT_KEYS:
-        # Keep the previously advertised level-5 label visible for automations.
-        options.insert(-1, "Ultra")
-    return options
+    return list(fan_speed_map_for(data, include_aliases=False))
 
 
 def fan_speed_map_for(
@@ -256,11 +249,10 @@ def normalize_fan_level_for_model(data: dict, fan: FanLevel) -> FanLevel:
     return fan
 
 
-# FAN_SPEED_MAP also accepts the short "Super" label shipped through this stack
-# and v1.0.3's "… powerful" labels, plus the original lowercase fan_speed values
-# (quiet/normal/strong/max) so existing automations keep working. Select entities
-# must additionally advertise the prior "Ultra" option because HA validates
-# service values before calling the entity; other aliases remain input-only.
+# FAN_SPEED_MAP also accepts the short "Super" and "Ultra" labels shipped through
+# this stack, v1.0.3's "… powerful" labels, and the original lowercase values.
+# Keep those aliases out of advertised options while accepting them through the
+# vacuum command and restore paths.
 FAN_SPEED_MAP: dict[str, FanLevel] = _FAN_SPEED_CANONICAL | _FAN_SPEED_ALIASES
 
 # Backwards-compatible name for existing imports/tests.
