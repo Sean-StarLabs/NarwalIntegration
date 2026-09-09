@@ -107,6 +107,10 @@ class _FakeStore:
         self.saved.append(data)
         self.data = data
 
+    def async_delay_save(self, data_func: object, delay: float) -> None:
+        self.data = data_func()  # type: ignore[operator]
+        self.saved.append(self.data)
+
 
 def _trajectory_state() -> NarwalState:
     """Return a state with static map and native display-map trajectory."""
@@ -805,6 +809,48 @@ def test_active_clean_settings_follow_current_room_and_runtime_updates() -> None
         settings.fan == FanLevel.DEEP
         for settings in coordinator.active_room_clean_settings.values()
     )
+
+
+@pytest.mark.asyncio
+async def test_active_clean_profile_restores_after_restart() -> None:
+    """An accepted task retains its runtime mode after Home Assistant restarts."""
+    store = _FakeStore()
+    original = NarwalCoordinator.__new__(NarwalCoordinator)
+    original._active_clean_context_store = store
+    original.active_clean_setting_overrides = {}
+    original._clean_session_active = False
+    original.record_accepted_clean_start(
+        {5: RoomCleanSettings(work_mode=WorkMode.VACUUM, fan=FanLevel.STRONG)}
+    )
+    original.set_active_clean_setting("fan", FanLevel.DEEP)
+
+    restored = NarwalCoordinator.__new__(NarwalCoordinator)
+    restored._active_clean_context_store = store
+    restored.active_clean_work_mode = None
+    restored.active_room_clean_settings = {}
+    restored.active_clean_setting_overrides = {}
+
+    await restored._async_restore_active_clean_context()
+
+    assert restored.active_clean_work_mode == WorkMode.VACUUM
+    assert restored.active_room_clean_settings[5].fan == FanLevel.DEEP
+    assert restored.active_clean_setting_overrides == {"fan": FanLevel.DEEP}
+
+
+def test_unknown_startup_state_keeps_restored_active_clean_profile() -> None:
+    """A failed startup poll cannot discard a task before it is verified ended."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator._active_clean_context_store = _FakeStore()
+    coordinator.active_clean_work_mode = WorkMode.MOP
+    coordinator.active_room_clean_settings = {
+        5: RoomCleanSettings(work_mode=WorkMode.MOP)
+    }
+    coordinator.active_clean_setting_overrides = {"water": MopHumidity.WET}
+
+    coordinator._sync_active_clean_context(NarwalState())
+
+    assert coordinator.active_clean_work_mode == WorkMode.MOP
+    assert coordinator.active_room_clean_settings[5].work_mode == WorkMode.MOP
 
 
 def test_runtime_setting_is_retained_without_reconstructed_room_profiles() -> None:
