@@ -52,6 +52,7 @@ FAST_POLL_MAX = 6  # up to 60s of fast polling before falling back to normal
 CONSUMABLE_POLL_EVERY = 30
 MAP_DISPLAY_CACHE_VERSION = 1
 ROOM_SELECTION_STORE_VERSION = 1
+ACTIVE_CLEAN_CONTEXT_STORE_VERSION = 1
 # Retained routes can reach roughly 0.5 MiB at the point cap. Persist session
 # boundaries immediately, but checkpoint point growth at a storage-safe cadence.
 MAP_DISPLAY_CACHE_SAVE_INTERVAL = 300.0
@@ -402,6 +403,11 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.active_clean_work_mode: WorkMode | None = None
         self.active_room_clean_settings: dict[int, RoomCleanSettings] = {}
         self.active_clean_setting_overrides: dict[str, object] = {}
+        self._active_clean_context_store = Store(
+            hass,
+            ACTIVE_CLEAN_CONTEXT_STORE_VERSION,
+            f"{DOMAIN}_active_clean_context_{entry.entry_id}",
+        )
         self._listen_task: asyncio.Task[None] | None = None
         self._fast_poll_remaining = 0
         self._prev_working_status = WorkingStatus.UNKNOWN
@@ -485,6 +491,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             room_id: replace(settings)
             for room_id, settings in room_settings.items()
         }
+        self._schedule_active_clean_context_save()
 
     def active_clean_setting(self, attr: str) -> object | None:
         """Return the effective live value for the current clean, if known."""
@@ -514,6 +521,103 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.active_clean_setting_overrides[attr] = value
         for settings in self.active_room_clean_settings.values():
             setattr(settings, attr, value)
+        self._schedule_active_clean_context_save()
+
+    def _active_clean_context_payload(self) -> dict[str, object]:
+        """Serialize the accepted task profile for restart recovery."""
+        return {
+            "rooms": [
+                {
+                    "room_id": room_id,
+                    "values": {
+                        attr: (
+                            None
+                            if attr == "route" and getattr(settings, attr) is None
+                            else int(getattr(settings, attr))
+                        )
+                        for attr in ROOM_CLEAN_SETTING_ATTRS
+                    },
+                }
+                for room_id, settings in self.active_room_clean_settings.items()
+            ],
+            "overrides": {
+                attr: int(value)
+                for attr, value in self.active_clean_setting_overrides.items()
+                if attr in ROOM_CLEAN_SETTING_ATTRS and isinstance(value, int)
+            },
+        }
+
+    def _schedule_active_clean_context_save(self) -> None:
+        """Persist or clear the current accepted task profile."""
+        if not hasattr(self, "_active_clean_context_store"):
+            return
+        self._active_clean_context_store.async_delay_save(
+            self._active_clean_context_payload,
+            0,
+        )
+
+    async def _async_restore_active_clean_context(self) -> None:
+        """Restore an accepted clean profile until live telemetry ends it."""
+        try:
+            payload = await self._active_clean_context_store.async_load()
+        except Exception:
+            _LOGGER.debug("Could not restore active Narwal clean context")
+            return
+        if not isinstance(payload, Mapping):
+            return
+        rooms = payload.get("rooms")
+        overrides = payload.get("overrides", {})
+        if not isinstance(rooms, list) or not isinstance(overrides, Mapping):
+            return
+        restored: dict[int, RoomCleanSettings] = {}
+        for item in rooms:
+            if not isinstance(item, Mapping):
+                return
+            room_id = item.get("room_id")
+            values = item.get("values")
+            if (
+                not isinstance(room_id, int)
+                or isinstance(room_id, bool)
+                or room_id <= 0
+                or not isinstance(values, Mapping)
+                or set(values) != ROOM_CLEAN_SETTING_ATTRS
+            ):
+                return
+            try:
+                passes = values["passes"]
+                route = values["route"]
+                if (
+                    not isinstance(passes, int)
+                    or isinstance(passes, bool)
+                    or passes not in (1, 2, 3)
+                    or (route is not None and not isinstance(route, int))
+                ):
+                    return
+                restored[room_id] = RoomCleanSettings(
+                    work_mode=WorkMode(values["work_mode"]),
+                    fan=FanLevel(values["fan"]),
+                    water=MopHumidity(values["water"]),
+                    mop_strength=MopStrengthLevel(values["mop_strength"]),
+                    passes=passes,
+                    route=CleaningRoute(route) if route is not None else None,
+                )
+            except (TypeError, ValueError):
+                return
+        if not restored:
+            return
+        restored_overrides: dict[str, object] = {}
+        for attr, raw_value in overrides.items():
+            if attr not in {"fan", "water"} or not isinstance(raw_value, int):
+                return
+            try:
+                restored_overrides[attr] = (
+                    FanLevel(raw_value) if attr == "fan" else MopHumidity(raw_value)
+                )
+            except ValueError:
+                return
+        self.active_room_clean_settings = restored
+        self.active_clean_work_mode = self.shared_room_clean_work_mode(restored)
+        self.active_clean_setting_overrides = restored_overrides
 
     def clean_setting_applicability_mode(
         self, *, live: bool = False
@@ -547,11 +651,16 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             )
         ):
             return
+        # Startup status is unknown until the robot answers. Do not throw away
+        # the accepted task profile before that answer can confirm its end.
+        if state.working_status == WorkingStatus.UNKNOWN:
+            return
         if not is_clean_session_context(state):
             self.active_clean_work_mode = None
             self.active_room_clean_settings.clear()
             if hasattr(self, "active_clean_setting_overrides"):
                 self.active_clean_setting_overrides.clear()
+            self._schedule_active_clean_context_save()
 
     @staticmethod
     def _normalise_room_settings_map_id(map_id: object) -> str | None:
@@ -2196,6 +2305,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         The listener's keepalive loop handles waking independently.
         """
         await self._async_restore_room_selections()
+        await self._async_restore_active_clean_context()
         await self.client.connect()
 
         # Fetch initial state BEFORE starting listener (no concurrent recv)
@@ -2257,6 +2367,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
         self._retain_native_trajectory(self.client.state)
         self._schedule_map_display_cache_save(self.client.state)
+        self._sync_active_clean_context(self.client.state)
         self.async_set_updated_data(self.client.state)
         self._prev_working_status = self.client.state.working_status
         self._clean_session_active = self._has_clean_session_signal(self.client.state)

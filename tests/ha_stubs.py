@@ -187,6 +187,9 @@ def install() -> None:
         async def async_save(self, data: object) -> None:
             self.data = data
 
+        def async_delay_save(self, data_func: object, delay: float) -> None:
+            self.data = data_func()  # type: ignore[operator]
+
     ha_storage.Store = _Store  # type: ignore[attr-defined]
 
     ha_dr = _mod("homeassistant.helpers.device_registry", ha_helpers)
@@ -215,6 +218,9 @@ def install() -> None:
 
         async def async_save(self, data: object) -> None:
             self.data = data
+
+        def async_delay_save(self, data_func: object, delay: float) -> None:
+            self.data = data_func()  # type: ignore[operator]
 
     ha_storage.Store = _Store  # type: ignore[attr-defined]
     ha_ep = _mod("homeassistant.helpers.entity_platform", ha_helpers)
