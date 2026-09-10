@@ -28,6 +28,10 @@ NARWAL_MODELS: dict[str, str] = {
     "Narwal Freo X10 Pro": "CNbforyZWI",
     "Narwal Freo Z Ultra (CX7)": "hEA7OEshlx",
     "Narwal JX": "CGjuB6dzq7",
+    # Confirmed working by @kvkessler (#97) as "Unknown (fjhpiem4ba)" on
+    # firmware v01.00.35.03 -- map streaming, current room, dock sensors all
+    # live. A different key from the JX, so the two are separate platforms (#42).
+    "Narwal Freo 20": "fjhpiem4ba",
     "Other / Auto-detect": "auto",
 }
 
