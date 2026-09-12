@@ -752,7 +752,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             return
         if not is_clean_session_context(state):
             self.active_clean_work_mode = None
-            self.active_room_clean_settings.clear()
+            getattr(self, "active_room_clean_settings", {}).clear()
             if hasattr(self, "active_clean_setting_overrides"):
                 self.active_clean_setting_overrides.clear()
             self._schedule_active_clean_context_save()
