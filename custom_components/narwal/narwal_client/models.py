@@ -841,6 +841,10 @@ class NarwalState:
     # Consumable alerts from consumable/get_consumable_info (queried, not broadcast)
     maintain_items: list[int] = field(default_factory=list)  # ConsumableMaintainItem values
     replace_items: list[int] = field(default_factory=list)  # ConsumableReplaceItem values
+    # Full decoded response, for diagnostics. This message is not shaped the same on
+    # every firmware, so keeping the raw decode lets an unexpected one be identified
+    # from a diagnostics download instead of a local patch.
+    raw_consumable_info: dict[str, Any] = field(default_factory=dict)
 
     # Map
     map_data: MapData | None = None
@@ -1823,7 +1827,14 @@ class NarwalState:
 
         {1: ConsumableInfoPayload{1: maintainItems[], 2: replaceItems[]}}; an empty
         payload means nothing needs attention. Per-consumable life % is cloud-only.
+
+        Not every firmware sends that shape: a Flow 2 (v01.09.09.05) answers with an
+        envelope whose field 3 is the firmware string and whose field 1 holds five
+        scalar fields rather than two repeated id lists, so subfields 1 and 2 parse
+        into ids that do not exist. The raw decode is kept so such a payload can be
+        recognised; consumers are expected to validate ids against the enums.
         """
+        self.raw_consumable_info = decoded
         payload = decoded.get("1")
         if not isinstance(payload, dict):
             payload = {}
