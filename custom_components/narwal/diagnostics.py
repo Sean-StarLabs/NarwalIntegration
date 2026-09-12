@@ -191,6 +191,7 @@ async def async_get_config_entry_diagnostics(
             "station_bag_state": state.station_bag_state,
             "maintain_items": list(state.maintain_items),
             "replace_items": list(state.replace_items),
+            "raw_consumable_info": _jsonable(state.raw_consumable_info),
         },
         "errors": {
             "has_error": state.has_error,

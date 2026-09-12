@@ -93,6 +93,54 @@ def test_consumable_alert_sensors() -> None:
     assert repl.value_fn(s) is False
 
 
+def test_consumable_alert_sensors_ignore_unknown_ids() -> None:
+    """An id outside the enum must not raise a problem, but stays visible.
+
+    Some firmware answers consumable/get_consumable_info with a payload that is not
+    an id list. On a Flow 2 (v01.09.09.05) field 1 carries five scalar fields all
+    equal to 1000, which the parser reads as maintainItems=[1000] and
+    replaceItems=[1000], lighting both sensors with items: ["1000"]. 1000 is in
+    neither enum, so it cannot be a part, and an unrecognised value is not evidence
+    of a fault.
+    """
+    maint, repl = _DESCS["maintenance_required"], _DESCS["replacement_required"]
+    s = NarwalState()
+    s.update_from_base_status({"2": 0})  # robot reachable
+    s.update_from_consumable_info({"1": {"1": 1000, "2": 1000}})
+
+    assert s.maintain_items == [1000]  # the parse itself is unchanged
+    assert s.replace_items == [1000]
+    assert maint.value_fn(s) is False
+    assert repl.value_fn(s) is False
+    assert maint.attrs_fn(s)["items"] == []
+    assert maint.attrs_fn(s)["unknown_ids"] == [1000]
+    assert repl.attrs_fn(s)["unknown_ids"] == [1000]
+
+
+def test_consumable_alert_sensors_mixed_known_and_unknown() -> None:
+    """A real alert alongside an unknown id still raises, and names only the real one."""
+    maint = _DESCS["maintenance_required"]
+    s = NarwalState()
+    s.update_from_base_status({"2": 0})
+    s.update_from_consumable_info({"1": {"1": [2, 1000], "2": []}})
+
+    assert maint.value_fn(s) is True
+    assert maint.attrs_fn(s)["items"] == ["dust filter"]
+    assert maint.attrs_fn(s)["unknown_ids"] == [1000]
+
+
+def test_consumable_alert_single_item_scalar_still_alerts() -> None:
+    """A one-element repeated field arrives as a bare int; that must keep working."""
+    repl = _DESCS["replacement_required"]
+    s = NarwalState()
+    s.update_from_base_status({"2": 0})
+    s.update_from_consumable_info({"1": {"1": [], "2": 8}})
+
+    assert repl.value_fn(s) is True
+    assert repl.attrs_fn(s)["items"] == ["dust bag"]
+    assert repl.attrs_fn(s)["unknown_ids"] == []
+
+
 def test_station_problem_sensors_belong_to_dock_device() -> None:
     """Station hardware problem sensors are grouped under the dock device."""
     dock_sensor = NarwalDockBinarySensor(_coordinator(), _DESCS["clean_water_tank"])

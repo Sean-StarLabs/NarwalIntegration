@@ -35,6 +35,16 @@ class NarwalBinarySensorEntityDescription(BinarySensorEntityDescription):
     dock_device: bool = False
 
 
+def _named(items: list[int], names: dict[int, str]) -> list[str]:
+    """Names for the consumable ids this integration knows."""
+    return [names[i] for i in items if i in names]
+
+
+def _unnamed(items: list[int], names: dict[int, str]) -> list[int]:
+    """Consumable ids that are not in the enum, kept for diagnosis."""
+    return [i for i in items if i not in names]
+
+
 def _tank_problem(attr: str, bad: frozenset[int]) -> Callable[[NarwalState], bool | None]:
     """A station tank/bag state is a problem when its enum value is one of `bad`.
 
@@ -75,9 +85,15 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
         # consumable/get_consumable_info maintainItems (clean/check these parts).
-        value_fn=lambda s: bool(s.maintain_items) if s.raw_base_status else None,
+        # Only ids in the enum raise a problem: some firmware answers this topic with
+        # a payload that is not an id list at all, and an unrecognised value is not
+        # evidence of a fault. Unknown ids stay visible for diagnosis.
+        value_fn=lambda s: bool(_named(s.maintain_items, CONSUMABLE_MAINTAIN_ITEMS))
+        if s.raw_base_status
+        else None,
         attrs_fn=lambda s: {
-            "items": [CONSUMABLE_MAINTAIN_ITEMS.get(i, str(i)) for i in s.maintain_items]
+            "items": _named(s.maintain_items, CONSUMABLE_MAINTAIN_ITEMS),
+            "unknown_ids": _unnamed(s.maintain_items, CONSUMABLE_MAINTAIN_ITEMS),
         } if s.raw_base_status else None,
     ),
     NarwalBinarySensorEntityDescription(
@@ -86,9 +102,13 @@ BINARY_SENSOR_DESCRIPTIONS: tuple[NarwalBinarySensorEntityDescription, ...] = (
         device_class=BinarySensorDeviceClass.PROBLEM,
         entity_category=EntityCategory.DIAGNOSTIC,
         # consumable/get_consumable_info replaceItems (replace these parts).
-        value_fn=lambda s: bool(s.replace_items) if s.raw_base_status else None,
+        # Same id filtering as maintenance_required above.
+        value_fn=lambda s: bool(_named(s.replace_items, CONSUMABLE_REPLACE_ITEMS))
+        if s.raw_base_status
+        else None,
         attrs_fn=lambda s: {
-            "items": [CONSUMABLE_REPLACE_ITEMS.get(i, str(i)) for i in s.replace_items]
+            "items": _named(s.replace_items, CONSUMABLE_REPLACE_ITEMS),
+            "unknown_ids": _unnamed(s.replace_items, CONSUMABLE_REPLACE_ITEMS),
         } if s.raw_base_status else None,
     ),
     NarwalBinarySensorEntityDescription(
