@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import random
 import time
@@ -239,6 +240,19 @@ class NarwalCommandError(Exception):
     """Raised when a command fails or times out."""
 
 
+def _url_host(host: str) -> str:
+    """Return host as it must appear in a URL: IPv6 literals need brackets.
+
+    Discovery can store the robot's IPv6 address (#101). ``ws://fd00::1:9002``
+    parses the last group as the port and websockets refuses it.
+    """
+    try:
+        version = ipaddress.ip_address(host).version
+    except ValueError:
+        return host
+    return f"[{host}]" if version == 6 else host
+
+
 class NarwalClient:
     """Async WebSocket client for communicating with a Narwal vacuum.
 
@@ -262,7 +276,7 @@ class NarwalClient:
         self.host = host
         self.port = port
         self.device_id = device_id
-        self.url = f"ws://{host}:{port}"
+        self.url = f"ws://{_url_host(host)}:{port}"
         self.topic_prefix = topic_prefix or DEFAULT_TOPIC_PREFIX
         self.supports_broadcasts = supports_broadcasts
         self.state = NarwalState()
@@ -375,7 +389,10 @@ class NarwalClient:
             )
             self._connected.set()
             _LOGGER.info("Connected to Narwal vacuum at %s", self.url)
-        except (OSError, websockets.exceptions.WebSocketException) as e:
+        except (OSError, ValueError, websockets.exceptions.WebSocketException) as e:
+            # ValueError: a URL websockets cannot parse. Seen with an
+            # unbracketed IPv6 host (#101); it must surface as a connection
+            # failure so the integration retries instead of failing setup.
             raise NarwalConnectionError(
                 f"Failed to connect to {self.url}: {e}"
             ) from e

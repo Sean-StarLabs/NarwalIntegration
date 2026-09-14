@@ -226,10 +226,24 @@ def install() -> None:
     class _ZeroconfServiceInfo:
         """Stub for ZeroconfServiceInfo (only the fields the flow reads)."""
 
-        def __init__(self, host: str = "", hostname: str = "", port: int = 0) -> None:
+        def __init__(
+            self,
+            host: str = "",
+            hostname: str = "",
+            port: int = 0,
+            ip_addresses: list[object] | None = None,
+        ) -> None:
             self.host = host
             self.hostname = hostname
             self.port = port
+            if ip_addresses is None:
+                import ipaddress
+
+                try:
+                    ip_addresses = [ipaddress.ip_address(host)] if host else []
+                except ValueError:
+                    ip_addresses = []
+            self.ip_addresses = ip_addresses
 
     class _DhcpServiceInfo:
         """Stub for DhcpServiceInfo (only the fields the flow reads)."""

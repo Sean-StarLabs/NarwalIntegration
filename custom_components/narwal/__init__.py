@@ -550,6 +550,17 @@ async def async_setup_entry(hass: HomeAssistant, entry: NarwalConfigEntry) -> bo
         raise ConfigEntryNotReady(
             f"Cannot connect to Narwal vacuum at {entry.data['host']}: {err}"
         ) from err
+    except Exception as err:  # noqa: BLE001 - any startup failure must retry
+        # An unexpected exception here leaves the entry in HA's setup-error
+        # state, which is never retried (#101). Ask for a retry instead.
+        _LOGGER.warning(
+            "Narwal setup at %s failed unexpectedly, will retry: %s",
+            entry.data.get("host"),
+            err,
+        )
+        raise ConfigEntryNotReady(
+            f"Narwal setup at {entry.data.get('host')} failed: {err}"
+        ) from err
 
     entry.runtime_data = coordinator
     _domain_data(hass)[entry.entry_id] = coordinator

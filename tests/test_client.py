@@ -2002,3 +2002,36 @@ class TestDockedRobotIsLeftAlone:
                         await client._keepalive_loop()
 
         renew.assert_awaited()
+
+
+class TestConnectionUrl:
+    """#101: the WebSocket URL must survive whatever address discovery stores."""
+
+    @pytest.mark.parametrize(
+        ("host", "expected"),
+        [
+            ("192.168.0.180", "ws://192.168.0.180:9002"),
+            ("narwal_8d5298.local", "ws://narwal_8d5298.local:9002"),
+            (
+                "fd00:1170:789a:20:998a:c982:df15:ab22",
+                "ws://[fd00:1170:789a:20:998a:c982:df15:ab22]:9002",
+            ),
+        ],
+    )
+    def test_url_brackets_ipv6_hosts(self, host: str, expected: str) -> None:
+        assert NarwalClient(host).url == expected
+
+    async def test_connect_wraps_url_errors_as_connection_errors(self) -> None:
+        """A malformed URL must surface as NarwalConnectionError, not escape setup.
+
+        The unbracketed IPv6 case raised ValueError out of websockets.connect and
+        Home Assistant marked the entry as failed instead of retrying (#101).
+        """
+        client = NarwalClient("192.168.0.180")
+        with patch(
+            "narwal_client.client.websockets.connect",
+            side_effect=ValueError("Port could not be cast to integer value"),
+        ):
+            with pytest.raises(NarwalConnectionError):
+                await client.connect()
+        assert not client.connected

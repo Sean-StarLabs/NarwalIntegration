@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from typing import Any
@@ -38,6 +39,28 @@ MODEL_DEFAULT = MODEL_AUTO_LABEL
 # `_app_wss_server_7bb53c._narwal_sweeper._tcp.local.` both end in the last six
 # hex characters of the robot's device_id.
 _DISCOVERY_NAME_RE = re.compile(r"(?:narwal|app_wss_server)[_-]([0-9a-f]{6})", re.I)
+
+
+def _is_ipv6(host: str) -> bool:
+    """Return True when host is an IPv6 literal."""
+    try:
+        return ipaddress.ip_address(host).version == 6
+    except ValueError:
+        return False
+
+
+def _preferred_host(discovery_info: ZeroconfServiceInfo) -> str:
+    """Pick the IPv4 address from a zeroconf record when one is advertised.
+
+    `discovery_info.host` is whichever address zeroconf listed first, and on a
+    dual-stack LAN that is sometimes the AAAA record (#101). The robot is
+    reachable on either, but IPv4 is what every user has typed by hand and what
+    the rest of the stack has been exercised with.
+    """
+    for address in getattr(discovery_info, "ip_addresses", None) or ():
+        if getattr(address, "version", None) == 4:
+            return str(address)
+    return str(discovery_info.host)
 
 STEP_USER_DATA_SCHEMA = vol.Schema(
     {
@@ -114,16 +137,26 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
             ).lower().endswith(suffix)
             if not same_device and entry.data.get("host") != host:
                 continue
-            if same_device and entry.data.get("host") != host:
+            if (
+                same_device
+                and entry.data.get("host") != host
+                and not _is_ipv6(host)
+            ):
                 # Same robot, new address — a DHCP renewal or a subnet move.
                 # Repoint the entry instead of leaving it pointing at nothing.
+                # Never repoint to an IPv6 address: discovery re-runs on every
+                # HA start and hands back whichever record mDNS has cached, and
+                # an IPv6 host silently replaced a working IPv4 one (#101).
                 self.hass.config_entries.async_update_entry(
                     entry, data={**entry.data, "host": host}
                 )
             return self.async_abort(reason="already_configured")
 
         await self.async_set_unique_id(fallback_uid)
-        self._abort_if_unique_id_configured(updates={"host": host})
+        if _is_ipv6(host):
+            self._abort_if_unique_id_configured()
+        else:
+            self._abort_if_unique_id_configured(updates={"host": host})
 
         self._discovered_host = host
         self.context["title_placeholders"] = {"host": host}
@@ -140,7 +173,7 @@ class NarwalConfigFlow(ConfigFlow, domain=DOMAIN):
         the model isn't in the mDNS payload, so the user still picks it.
         """
         return await self._async_discovered(
-            str(discovery_info.host), discovery_info.hostname.rstrip(".")
+            _preferred_host(discovery_info), discovery_info.hostname.rstrip(".")
         )
 
     async def async_step_dhcp(

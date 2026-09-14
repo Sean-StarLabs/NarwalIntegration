@@ -6,6 +6,8 @@ imported and tested without a full HA installation.
 
 from __future__ import annotations
 
+from ipaddress import IPv4Address, IPv6Address
+
 import sys
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -615,6 +617,68 @@ class TestDiscovery:
 
         flow.async_show_form.assert_called_once()
         flow.hass.config_entries.async_update_entry.assert_not_called()
+
+    async def test_zeroconf_prefers_ipv4_when_both_families_advertised(self) -> None:
+        """#101: mDNS may list the AAAA record first; the flow must pick the A record."""
+        flow = self._make_flow()
+
+        await flow.async_step_zeroconf(
+            ZeroconfServiceInfo(
+                host="fd00:1170:789a:20:998a:c982:df15:ab22",
+                hostname="NARWAL_8d5298.local.",
+                ip_addresses=[
+                    IPv6Address("fd00:1170:789a:20:998a:c982:df15:ab22"),
+                    IPv4Address("192.168.0.180"),
+                ],
+            )
+        )
+
+        assert flow._discovered_host == "192.168.0.180"
+        assert flow.context["title_placeholders"] == {"host": "192.168.0.180"}
+
+    async def test_ipv6_only_rediscovery_does_not_replace_stored_ipv4(self) -> None:
+        """#101: a restart-time IPv6-only discovery must not repoint a working IPv4 entry."""
+        entry = self._entry(
+            "192.168.0.180", device_id="71c53f01c14f49088338863e147bb53c"
+        )
+        flow = self._make_flow(entries=[entry])
+
+        result = await flow.async_step_zeroconf(
+            ZeroconfServiceInfo(
+                host="fd00:1170:789a:20:998a:c982:df15:ab22",
+                hostname="NARWAL_7bb53c.local.",
+            )
+        )
+
+        assert result["reason"] == "already_configured"
+        flow.hass.config_entries.async_update_entry.assert_not_called()
+
+    async def test_ipv6_only_rediscovery_by_unique_id_does_not_update_host(self) -> None:
+        """The hostname-keyed path must not push an IPv6 host into the entry either."""
+        flow = self._make_flow()
+
+        await flow.async_step_zeroconf(
+            ZeroconfServiceInfo(
+                host="fd00:1170:789a:20:998a:c982:df15:ab22",
+                hostname="NARWAL_8d5298.local.",
+            )
+        )
+
+        flow._abort_if_unique_id_configured.assert_called_once_with()
+
+    async def test_ipv6_only_robot_can_still_be_added(self) -> None:
+        """An IPv6-only network is unusual but must not be a dead end."""
+        flow = self._make_flow()
+
+        await flow.async_step_zeroconf(
+            ZeroconfServiceInfo(
+                host="fd00:1170:789a:20:998a:c982:df15:ab22",
+                hostname="NARWAL_8d5298.local.",
+            )
+        )
+
+        assert flow._discovered_host == "fd00:1170:789a:20:998a:c982:df15:ab22"
+        flow.async_show_form.assert_called_once()
 
     def test_device_id_suffix_parsing(self) -> None:
         """Both discovery name shapes yield the suffix; other names yield None."""
