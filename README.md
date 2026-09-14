@@ -2,7 +2,7 @@
 
 A fully **local, cloud-independent** [Home Assistant](https://www.home-assistant.io/) custom integration for Narwal robot vacuums. Communicates directly with your vacuum over your local network via WebSocket — no cloud account or internet connection required.
 
-> **Latest release: [v1.0.9](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.9)** (HACS) — the consumable problem sensors no longer fire on values that are not consumables, per-room controls are opt-in for new installs, and the Freo 20 joins the model list ([notes](docs/RELEASE-NOTES-v1.0.9.md)). **No breaking changes.** v1.0.8 before it had **two breaking changes: the `current_room` sensor moved onto the vacuum entity, and the suction tiers were renamed to match the Narwal app** ([notes](docs/RELEASE-NOTES-v1.0.8.md)). **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first**, then the [v1.0.4 notes](docs/RELEASE-NOTES-v1.0.4.md) — your consumable alerts were wrong before that release.
+> **Latest release: [v1.0.10](https://github.com/sjmotew/NarwalIntegration/releases/tag/v1.0.10)** (HACS) — a robot that came up unavailable after a Home Assistant restart, because discovery had swapped its address for an IPv6 one, now starts and retries correctly ([notes](docs/RELEASE-NOTES-v1.0.10.md)). **No breaking changes.** [v1.0.9](docs/RELEASE-NOTES-v1.0.9.md) stopped the phantom consumable alerts and made per-room controls opt-in. v1.0.8 before it had **two breaking changes: the `current_room` sensor moved onto the vacuum entity, and the suction tiers were renamed to match the Narwal app** ([notes](docs/RELEASE-NOTES-v1.0.8.md)). **Coming from v1.0.1 or earlier? [Read the three breaking changes](docs/RELEASE-NOTES-v1.0.2.md) first**, then the [v1.0.4 notes](docs/RELEASE-NOTES-v1.0.4.md) — your consumable alerts were wrong before that release.
 
 > ### ✅ Room cleaning is fixed — shipped in v1.0.2, verified on hardware in v1.0.3
 >
@@ -379,9 +379,13 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 ## Project Status
 
-**Where things stand — updated 2026-09-12, at the v1.0.9 release.**
+**Where things stand — updated 2026-09-14, at the v1.0.10 release.**
 
-**v1.0.9 is released** — everything below is shipped to HACS. 863 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. **Open PRs: [#95](https://github.com/sjmotew/NarwalIntegration/pull/95) (@Sean-StarLabs — the fix for [#98](https://github.com/sjmotew/NarwalIntegration/issues/98), draft).**
+**v1.0.10 is released** — everything below is shipped to HACS. 872 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. **Open PRs: [#95](https://github.com/sjmotew/NarwalIntegration/pull/95) (@Sean-StarLabs — the fix for [#98](https://github.com/sjmotew/NarwalIntegration/issues/98), draft).**
+
+| Merged in v1.0.10 | What it does |
+|---|---|
+| [#101](https://github.com/sjmotew/NarwalIntegration/issues/101) | **A robot no longer comes up unavailable after a Home Assistant restart.** Discovery re-runs at every boot and could replace the stored IPv4 address with the robot's IPv6 one; the WebSocket URL then failed to parse and the entry was marked failed, which HA never retries. Discovery now prefers IPv4 and never downgrades a stored host to IPv6, IPv6 literals are bracketed, and any startup failure is retried. Reported with logs by @thorsten-gehrig |
 
 | Merged in v1.0.9 | What it does |
 |---|---|
