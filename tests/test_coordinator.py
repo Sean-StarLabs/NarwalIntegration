@@ -1730,6 +1730,35 @@ def test_retain_native_trajectory_clears_when_active_map_changes() -> None:
     assert coordinator._retained_map_display is new_map_window
 
 
+def test_retain_native_trajectory_keeps_route_for_same_slot_refresh() -> None:
+    """A same-slot map refresh must not erase an active clean route."""
+    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    state = NarwalState(working_status=WorkingStatus.CLEANING)
+    state.map_data = MapData(map_id=12, created_at=35)
+    state.map_display_data = _trajectory_display(
+        (2.0, 2.0), (3.0, 3.0), timestamp=200
+    )
+    coordinator.client = MagicMock()
+    coordinator.client.state = state
+    coordinator._retained_map_display = _trajectory_display(
+        (1.0, 1.0), (2.0, 2.0), timestamp=100
+    )
+    coordinator._retained_map_identity = (12, 34)
+    coordinator._retained_map_geometry_identity = (
+        12, 0, 0, 0, 0, 0, 0
+    )
+    coordinator._map_display_cache_restored_from_active = False
+
+    coordinator._retain_native_trajectory(state)
+
+    assert coordinator._retained_map_identity == (12, 35)
+    assert state.map_display_data.trajectory_points() == [
+        (1.0, 1.0),
+        (2.0, 2.0),
+        (3.0, 3.0),
+    ]
+
+
 def test_retained_trajectory_adopts_delayed_static_map_identity() -> None:
     """A map loaded after the first route still scopes later trajectory data."""
     coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
@@ -5064,7 +5093,7 @@ class TestTopicSubscriptionRenewal:
         c.client.get_consumable_info = AsyncMock()
         c.client.subscribe_to_topics = AsyncMock()
         c.client.supports_broadcasts = True
-        c.client.state.map_data = MagicMock()  # skip the map-retry branch
+        c.client.state.map_data = MapData()  # skip the map-retry branch
         c._consecutive_failures = 0
         c._max_failures = 5
         c._consumable_poll_countdown = 99

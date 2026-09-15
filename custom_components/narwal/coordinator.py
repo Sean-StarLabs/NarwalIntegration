@@ -445,6 +445,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._map_display_cache_clear_pending = False
         self._retained_map_display: MapDisplayData | None = None
         self._retained_map_identity: tuple[int, int] | None = None
+        self._retained_map_geometry_identity: tuple[object, ...] | None = None
         self._pending_new_clean_map_display: MapDisplayData | None = None
         self._pending_new_clean_map_display_at = 0.0
         self._pending_new_clean_terminal_generation: int | None = None
@@ -1215,6 +1216,24 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         return (static_map.map_id, static_map.created_at)
 
     @staticmethod
+    def _static_map_geometry_identity(
+        state: NarwalState,
+    ) -> tuple[object, ...] | None:
+        """Return the coordinate geometry used to render a static map."""
+        static_map = state.map_data
+        if static_map is None:
+            return None
+        return (
+            static_map.map_id,
+            static_map.width,
+            static_map.height,
+            static_map.resolution,
+            static_map.origin_x,
+            static_map.origin_y,
+            zlib.crc32(static_map.compressed_map),
+        )
+
+    @staticmethod
     def _map_display_cache_payload_from_snapshot(
         snapshot: _MapDisplayCacheSnapshot,
     ) -> dict[str, object]:
@@ -1399,6 +1418,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self.client.state.map_display_data = display
         self._retained_map_display = display
         self._retained_map_identity = self._static_map_identity(self.client.state)
+        self._retained_map_geometry_identity = self._static_map_geometry_identity(
+            self.client.state
+        )
         self._map_display_cache_signature = display.trajectory_signature
         self._map_display_cache_active_clean = cached_active_clean
         self._clean_session_terminal = not cached_active_clean
@@ -1433,9 +1455,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.client.state.map_display_data = None
             self._retained_map_display = None
             self._retained_map_identity = None
+            self._retained_map_geometry_identity = None
         else:
             self._retained_map_display = self.client.state.map_display_data
             self._retained_map_identity = self._static_map_identity(self.client.state)
+            self._retained_map_geometry_identity = self._static_map_geometry_identity(
+                self.client.state
+            )
 
     @staticmethod
     def _native_trajectory_overlap(
@@ -1813,19 +1839,29 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         retained_map_identity = getattr(self, "_retained_map_identity", None)
         if retained_map_identity is None and map_identity is not None:
             self._retained_map_identity = map_identity
+            self._retained_map_geometry_identity = self._static_map_geometry_identity(
+                state
+            )
             retained_map_identity = map_identity
         if (
             retained_map_identity is not None
             and map_identity is not None
             and map_identity != retained_map_identity
         ):
-            # A display-map packet cannot be attributed safely while the active
-            # static map is changing. Drop it with the old route; the next
-            # packet on the new map starts a fresh retained trajectory.
-            self._reset_map_display_cache_state(clear_memory=True)
-            self._retained_map_identity = map_identity
-            self._schedule_map_display_cache_clear(None)
-            return False
+            # Preserve a route through a metadata refresh only when the map
+            # geometry used to render it is unchanged.
+            geometry_identity = self._static_map_geometry_identity(state)
+            same_geometry = geometry_identity == getattr(
+                self, "_retained_map_geometry_identity", None
+            )
+            if same_geometry and is_clean_session_context(state):
+                self._retained_map_identity = map_identity
+            else:
+                self._reset_map_display_cache_state(clear_memory=True)
+                self._retained_map_identity = map_identity
+                self._retained_map_geometry_identity = geometry_identity
+                self._schedule_map_display_cache_clear(None)
+                return False
         return True
 
     def _retain_native_trajectory(self, state: NarwalState) -> None:
@@ -1870,6 +1906,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         if previous is None:
             self._retained_map_display = current
             self._retained_map_identity = self._static_map_identity(state)
+            self._retained_map_geometry_identity = self._static_map_geometry_identity(
+                state
+            )
             return
         restored_active = getattr(
             self,
@@ -2559,6 +2598,9 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.client.state.map_display_data = initial_display
             self._retained_map_display = initial_display
             self._retained_map_identity = self._static_map_identity(self.client.state)
+            self._retained_map_geometry_identity = self._static_map_geometry_identity(
+                self.client.state
+            )
             snapshot = self._map_display_cache_snapshot(self.client.state)
         self._schedule_map_display_cache_clear(snapshot)
         _LOGGER.debug("Cleared Narwal display-map trajectory cache for new clean")
