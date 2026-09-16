@@ -46,7 +46,7 @@ This integration uses a **local WebSocket connection on port 9002**. Only models
 | **Freo Z10** (plain, non-Ultra / non-Pro) | **Under investigation** | Advertises `_narwal_sweeper._tcp` over mDNS and is picked up by discovery, but port 9002 returns `ECONNREFUSED` in every device state — the host is healthy and nothing is listening. Distinct from the Z10 Pro / Turbo and Z10 Ultra above, both of which work ([#92](https://github.com/sjmotew/NarwalIntegration/issues/92)) |
 | **Freo X Ultra** (AX18/AX19) | **Not Compatible** | Uses ZeroMQ (port 6789) + Tuya cloud, not WebSocket ([#4](https://github.com/sjmotew/NarwalIntegration/issues/4)) |
 | **Freo X Plus** | **Not Compatible** | Cloud-only — no local API |
-| **Narwal J-series** (J1/J4) | **Not Compatible** | J1: HTTP-only (port 8080); J4: cloud-only (Tuya). J5 is the cloud identity of the supported global CX7 listed above. |
+| **Narwal J-series** (J1/J4) and **T10** | **Not Compatible** | J1 and its international twin the T10: no port 9002, port 8080 answers `501 Not Implemented`, and the official app controls the robot only through Narwal's cloud (`usaclient` / `usawebsocket.narwaltech.com`); a full 65,535-port scan and an app packet capture are in [#44](https://github.com/sjmotew/NarwalIntegration/issues/44). J4: cloud-only (Tuya). J5 is the cloud identity of the supported global CX7 listed above. |
 
 Models marked **Not Compatible** use a different protocol or are cloud-only. This is a hardware/firmware limitation.
 
