@@ -133,3 +133,21 @@ def test_dock_light_follows_every_flow2_key() -> None:
     """
     assert DOCK_LIGHT_PRODUCT_KEYS == {"QxMSPG6VSO", "iSuVlI1If2", "mkbqaprvrb"}
     assert is_dock_light_supported({CONF_PRODUCT_KEY: "mkbqaprvrb"})
+
+
+def test_freo_20_is_a_selectable_model_and_broadcasts() -> None:
+    """Freo 20 confirmed working by @kvkessler (#97) as "Unknown (fjhpiem4ba)".
+
+    The screenshot showed a full live session -- map streaming, current room,
+    cleaning area -- so it broadcasts. Its key is distinct from the JX key, which
+    settles the #42 question of whether the two are one platform: they are not.
+    """
+    product_key = NARWAL_MODELS["Narwal Freo 20"]
+    assert product_key == "fjhpiem4ba"
+    assert product_key != NARWAL_MODELS["Narwal JX"]
+    assert product_key in KNOWN_PRODUCT_KEYS
+    assert product_key not in NO_BROADCAST_PRODUCT_KEYS
+    assert model_label_for_product_key(product_key) == "Narwal Freo 20"
+    assert configured_model_name(
+        {CONF_MODEL: "Narwal Freo 20", CONF_PRODUCT_KEY: product_key}
+    ) == "Freo 20"

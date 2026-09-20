@@ -66,6 +66,7 @@ def _make_state(**overrides):
     state.raw_base_status = {}
     state.maintain_items = []
     state.replace_items = []
+    state.raw_consumable_info = {}
     state.error_codes = []
     for key, value in overrides.items():
         setattr(state, key, value)
@@ -255,6 +256,33 @@ class TestRawPayloads:
 
         assert result["raw_base_status"]["99"] == 7
         assert result["raw_base_status"]["100"]["__bytes_hex__"] == "02"
+
+    async def test_raw_consumable_info_is_included(self) -> None:
+        """The consumable response is not the same shape on every firmware.
+
+        A Flow 2 (v01.09.09.05) sends an envelope with the firmware string in field 3
+        and five scalar fields in field 1, which the parser reads as ids that do not
+        exist. Keeping the raw decode makes that identifiable from a diagnostics
+        download.
+        """
+        entry = _make_entry()
+        _make_entry_with_runtime(
+            entry,
+            _make_state(
+                raw_consumable_info={
+                    "1": {"1": 1000, "2": 1000},
+                    "2": 30000,
+                    "3": "v01.09.09.05\n",
+                },
+                maintain_items=[1000],
+            ),
+        )
+
+        result = await async_get_config_entry_diagnostics(MagicMock(), entry)
+
+        assert result["consumables"]["raw_consumable_info"]["2"] == 30000
+        assert result["consumables"]["raw_consumable_info"]["1"]["1"] == 1000
+        assert result["consumables"]["maintain_items"] == [1000]
 
     def test_map_summary_omits_the_compressed_payload(self) -> None:
         """Room structure is useful; a megabyte of packed grid is not."""

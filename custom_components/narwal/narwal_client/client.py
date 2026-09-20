@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import logging
 import random
 import time
@@ -79,6 +80,12 @@ from .models import (
     MapDisplayData,
     NarwalState,
 )
+
+
+# Field-5 responses do not carry a usable command identifier on affected
+# firmware. Keep a short quarantine after a timeout so a late response cannot
+# become the acknowledgement for the next command.
+_LATE_RESPONSE_GRACE = 2.0
 from .protocol import (
     PROTOBUF_FIELD5_TAG,
     NarwalMessage,
@@ -121,7 +128,10 @@ def _clean_session_context(state: NarwalState) -> bool:
         state.is_cleaning
         or state.has_assumed_robot_clean
         or state.working_status in ACTIVE_CLEANING_STATUSES
-        or state.working_status == WorkingStatus.TASK_COMPLETED
+        or (
+            state.working_status == WorkingStatus.TASK_COMPLETED
+            and not state.has_current_dock_presence_signal
+        )
         or state.has_recent_active_working_status
         or state.has_paused_clean_task_context
         or state.is_returning
@@ -188,6 +198,46 @@ def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStat
         return None
 
 
+def _base_status_dock_evidence(decoded: dict[str, Any] | object) -> bool | None:
+    """Return explicit current dock evidence, or None when the payload is silent."""
+    if not isinstance(decoded, dict):
+        return None
+    field3 = decoded.get("3")
+    if isinstance(field3, list):
+        field3 = field3[0] if field3 else None
+    if not isinstance(field3, dict):
+        field3 = {}
+    def optional_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    presence = optional_int(field3.get("3"))
+    sub_state = optional_int(field3.get("10"))
+    dock_activity = optional_int(field3.get("12"))
+    field11 = optional_int(decoded.get("11"))
+    field47 = optional_int(decoded.get("47"))
+    reports_docked = (
+        presence in (1, 6)
+        or sub_state == 1
+        or (dock_activity is not None and dock_activity > 0)
+        or (field11 is not None and field11 >= 2)
+        or field47 in (1, 3)
+    )
+    reports_off_dock = (
+        presence == 2
+        or sub_state == 2
+        or field11 == 1
+        or field47 == 2
+    )
+    if reports_off_dock:
+        return False
+    if reports_docked:
+        return True
+    return None
+
+
 def _base_status_payload(response: CommandResponse) -> dict[str, Any] | None:
     """Return the decoded robot_base_status payload from a command response."""
     if not isinstance(response.data, dict):
@@ -239,6 +289,19 @@ class NarwalCommandError(Exception):
     """Raised when a command fails or times out."""
 
 
+def _url_host(host: str) -> str:
+    """Return host as it must appear in a URL: IPv6 literals need brackets.
+
+    Discovery can store the robot's IPv6 address (#101). ``ws://fd00::1:9002``
+    parses the last group as the port and websockets refuses it.
+    """
+    try:
+        version = ipaddress.ip_address(host).version
+    except ValueError:
+        return host
+    return f"[{host}]" if version == 6 else host
+
+
 class NarwalClient:
     """Async WebSocket client for communicating with a Narwal vacuum.
 
@@ -262,11 +325,12 @@ class NarwalClient:
         self.host = host
         self.port = port
         self.device_id = device_id
-        self.url = f"ws://{host}:{port}"
+        self.url = f"ws://{_url_host(host)}:{port}"
         self.topic_prefix = topic_prefix or DEFAULT_TOPIC_PREFIX
         self.supports_broadcasts = supports_broadcasts
         self.state = NarwalState()
         self.on_state_update: Callable[[NarwalState], None] | None = None
+        self.on_display_map: Callable[[NarwalState], None] | None = None
         self.on_message: Callable[[NarwalMessage], None] | None = None
 
         self._ws: Any = None
@@ -282,6 +346,7 @@ class NarwalClient:
         self._last_display_map_time: float = 0.0  # monotonic time of last display_map
         # Queue for field5 command responses
         self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
+        self._response_quarantine_until = 0.0
         # Lock to prevent concurrent send_command calls from racing on the queue
         self._command_lock = asyncio.Lock()
         # Lock high-level action preflight through accepted-command reservation.
@@ -343,7 +408,22 @@ class NarwalClient:
             self.state.has_recent_active_working_status
             and status in _STALE_DOCK_BASE_STATUSES
         ):
+            terminal_dock_status = status in {
+                WorkingStatus.DOCKED,
+                WorkingStatus.CHARGED,
+                WorkingStatus.DOCKED_V2,
+            }
+            dock_evidence = _base_status_dock_evidence(decoded)
+            if dock_evidence is True or (
+                dock_evidence is None
+                and terminal_dock_status
+                and not self.state.has_explicit_off_dock_signal
+            ):
+                self.state.terminal_working_status_generation += 1
             self.state.update_battery_from_base_status(decoded)
+            self.state.update_dock_evidence_from_base_status(
+                decoded, include_activity=False
+            )
             _LOGGER.debug(
                 "Ignoring stale base_status=%s while working_status task metrics are fresh",
                 status.name if status else "unknown",
@@ -354,13 +434,16 @@ class NarwalClient:
 
     def _update_from_display_map_broadcast(self, decoded: dict[str, Any]) -> None:
         """Apply a display-map broadcast and mark the trajectory as fresh."""
-        self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
+        display = MapDisplayData.from_broadcast(decoded)
+        self.state.map_display_data = display
         self._last_display_map_time = time.monotonic()
+        if self.on_display_map:
+            self.on_display_map(self.state)
         _LOGGER.debug(
             "display_map received: robot=(%.2f, %.2f) ts=%d",
-            self.state.map_display_data.robot_x,
-            self.state.map_display_data.robot_y,
-            self.state.map_display_data.timestamp,
+            display.robot_x,
+            display.robot_y,
+            display.timestamp,
         )
 
     async def connect(self) -> None:
@@ -375,7 +458,10 @@ class NarwalClient:
             )
             self._connected.set()
             _LOGGER.info("Connected to Narwal vacuum at %s", self.url)
-        except (OSError, websockets.exceptions.WebSocketException) as e:
+        except (OSError, ValueError, websockets.exceptions.WebSocketException) as e:
+            # ValueError: a URL websockets cannot parse. Seen with an
+            # unbracketed IPv6 host (#101); it must surface as a connection
+            # failure so the integration retries instead of failing setup.
             raise NarwalConnectionError(
                 f"Failed to connect to {self.url}: {e}"
             ) from e
@@ -620,6 +706,12 @@ class NarwalClient:
         # Field5 (0x2a) messages are command responses
         if msg.field_tag == PROTOBUF_FIELD5_TAG:
             self._mark_response_received()
+            if time.monotonic() < self._response_quarantine_until:
+                _LOGGER.debug(
+                    "Discarding late field5 response during timeout quarantine: %s",
+                    msg.short_topic,
+                )
+                return
             _LOGGER.debug("Field5 response routed to queue: %s", msg.short_topic)
             await self._response_queue.put(msg)
             return
@@ -1047,6 +1139,12 @@ class NarwalClient:
             raise NarwalConnectionError("Not connected to vacuum")
 
         async with self._command_lock:
+            quarantine_remaining = (
+                self._response_quarantine_until - time.monotonic()
+            )
+            if quarantine_remaining > 0:
+                await asyncio.sleep(quarantine_remaining)
+                self._response_quarantine_until = 0.0
             # Drain any stale responses (e.g. from fire-and-forget wake burst)
             drained = 0
             while not self._response_queue.empty():
@@ -1070,12 +1168,21 @@ class NarwalClient:
                         self._response_queue.get(), timeout=timeout
                     )
                 except TimeoutError:
+                    self._response_quarantine_until = (
+                        time.monotonic() + _LATE_RESPONSE_GRACE
+                    )
                     raise NarwalCommandError(
                         f"No response for command '{short_topic}' within {timeout}s"
                     ) from None
             else:
                 # No listener — read directly from websocket
-                msg = await self._wait_for_field5_response(timeout)
+                try:
+                    msg = await self._wait_for_field5_response(timeout)
+                except NarwalCommandError:
+                    self._response_quarantine_until = (
+                        time.monotonic() + _LATE_RESPONSE_GRACE
+                    )
+                    raise
 
             self._mark_response_received()
 
@@ -1580,7 +1687,34 @@ class NarwalClient:
 
     async def resume(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
         """Resume paused task."""
-        return await self.send_command(TOPIC_CMD_RESUME, timeout=timeout)
+        had_paused_clean_context = self.state.is_paused and (
+            self.state.working_status in ACTIVE_CLEANING_STATUSES
+            or self.state.has_paused_clean_task_context
+        )
+        terminal_generation = self.state.terminal_working_status_generation
+        pause_generation = self.state.pause_state_generation
+        response = await self.send_command(TOPIC_CMD_RESUME, timeout=timeout)
+        off_dock_handoff = (
+            self.state.working_status == WorkingStatus.TASK_COMPLETED
+            and self.state.has_explicit_off_dock_signal
+        )
+        terminal_during_request = (
+            self.state.terminal_working_status_generation != terminal_generation
+            or self.state.working_status == WorkingStatus.ERROR
+            or (
+                self.state.working_status == WorkingStatus.TASK_COMPLETED
+                and not off_dock_handoff
+            )
+            or self.state.has_error
+        )
+        if (
+            _accepted_response(response)
+            and had_paused_clean_context
+            and not terminal_during_request
+            and self.state.pause_state_generation == pause_generation
+        ):
+            self.state.mark_robot_resumed()
+        return response
 
     async def stop(self, timeout: float = 15.0) -> CommandResponse:
         """Force-stop current task.
