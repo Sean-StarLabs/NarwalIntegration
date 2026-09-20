@@ -80,6 +80,12 @@ from .models import (
     MapDisplayData,
     NarwalState,
 )
+
+
+# Field-5 responses do not carry a usable command identifier on affected
+# firmware. Keep a short quarantine after a timeout so a late response cannot
+# become the acknowledgement for the next command.
+_LATE_RESPONSE_GRACE = 2.0
 from .protocol import (
     PROTOBUF_FIELD5_TAG,
     NarwalMessage,
@@ -340,6 +346,7 @@ class NarwalClient:
         self._last_display_map_time: float = 0.0  # monotonic time of last display_map
         # Queue for field5 command responses
         self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
+        self._response_quarantine_until = 0.0
         # Lock to prevent concurrent send_command calls from racing on the queue
         self._command_lock = asyncio.Lock()
         # Lock high-level action preflight through accepted-command reservation.
@@ -699,6 +706,12 @@ class NarwalClient:
         # Field5 (0x2a) messages are command responses
         if msg.field_tag == PROTOBUF_FIELD5_TAG:
             self._mark_response_received()
+            if time.monotonic() < self._response_quarantine_until:
+                _LOGGER.debug(
+                    "Discarding late field5 response during timeout quarantine: %s",
+                    msg.short_topic,
+                )
+                return
             _LOGGER.debug("Field5 response routed to queue: %s", msg.short_topic)
             await self._response_queue.put(msg)
             return
@@ -1126,6 +1139,12 @@ class NarwalClient:
             raise NarwalConnectionError("Not connected to vacuum")
 
         async with self._command_lock:
+            quarantine_remaining = (
+                self._response_quarantine_until - time.monotonic()
+            )
+            if quarantine_remaining > 0:
+                await asyncio.sleep(quarantine_remaining)
+                self._response_quarantine_until = 0.0
             # Drain any stale responses (e.g. from fire-and-forget wake burst)
             drained = 0
             while not self._response_queue.empty():
@@ -1149,12 +1168,21 @@ class NarwalClient:
                         self._response_queue.get(), timeout=timeout
                     )
                 except TimeoutError:
+                    self._response_quarantine_until = (
+                        time.monotonic() + _LATE_RESPONSE_GRACE
+                    )
                     raise NarwalCommandError(
                         f"No response for command '{short_topic}' within {timeout}s"
                     ) from None
             else:
                 # No listener — read directly from websocket
-                msg = await self._wait_for_field5_response(timeout)
+                try:
+                    msg = await self._wait_for_field5_response(timeout)
+                except NarwalCommandError:
+                    self._response_quarantine_until = (
+                        time.monotonic() + _LATE_RESPONSE_GRACE
+                    )
+                    raise
 
             self._mark_response_received()
 
