@@ -60,6 +60,18 @@ class TestNarwalClientInit:
         assert client.port == 9002
         assert client.url == "ws://192.168.1.100:9002"
 
+    @pytest.mark.asyncio
+    async def test_late_field5_response_is_quarantined_after_timeout(self) -> None:
+        """A timed-out response must not satisfy the next command."""
+        client = NarwalClient("192.168.1.100", device_id="device")
+        client._response_quarantine_until = time.monotonic() + 1.0
+        frame = bytearray(build_frame(client._full_topic("cmd/test"), b"late"))
+        frame[2] = PROTOBUF_FIELD5_TAG
+
+        await client._handle_message(bytes(frame))
+
+        assert client._response_queue.empty()
+
     def test_custom_port(self) -> None:
         client = NarwalClient("10.0.0.1", port=8080)
         assert client.port == 8080
