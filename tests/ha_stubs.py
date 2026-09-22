@@ -62,6 +62,7 @@ def install() -> None:
         SQUARE_METERS = "m²"
 
     class _UnitOfTime:
+        HOURS = "h"
         SECONDS = "s"
 
     ha_const.UnitOfArea = _UnitOfArea  # type: ignore[attr-defined]
@@ -104,6 +105,15 @@ def install() -> None:
 
     ha_ce.ConfigFlow = _ConfigFlow  # type: ignore[attr-defined]
     ha_ce.ConfigFlowResult = dict  # type: ignore[attr-defined]
+
+    class _OptionsFlow:
+        """Stub for OptionsFlow."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+    ha_ce.OptionsFlow = _OptionsFlow  # type: ignore[attr-defined]
+
     class _ConfigEntry:
         """Subscriptable ConfigEntry stub for TypeAlias usage."""
 
@@ -217,6 +227,27 @@ def install() -> None:
             self.data = data
 
     ha_storage.Store = _Store  # type: ignore[attr-defined]
+
+    ha_selector = _mod("homeassistant.helpers.selector", ha_helpers)
+
+    class _TextSelectorType:
+        PASSWORD = "password"
+
+    class _TextSelectorConfig:
+        def __init__(self, **kw: object) -> None:
+            self.kw = kw
+
+    class _TextSelector:
+        def __init__(self, config: object) -> None:
+            self.config = config
+
+    ha_selector.TextSelector = _TextSelector  # type: ignore[attr-defined]
+    ha_selector.TextSelectorConfig = _TextSelectorConfig  # type: ignore[attr-defined]
+    ha_selector.TextSelectorType = _TextSelectorType  # type: ignore[attr-defined]
+
+    ha_aiohttp = _mod("homeassistant.helpers.aiohttp_client", ha_helpers)
+    ha_aiohttp.async_get_clientsession = MagicMock()  # type: ignore[attr-defined]
+
     ha_ep = _mod("homeassistant.helpers.entity_platform", ha_helpers)
     ha_ep.AddConfigEntryEntitiesCallback = MagicMock  # type: ignore[attr-defined]
 
@@ -293,6 +324,26 @@ def install() -> None:
 
     ha_diag.async_redact_data = _async_redact_data  # type: ignore[attr-defined]
     ha_diag.REDACTED = REDACTED  # type: ignore[attr-defined]
+
+    ha_button = _mod("homeassistant.components.button", ha_comp)
+
+    class _ButtonEntity:
+        """Stub for ButtonEntity base class."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+    @dataclass(frozen=True, kw_only=True)
+    class _ButtonEntityDescription:
+        """Stub for ButtonEntityDescription."""
+
+        key: str
+        name: str | None = None
+        translation_key: str | None = None
+        entity_category: object | None = None
+
+    ha_button.ButtonEntity = _ButtonEntity  # type: ignore[attr-defined]
+    ha_button.ButtonEntityDescription = _ButtonEntityDescription  # type: ignore[attr-defined]
 
     ha_vac = _mod("homeassistant.components.vacuum", ha_comp)
     ha_vac.DOMAIN = "vacuum"  # type: ignore[attr-defined]

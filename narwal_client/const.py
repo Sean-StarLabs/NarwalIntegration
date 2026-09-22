@@ -35,6 +35,8 @@ KNOWN_PRODUCT_KEYS = [
     "qV6BujoYLz",   # AX26 — Freo Z10 Pro / Turbo (confirmed local WebSocket)
     # CX7 answers addressed local queries but emits no broadcasts.
     "hEA7OEshlx",   # CX7/J5 — Freo Z Ultra (confirmed local WebSocket)
+    # Freo 20 -- confirmed by @kvkessler (#97) via auto-detect, fw v01.00.35.03.
+    "fjhpiem4ba",   # Freo 20 (confirmed local WebSocket, broadcasts)
     "BYWBPqSxeC",   # Previously attributed to CX7; retained for discovery coverage
     # JX key contributed by @ciaoly (#42); local WebSocket confirmed by
     # @Smiorld 2026-08-30 — port 9002 open, auto-detect connects, map loads.
@@ -78,6 +80,7 @@ TOPIC_CMD_GET_DEVICE_INFO = "common/get_device_info"
 TOPIC_CMD_GET_FEATURE_LIST = "common/get_feature_list"
 TOPIC_CMD_GET_BASE_STATUS = "status/get_device_base_status"
 TOPIC_CMD_GET_CONSUMABLE_INFO = "consumable/get_consumable_info"
+TOPIC_CMD_RESET_CONSUMABLE_INFO = "consumable/reset_consumable_info"
 
 # Task control
 TOPIC_CMD_PAUSE = "task/pause"
