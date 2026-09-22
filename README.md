@@ -40,7 +40,8 @@ This integration uses a **local WebSocket connection on port 9002**. Only models
 | **Freo Z10 Ultra** (CX4) | **Working** | Community confirmed |
 | **Freo Z10 Pro / Turbo** (AX26) | **Working** | Same product key and firmware (v01.02.00.15) reported under both names ([#40](https://github.com/sjmotew/NarwalIntegration/issues/40), [#70](https://github.com/sjmotew/NarwalIntegration/issues/70)). Room cleaning confirmed working with [#49](https://github.com/sjmotew/NarwalIntegration/pull/49). |
 | **Freo X10 Pro** (AX15) | **Working** | Community confirmed ([#12](https://github.com/sjmotew/NarwalIntegration/issues/12)) |
-| **Narwal JX** | **Working** | Confirmed by [@Smiorld](https://github.com/sjmotew/NarwalIntegration/issues/42) — port 9002 open, connects, map loads. Selectable in the model list; commands beyond connect/map not yet exercised ([#42](https://github.com/sjmotew/NarwalIntegration/issues/42)) |
+| **Narwal JX** | **Working** | Confirmed by [@Smiorld](https://github.com/sjmotew/NarwalIntegration/issues/42) — port 9002 open, connects, map loads. Selectable in the model list; commands beyond connect/map not yet exercised ([#42](https://github.com/sjmotew/NarwalIntegration/issues/42)). Not the same platform as the Freo 20 — the two report different product keys |
+| **Narwal Freo 20** | **Working** | Confirmed by [@kvkessler](https://github.com/sjmotew/NarwalIntegration/issues/97) on firmware v01.00.35.03 via Other / Auto-detect — map streaming, current room, cleaning area and dock sensors all live. Product key `fjhpiem4ba`; selectable by name from the next release ([#97](https://github.com/sjmotew/NarwalIntegration/issues/97)) |
 | **Freo Z Ultra** (hardware CX7, cloud identity J5) | **Working on tested variant** | Confirmed with product key `hEA7OEshlx` on firmware `v01.13.11.02`. Requires the cloud-assigned Device ID because this model does not broadcast. Base status, maps, consumables, and commands work locally; live cleaning position/progress is unavailable. See the variant note below. |
 | **Freo Z10** (plain, non-Ultra / non-Pro) | **Under investigation** | Advertises `_narwal_sweeper._tcp` over mDNS and is picked up by discovery, but port 9002 returns `ECONNREFUSED` in every device state — the host is healthy and nothing is listening. Distinct from the Z10 Pro / Turbo and Z10 Ultra above, both of which work ([#92](https://github.com/sjmotew/NarwalIntegration/issues/92)) |
 | **Freo X Ultra** (AX18/AX19) | **Not Compatible** | Uses ZeroMQ (port 6789) + Tuya cloud, not WebSocket ([#4](https://github.com/sjmotew/NarwalIntegration/issues/4)) |
@@ -87,7 +88,7 @@ Shipped in v1.0.2 ([#50](https://github.com/sjmotew/NarwalIntegration/pull/50)) 
 - **Ambient light** — off, fireplace, nightlight, purple, on models with a dock light ([#61](https://github.com/sjmotew/NarwalIntegration/pull/61), v1.0.2)
 
 ### Dashboard
-v1.0.8's per-room profiles create six selects and a switch **per room** — 168 entities on a 24-room map — which is right for automations and wrong for a dashboard. [`tools/gen_dashboard.py`](tools/gen_dashboard.py) reads your Home Assistant entity registry and emits a **room-picker section**: one dropdown, and only the chosen room's seven controls on screen, plus a Whole-house panel for the defaults, Start / Clear-selection buttons, a `script` that cleans exactly one room with its own profile, and a Dock-tasks section. Paste the YAML into any sections-view dashboard. Needs the `state-switch` card from HACS.
+v1.0.8's per-room profiles create six selects and a switch **per room** — 168 entities on a 24-room map — which is right for automations and wrong for a dashboard. Room profile controls are disabled by default; selection switches stay enabled but hidden so a saved selection can never become an unreachable state. Enable the room profile entities you actually use, then run [`tools/gen_dashboard.py`](tools/gen_dashboard.py) against your Home Assistant entity registry. It emits a **room-picker section** from those controls: one dropdown, and only the chosen room's controls on screen, plus a Whole-house panel for the defaults, Start / Clear-selection buttons, a `script` that cleans exactly one room with its own profile, and a Dock-tasks section. Paste the YAML into any sections-view dashboard. Needs the `state-switch` card from HACS.
 
 ### Connectivity
 - Real-time WebSocket push updates on broadcasting models
@@ -380,7 +381,9 @@ Camera snapshot and LED entities will be added once the AES decryption key is ex
 
 **Where things stand — updated 2026-09-05, at the v1.0.8 release.**
 
-**v1.0.8 is released** — everything below is shipped to HACS. 854 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging. No open pull requests.
+**v1.0.8 is released** — everything below is shipped to HACS. 854 tests passing, CI green, and the integration deployed to a live Home Assistant instance and verified against real hardware before tagging.
+
+**Unreleased on master since v1.0.8:** [#96](https://github.com/sjmotew/NarwalIntegration/pull/96) makes the per-room profile controls opt-in — new installs get them disabled, and the room-selection switches hidden, in the entity registry (closes [#94](https://github.com/sjmotew/NarwalIntegration/issues/94); from @Sean-StarLabs); the Freo 20 is in the model selector ([#97](https://github.com/sjmotew/NarwalIntegration/issues/97)); and [`tools/gen_dashboard.py`](tools/gen_dashboard.py) builds the room-picker dashboard section. [#95](https://github.com/sjmotew/NarwalIntegration/pull/95), a fix for `task_status` sticking at `returning` after the robot is docked ([#98](https://github.com/sjmotew/NarwalIntegration/issues/98)), is in draft.
 
 | Merged in v1.0.8 | What it does |
 |---|---|
