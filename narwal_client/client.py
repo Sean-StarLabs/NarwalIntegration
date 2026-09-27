@@ -351,6 +351,7 @@ class NarwalClient:
         self._last_broadcast_time: float = 0.0  # monotonic time of last broadcast
         self._last_response_time: float = 0.0  # monotonic time of last addressed response
         self._last_display_map_time: float = 0.0  # monotonic time of last display_map
+        self._last_subscription_time: float = 0.0  # monotonic time of last active_robot_publish
         # Field5 responses carry no topic, so each one is matched to the oldest
         # request still owed an answer (#108).
         self._expected_responses: deque[_ExpectedResponse] = deque()
@@ -396,6 +397,17 @@ class NarwalClient:
         if self._last_broadcast_time <= 0:
             return 0.0
         return time.monotonic() - self._last_broadcast_time
+
+    @property
+    def last_subscription_age(self) -> float:
+        """Seconds since active_robot_publish was last sent, by any path.
+
+        Covers the keepalive's renewals and wake bursts as well as explicit
+        subscribe_to_topics() calls (inf if never sent).
+        """
+        if self._last_subscription_time <= 0:
+            return float("inf")
+        return time.monotonic() - self._last_subscription_time
 
     @property
     def last_display_map_age(self) -> float:
@@ -1136,6 +1148,8 @@ class NarwalClient:
         await self._send_expecting(
             short_topic, build_frame(self._full_topic(short_topic), payload), expected
         )
+        if short_topic == TOPIC_CMD_ACTIVE_ROBOT:
+            self._last_subscription_time = time.monotonic()
 
     def _route_response(self, msg: NarwalMessage) -> None:
         """Hand a field5 response to the oldest request still owed one."""
