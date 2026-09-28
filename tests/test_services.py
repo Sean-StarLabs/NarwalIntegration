@@ -40,6 +40,7 @@ from custom_components.narwal.narwal_client import (  # noqa: E402
     CommandResult,
     FanLevel,
     MapData,
+    NarwalCommandError,
     NarwalState,
     RoomInfo,
     WorkingStatus,
@@ -576,3 +577,31 @@ async def test_clean_rooms_service_wakes_targets_before_start_preflight() -> Non
 
     coordinator.client.wake.assert_awaited_once_with(timeout=10.0)
     coordinator.client.start_rooms.assert_awaited_once()
+
+
+async def test_clean_rooms_service_skips_map_refresh_for_known_room_ids() -> None:
+    """Explicit IDs already on the cached map need no refresh (#108)."""
+    coordinator = _coordinator()
+    coordinator.client.state.map_data = MapData(
+        map_id=1,
+        rooms=[RoomInfo(room_id=4), RoomInfo(room_id=9)],
+    )
+    coordinator.client.get_map = AsyncMock(
+        side_effect=NarwalCommandError("No response for command 'map/get_map'")
+    )
+
+    room_ids = await _async_room_ids_for_coordinator(coordinator, [9])
+
+    assert room_ids == [9]
+    coordinator.client.get_map.assert_not_awaited()
+
+
+async def test_clean_rooms_service_all_still_refreshes_map() -> None:
+    """`all` resolves against a fresh map, not whatever was cached."""
+    coordinator = _coordinator()
+    coordinator.client.state.map_data = MapData(map_id=1, rooms=[RoomInfo(room_id=4)])
+    coordinator.client.get_map = AsyncMock()
+
+    await _async_room_ids_for_coordinator(coordinator, ["all"])
+
+    coordinator.client.get_map.assert_awaited_once()

@@ -248,6 +248,13 @@ async def _async_room_ids_for_coordinator(
     if requested_all and len(tokens) > 1:
         raise HomeAssistantError('Use either "all" or explicit room IDs, not both')
     state = coordinator.client.state
+    room_ids = [] if requested_all else _normalise_room_ids(raw_rooms)
+    # Explicit IDs already on the cached map leave nothing to resolve, so a
+    # map refresh that times out must not abort the clean (#108).
+    if room_ids and state.map_data is not None:
+        cached_ids = {room.room_id for room in state.map_data.rooms if room.room_id > 0}
+        if all(room_id in cached_ids for room_id in room_ids):
+            return room_ids
     try:
         await coordinator.client.get_map()
     except Exception as err:
@@ -258,7 +265,6 @@ async def _async_room_ids_for_coordinator(
     if requested_all:
         return sorted(known_room_ids)
 
-    room_ids = _normalise_room_ids(raw_rooms)
     unknown_ids = [room_id for room_id in room_ids if room_id not in known_room_ids]
     if unknown_ids:
         raise HomeAssistantError(
