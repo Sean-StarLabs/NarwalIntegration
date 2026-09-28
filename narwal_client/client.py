@@ -1059,9 +1059,27 @@ class NarwalClient:
                     # Docked state stays fresh through the 60s poll, and
                     # commands still rouse the robot via wake() from
                     # _ensure_awake, so nothing here needs to nag it.
+                    #
+                    # The connection still needs traffic, though. The robot
+                    # closes a socket 60s after the last app command
+                    # (close 1000 "Idle timeout", Freo X10 Pro v01.03.10.03);
+                    # websocket pings do not count, and the 60s poll races
+                    # it. Each close meant a reconnect and a wake burst,
+                    # about 10 an hour. The app heartbeat resets the timer
+                    # without waking the robot: every 30s for 240s, the
+                    # socket stayed open, drew no response and no wake-up.
                     consecutive_wake_failures = 0
+                    try:
+                        payload = self._encode_varint_field(1, 1)
+                        frame = build_frame(
+                            self._full_topic(TOPIC_CMD_APP_HEARTBEAT), payload
+                        )
+                        await self._ws.send(frame)
+                    except Exception:
+                        _LOGGER.debug("Docked keepalive heartbeat failed")
+                        break
                     _LOGGER.debug(
-                        "Docked and quiet for %.0fs — leaving the robot alone",
+                        "Docked and quiet for %.0fs — heartbeat only, not waking the robot",
                         time.monotonic() - self._last_broadcast_time,
                     )
 
