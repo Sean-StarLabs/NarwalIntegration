@@ -1632,6 +1632,14 @@ def _float_to_uint32(f: float) -> int:
 class TestMapData:
     """Tests for MapData.from_response()."""
 
+    def test_status_payload_is_an_empty_map_not_a_crash(self) -> None:
+        """A robot_base_status response has an int in field 2 (#108).
+
+        It reached get_map() when a late response was handed to the wrong
+        command; field 2 is truthy, so the old guard walked into .get().
+        """
+        assert MapData.from_response({"1": {}, "2": 1120403456}) == MapData()
+
     def test_basic_map_parsing(self) -> None:
         decoded = {"2": {
             "3": 60,
