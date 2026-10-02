@@ -3294,6 +3294,7 @@ class TestCoordinatorResilience:
         coordinator.client.state.map_data = None
         coordinator.client.state.working_status = WorkingStatus.CLEANING
         coordinator.client.last_display_map_age = 0.0
+        coordinator.client.last_subscription_age = float("inf")
         coordinator._pending_map_display_cache_restore = payload
         coordinator._clean_session_active = False
         coordinator._map_fetch_pending = True

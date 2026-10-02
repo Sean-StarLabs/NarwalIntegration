@@ -2331,8 +2331,16 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             )
         )
         if is_cleaning:
-            display_age = self.client.last_display_map_age
             now = time.monotonic()
+            # Silence only counts from the latest subscription, whoever sent
+            # it. A connection that subscribed a moment ago has had no chance
+            # to receive a display_map (the age reads 999 until the first
+            # one), and a keepalive wake burst that just re-subscribed has
+            # already done what this recovery would do.
+            display_age = min(
+                self.client.last_display_map_age,
+                self.client.last_subscription_age,
+            )
             if (
                 display_age > 30.0
                 and now - self._last_display_map_resub > 45.0

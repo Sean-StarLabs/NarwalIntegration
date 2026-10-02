@@ -8,7 +8,7 @@ Covers MAP-04 (post-cleaning map refresh) validation gaps:
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 # Install HA stubs before any custom_components import
 import tests.ha_stubs  # noqa: E402
@@ -16,7 +16,7 @@ import tests.ha_stubs  # noqa: E402
 tests.ha_stubs.install()
 
 from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
-from custom_components.narwal.narwal_client import NarwalState  # noqa: E402
+from custom_components.narwal.narwal_client import MapData, NarwalState  # noqa: E402
 from custom_components.narwal.narwal_client.const import WorkingStatus  # noqa: E402
 
 
@@ -68,6 +68,7 @@ class TestCoordinatorMapRefresh:
         mock_hass.async_create_task = MagicMock(side_effect=_close_background_task)
         # Prevent TypeError on display_map dropout check when is_cleaning
         coordinator.client.last_display_map_age = 0.0
+        coordinator.client.last_subscription_age = float("inf")
         return coordinator
 
     def test_missing_map_triggers_fetch(self) -> None:
@@ -186,3 +187,64 @@ class TestCoordinatorMapRefresh:
 
         assert coordinator._fast_poll_remaining == 0
         assert coordinator.update_interval == POLL_INTERVAL
+
+
+def _background_task_names(coordinator: NarwalCoordinator) -> list[str]:
+    create = coordinator.config_entry.async_create_background_task
+    return [call.args[2] for call in create.call_args_list]
+
+
+class TestDisplayMapDropout:
+    """display_map dropout recovery must not fire on silence it caused itself."""
+
+    # A frozen clock. time.monotonic() is system uptime on Linux, and the
+    # recovery cooldown is measured from 0.0, so on a CI runner booted less
+    # than 45s ago the real clock would hold back even a genuine dropout.
+    FAKE_NOW = 1_000_000.0
+
+    def _update(self, coordinator: NarwalCoordinator, state: NarwalState) -> None:
+        with patch(
+            "custom_components.narwal.coordinator.time.monotonic",
+            return_value=self.FAKE_NOW,
+        ):
+            coordinator._on_state_update(state)
+
+    def _cleaning_coordinator(self) -> NarwalCoordinator:
+        coordinator = TestCoordinatorMapRefresh()._make_coordinator()
+        coordinator.client.state.map_data = MapData()
+        return coordinator
+
+    def _cleaning_state(self) -> NarwalState:
+        state = NarwalState()
+        state.map_data = MapData()
+        state.working_status = WorkingStatus.CLEANING
+        return state
+
+    def test_fresh_connection_is_not_a_dropout(self) -> None:
+        """No display_map yet (age 999) right after subscribing is not a dropout."""
+        coordinator = self._cleaning_coordinator()
+        coordinator.client.last_display_map_age = 999.0
+        coordinator.client.last_subscription_age = 0.2
+
+        self._update(coordinator, self._cleaning_state())
+
+        assert "narwal_resub" not in _background_task_names(coordinator)
+
+    def test_wake_burst_resubscribe_suppresses_duplicate(self) -> None:
+        """A keepalive burst that just re-subscribed already did the recovery."""
+        coordinator = self._cleaning_coordinator()
+        coordinator.client.last_display_map_age = 48.0
+        coordinator.client.last_subscription_age = 0.1
+
+        self._update(coordinator, self._cleaning_state())
+
+        assert "narwal_resub" not in _background_task_names(coordinator)
+
+    def test_real_dropout_still_resubscribes(self) -> None:
+        coordinator = self._cleaning_coordinator()
+        coordinator.client.last_display_map_age = 48.0
+        coordinator.client.last_subscription_age = 300.0
+
+        self._update(coordinator, self._cleaning_state())
+
+        assert "narwal_resub" in _background_task_names(coordinator)
