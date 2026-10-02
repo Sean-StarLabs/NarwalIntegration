@@ -580,7 +580,8 @@ class MapData:
     def from_response(cls, decoded: dict[str, Any]) -> MapData:
         """Parse map data from a get_map field5 response."""
         payload = decoded.get("2", {})
-        if not payload:
+        # A status response has an int in field 2; never walk into it (#108)
+        if not payload or not isinstance(payload, dict):
             return cls()
 
         rooms = []
