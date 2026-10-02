@@ -8,6 +8,7 @@ import ipaddress
 import logging
 import random
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +25,7 @@ from .const import (
     HEARTBEAT_INTERVAL,
     KEEPALIVE_INTERVAL,
     KNOWN_PRODUCT_KEYS,
+    LATE_RESPONSE_GRACE,
     RECONNECT_BACKOFF_FACTOR,
     RECONNECT_INITIAL_DELAY,
     RECONNECT_MAX_DELAY,
@@ -57,6 +59,8 @@ from .const import (
     TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
+    UNACKNOWLEDGED_TOPICS,
+    UNAWAITED_ACK_WINDOW,
     WAKE_TIMEOUT,
     AmbientLightCtrlType,
     CleaningRoute,
@@ -275,6 +279,15 @@ def _dock_status_confirms_idle(state: NarwalState) -> bool:
     )
 
 
+@dataclass
+class _ExpectedResponse:
+    """A field5 response the robot owes us, in the order requests went out."""
+
+    topic: str
+    expires: float  # monotonic time after which we stop holding its place
+    future: asyncio.Future[NarwalMessage] | None = None  # None: nobody waits
+
+
 class NarwalConnectionError(Exception):
     """Raised when connection to the vacuum fails."""
 
@@ -338,9 +351,10 @@ class NarwalClient:
         self._last_broadcast_time: float = 0.0  # monotonic time of last broadcast
         self._last_response_time: float = 0.0  # monotonic time of last addressed response
         self._last_display_map_time: float = 0.0  # monotonic time of last display_map
-        # Queue for field5 command responses
-        self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
-        # Lock to prevent concurrent send_command calls from racing on the queue
+        # Field5 responses carry no topic, so each one is matched to the oldest
+        # request still owed an answer (#108).
+        self._expected_responses: deque[_ExpectedResponse] = deque()
+        # Serialize send_command calls so only one caller waits at a time
         self._command_lock = asyncio.Lock()
         # Lock high-level action preflight through accepted-command reservation.
         # The lower command lock only serializes wire traffic; this prevents
@@ -449,6 +463,7 @@ class NarwalClient:
             self._ws = await websockets.connect(
                 self.url, ping_interval=30, ping_timeout=10
             )
+            self._expected_responses.clear()
             self._connected.set()
             _LOGGER.info("Connected to Narwal vacuum at %s", self.url)
         except (OSError, ValueError, websockets.exceptions.WebSocketException) as e:
@@ -605,6 +620,8 @@ class NarwalClient:
                 break
             except Exception:
                 break
+        # Whatever those requests were owed has just been thrown away.
+        self._expected_responses.clear()
         if drained:
             _LOGGER.debug("Drained %d stale messages from WebSocket buffer", drained)
 
@@ -699,8 +716,7 @@ class NarwalClient:
         # Field5 (0x2a) messages are command responses
         if msg.field_tag == PROTOBUF_FIELD5_TAG:
             self._mark_response_received()
-            _LOGGER.debug("Field5 response routed to queue: %s", msg.short_topic)
-            await self._response_queue.put(msg)
+            self._route_response(msg)
             return
 
         # Any broadcast means the robot is awake
@@ -826,10 +842,7 @@ class NarwalClient:
         if not self.connected or not self._ws:
             return
         payload = self._build_topic_subscription(duration)
-        frame = build_frame(
-            self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload
-        )
-        await self._ws.send(frame)
+        await self._send_unawaited(TOPIC_CMD_ACTIVE_ROBOT, payload)
         _LOGGER.info("Topic subscription sent (duration=%ds)", duration)
 
     def _build_wake_commands(self) -> list[tuple[str, bytes]]:
@@ -839,8 +852,8 @@ class NarwalClient:
         commands are passive (subscription / heartbeat).  The final
         command is a query (get_device_base_status) that forces the
         robot's main processor to fully wake and enter command-ready
-        mode.  Its field5 response ends up in _response_queue and is
-        harmlessly drained by send_command() before real commands.
+        mode.  Its field5 response is expected and discarded, so it can
+        never be mistaken for the answer to a real command.
         """
         cmds: list[tuple[str, bytes]] = []
 
@@ -858,8 +871,7 @@ class NarwalClient:
 
         # 5. get_device_base_status — forces robot CPU into command-ready
         #    state; passive commands alone only wake the WS server, not the
-        #    application processor.  The field5 response is drained by
-        #    send_command() before it processes real user commands.
+        #    application processor.  Its field5 response is discarded.
         cmds.append((TOPIC_CMD_GET_BASE_STATUS, b""))
 
         return cmds
@@ -876,9 +888,7 @@ class NarwalClient:
         commands = self._build_wake_commands()
         for short_topic, payload in commands:
             try:
-                full_topic = self._full_topic(short_topic)
-                frame = build_frame(full_topic, payload)
-                await self._ws.send(frame)
+                await self._send_unawaited(short_topic, payload)
                 _LOGGER.debug("Wake burst: sent %s (%d bytes)", short_topic, len(payload))
             except Exception:
                 _LOGGER.debug("Wake burst: failed to send %s", short_topic)
@@ -960,8 +970,7 @@ class NarwalClient:
             return False
         try:
             payload = self._build_topic_subscription(self._TOPIC_SUB_DURATION)
-            frame = build_frame(self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload)
-            await self._ws.send(frame)
+            await self._send_unawaited(TOPIC_CMD_ACTIVE_ROBOT, payload)
             _LOGGER.debug("Topic subscription renewed")
             return True
         except Exception:
@@ -1036,10 +1045,7 @@ class NarwalClient:
                     # robot state — it's safe during cleaning.
                     try:
                         payload = self._encode_varint_field(1, 1)
-                        frame = build_frame(
-                            self._full_topic(TOPIC_CMD_APP_HEARTBEAT), payload
-                        )
-                        await self._ws.send(frame)
+                        await self._send_unawaited(TOPIC_CMD_APP_HEARTBEAT, payload)
                         _LOGGER.debug("Keepalive heartbeat sent")
                     except Exception:
                         _LOGGER.debug("Keepalive send failed")
@@ -1099,6 +1105,57 @@ class NarwalClient:
 
     # --- Command infrastructure ---
 
+    async def _send_expecting(
+        self, topic: str, frame: bytes, expected: _ExpectedResponse | None
+    ) -> None:
+        """Send a frame, first taking its place in the expected-response order.
+
+        The place is taken before the send so no response can overtake it.
+        """
+        if expected is not None:
+            self._expected_responses.append(expected)
+        try:
+            await self._ws.send(frame)
+        except BaseException:
+            if expected is not None:
+                with contextlib.suppress(ValueError):
+                    self._expected_responses.remove(expected)
+            raise
+
+    async def _send_unawaited(self, short_topic: str, payload: bytes) -> None:
+        """Send a command whose response nobody waits for.
+
+        Its ack is still expected, and discarded on arrival, so it cannot be
+        taken for the answer to a real command sent right after it.
+        """
+        expected = None
+        if short_topic not in UNACKNOWLEDGED_TOPICS:
+            expected = _ExpectedResponse(
+                short_topic, time.monotonic() + UNAWAITED_ACK_WINDOW
+            )
+        await self._send_expecting(
+            short_topic, build_frame(self._full_topic(short_topic), payload), expected
+        )
+
+    def _route_response(self, msg: NarwalMessage) -> None:
+        """Hand a field5 response to the oldest request still owed one."""
+        now = time.monotonic()
+        while self._expected_responses:
+            expected = self._expected_responses.popleft()
+            if expected.expires < now:
+                _LOGGER.debug(
+                    "Stopped expecting a response to %s; none arrived", expected.topic
+                )
+                continue
+            if expected.future is None or expected.future.done():
+                # Fire-and-forget ack, or the late answer to a timed-out command
+                _LOGGER.debug("Discarded field5 response to %s", expected.topic)
+                return
+            _LOGGER.debug("Field5 response routed to %s", expected.topic)
+            expected.future.set_result(msg)
+            return
+        _LOGGER.debug("Discarded field5 response that no request was owed")
+
     async def send_command(
         self,
         short_topic: str,
@@ -1107,8 +1164,11 @@ class NarwalClient:
     ) -> CommandResponse:
         """Send a command and wait for the field5 response.
 
-        Uses a lock to prevent concurrent commands from racing on the
-        response queue. Works both with and without start_listening().
+        Responses carry no topic, so each request takes a place in the order
+        of expected responses (#108). A command that times out keeps that
+        place for LATE_RESPONSE_GRACE seconds, so its late answer is dropped
+        instead of being returned to the next caller. Works both with and
+        without start_listening().
 
         Args:
             short_topic: Command topic without prefix/device_id.
@@ -1126,35 +1186,37 @@ class NarwalClient:
             raise NarwalConnectionError("Not connected to vacuum")
 
         async with self._command_lock:
-            # Drain any stale responses (e.g. from fire-and-forget wake burst)
-            drained = 0
-            while not self._response_queue.empty():
-                try:
-                    self._response_queue.get_nowait()
-                    drained += 1
-                except asyncio.QueueEmpty:
-                    break
-            if drained:
-                _LOGGER.debug("Drained %d stale field5 responses", drained)
-
-            full_topic = self._full_topic(short_topic)
-            frame = build_frame(full_topic, payload)
-            await self._ws.send(frame)
+            frame = build_frame(self._full_topic(short_topic), payload)
+            future: asyncio.Future[NarwalMessage] = (
+                asyncio.get_running_loop().create_future()
+            )
+            await self._send_expecting(
+                short_topic,
+                frame,
+                _ExpectedResponse(
+                    short_topic,
+                    time.monotonic() + timeout + LATE_RESPONSE_GRACE,
+                    future,
+                ),
+            )
             _LOGGER.debug("Sent command: %s (%d bytes)", short_topic, len(frame))
 
-            # If listener is running, wait on the queue (avoid concurrent recv)
-            if self._listener_active:
-                try:
-                    msg = await asyncio.wait_for(
-                        self._response_queue.get(), timeout=timeout
-                    )
-                except TimeoutError:
-                    raise NarwalCommandError(
-                        f"No response for command '{short_topic}' within {timeout}s"
-                    ) from None
-            else:
-                # No listener — read directly from websocket
-                msg = await self._wait_for_field5_response(timeout)
+            try:
+                # If listener is running, it routes the response to our future
+                # (avoid concurrent recv)
+                if self._listener_active:
+                    try:
+                        msg = await asyncio.wait_for(future, timeout=timeout)
+                    except TimeoutError:
+                        raise NarwalCommandError(
+                            f"No response for command '{short_topic}' within {timeout}s"
+                        ) from None
+                else:
+                    # No listener — read directly from websocket
+                    msg = await self._wait_for_field5_response(timeout, future)
+            finally:
+                # A late answer now finds a done future and is discarded
+                future.cancel()
 
             self._mark_response_received()
 
@@ -1180,11 +1242,16 @@ class NarwalClient:
         )
 
     async def _wait_for_field5_response(
-        self, timeout: float
+        self,
+        timeout: float,
+        future: asyncio.Future[NarwalMessage] | None = None,
     ) -> NarwalMessage:
-        """Read from WebSocket until a field5 response arrives."""
-        import time
+        """Read from WebSocket until the awaited field5 response arrives.
 
+        With a future, every field5 response goes through _route_response and
+        this returns once the future's own response lands. Without one, the
+        first field5 response is returned.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -1206,7 +1273,12 @@ class NarwalClient:
                 continue
 
             if msg.field_tag == PROTOBUF_FIELD5_TAG:
-                return msg
+                if future is None:
+                    return msg
+                self._route_response(msg)
+                if future.done():
+                    return future.result()
+                continue
 
             # Process broadcast messages while waiting
             short_topic = msg.short_topic
@@ -1247,7 +1319,11 @@ class NarwalClient:
             raise NarwalConnectionError("Not connected to vacuum")
 
         frame = build_frame(topic, payload, header_byte)
-        await self._ws.send(frame)
+        await self._send_expecting(
+            topic,
+            frame,
+            _ExpectedResponse(topic, time.monotonic() + UNAWAITED_ACK_WINDOW),
+        )
         _LOGGER.debug("Sent raw to topic: %s (%d bytes)", topic, len(frame))
 
     # --- High-level commands ---

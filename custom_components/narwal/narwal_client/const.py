@@ -146,6 +146,23 @@ WAKE_TIMEOUT = 20.0  # seconds
 # Command response timeout
 COMMAND_RESPONSE_TIMEOUT = 5.0  # seconds
 
+# Field5 responses carry no topic, so they can only be matched to requests by
+# the order the requests went out. A command that timed out keeps its place in
+# that order for this much longer, so a late answer is discarded instead of
+# being handed to the next command (#108 saw one arrive 1.3s after its timeout).
+LATE_RESPONSE_GRACE = 10.0  # seconds
+
+# How long a fire-and-forget command that the robot acknowledges (wake burst,
+# topic subscription) holds its place while its ack is in flight. Measured
+# acks arrive within 5-45ms on an awake Freo X10 Pro (v01.03.10.03).
+UNAWAITED_ACK_WINDOW = 5.0  # seconds
+
+# Commands the robot never answers, so they must not hold a place in the
+# response order. On a Freo X10 Pro (v01.03.10.03) status/app_status_heartbeat
+# drew no response, alone or inside a wake burst, while active_robot_publish,
+# notify_app_event and get_device_base_status were each answered once.
+UNACKNOWLEDGED_TOPICS = frozenset({TOPIC_CMD_APP_HEARTBEAT})
+
 # display_map dropout detection — if robot is cleaning but no display_map
 # arrives for this long, escalate to a full wake burst to recover the
 # topic subscription (which can die during CLEANING_ALT / stuck episodes)
