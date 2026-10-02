@@ -128,6 +128,7 @@ def install() -> None:
     ha_cv.comp_entity_ids = MagicMock()  # type: ignore[attr-defined]
     ha_cv.entity_ids = MagicMock()  # type: ignore[attr-defined]
     ha_cv.ensure_list = MagicMock()  # type: ignore[attr-defined]
+    ha_cv.config_entry_only_config_schema = MagicMock()  # type: ignore[attr-defined]
 
     # NOTE: deliberately does NOT expose EntityCategory. Real HA removed
     # homeassistant.helpers.entity.EntityCategory; it lives in homeassistant.const.

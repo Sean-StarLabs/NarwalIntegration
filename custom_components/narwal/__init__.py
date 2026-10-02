@@ -46,6 +46,9 @@ from .narwal_client import (
 
 _LOGGER = logging.getLogger(__name__)
 
+# Configured from config entries only; async_setup just registers services.
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
+
 NarwalConfigEntry: TypeAlias = ConfigEntry[NarwalCoordinator]
 
 _CONFIG_ENTRY_MINOR_VERSION = 2
