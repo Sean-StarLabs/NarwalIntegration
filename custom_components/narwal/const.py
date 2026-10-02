@@ -32,6 +32,11 @@ NARWAL_MODELS: dict[str, str] = {
     # firmware v01.00.35.03 -- map streaming, current room, dock sensors all
     # live. A different key from the JX, so the two are separate platforms (#42).
     "Narwal Freo 20": "fjhpiem4ba",
+    # Freo 20 Edge (SKU YJCC041), confirmed by @cwisor (#109) as
+    # "Unknown (ulonq49mm1)" on firmware v01.06.10.48 -- broadcasts, map
+    # streaming and a room clean all worked. A different key from the plain
+    # Freo 20, so it is its own selector entry rather than an alias.
+    "Narwal Freo 20 Edge": "ulonq49mm1",
     "Other / Auto-detect": "auto",
 }
 

@@ -37,6 +37,10 @@ KNOWN_PRODUCT_KEYS = [
     "hEA7OEshlx",   # CX7/J5 — Freo Z Ultra (confirmed local WebSocket)
     # Freo 20 -- confirmed by @kvkessler (#97) via auto-detect, fw v01.00.35.03.
     "fjhpiem4ba",   # Freo 20 (confirmed local WebSocket, broadcasts)
+    # Freo 20 Edge -- confirmed by @cwisor (#109) via auto-detect, fw v01.06.10.48.
+    # Listing it here is also what lets auto-detect reach a sleeping robot: the
+    # addressed-reply path only tries known keys.
+    "ulonq49mm1",   # Freo 20 Edge (confirmed local WebSocket, broadcasts)
     "BYWBPqSxeC",   # Previously attributed to CX7; retained for discovery coverage
     # JX key contributed by @ciaoly (#42); local WebSocket confirmed by
     # @Smiorld 2026-08-30 — port 9002 open, auto-detect connects, map loads.
