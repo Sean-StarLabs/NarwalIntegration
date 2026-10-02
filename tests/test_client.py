@@ -13,6 +13,7 @@ import pytest
 
 from narwal_client.client import NarwalClient, NarwalCommandError, NarwalConnectionError
 from narwal_client.const import (
+    TOPIC_CMD_APP_HEARTBEAT,
     TOPIC_CMD_CLEAN_TASK,
     TOPIC_CMD_DRY_DUST_BAG,
     TOPIC_CMD_DRY_MOP,
@@ -2688,6 +2689,32 @@ class TestDockedRobotIsLeftAlone:
         renew.assert_awaited()  # positive proof the loop reached the branch
         burst.assert_not_awaited()
         assert not client._robot_awake
+
+    @pytest.mark.asyncio
+    async def test_docked_and_quiet_keeps_the_socket_alive(self) -> None:
+        """The robot closes a socket 60s after the last app command.
+
+        Measured on a Freo X10 Pro: close 1000 "Idle timeout", websocket pings
+        do not count, and the 60s poll races it, so a docked install
+        reconnected (and fired a wake burst) about 10 times an hour. The app
+        heartbeat resets the timer without waking the robot, so each quiet
+        docked tick sends exactly that and nothing that wakes it.
+        """
+        client = self._quiet_client(docked=True)
+
+        with patch.object(client, "_send_wake_burst", AsyncMock()) as burst:
+            with patch.object(
+                client, "_renew_topic_subscription", AsyncMock(return_value=True)
+            ):
+                ticks = await self._run_ticks(client)
+
+        burst.assert_not_awaited()
+        sent = [call.args[0] for call in client._ws.send.await_args_list]
+        heartbeat = build_frame(
+            client._full_topic(TOPIC_CMD_APP_HEARTBEAT), client._encode_varint_field(1, 1)
+        )
+        assert sent.count(heartbeat) >= ticks - 1
+        assert all(frame == heartbeat for frame in sent)
 
     @pytest.mark.asyncio
     async def test_undocked_and_quiet_still_wakes(self) -> None:
