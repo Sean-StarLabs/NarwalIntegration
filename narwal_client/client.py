@@ -1069,14 +1069,14 @@ class NarwalClient:
                 elif self.state.is_docked:
                     # Silence from a docked robot is normal, not a fault.
                     #
-                    # Measured on a Flow (AX12, v01.08.03.07) over 775s with
-                    # every wake burst suppressed: the robot broadcasts for
-                    # 30.0s or 45.5s, goes quiet for 60-124s, and comes back
-                    # on its own. Six windows, five unprompted restarts, no
-                    # bursts sent. BROADCAST_STALE_TIMEOUT is 15s, so treating
-                    # that silence as sleep fired a full wake burst roughly
-                    # every 46s -- about 1,900 a day at an idle docked robot,
-                    # measured independently by @hyeok-yoo (#82, #90).
+                    # A docked robot broadcasts for ~45s after a wake burst and
+                    # ~30s after a bare active_robot_publish, then stops; a
+                    # fresh socket that sends nothing receives no broadcasts at
+                    # all (Flow AX12 v01.08.03.07 and Freo X10 Pro v01.03.10.03,
+                    # 2026-10-02, #113). BROADCAST_STALE_TIMEOUT is 15s, so
+                    # treating that silence as sleep fired a full wake burst
+                    # roughly every 46s -- about 1,900 a day at an idle docked
+                    # robot, measured independently by @hyeok-yoo (#82, #90).
                     #
                     # Docked state stays fresh through the 60s poll, and
                     # commands still rouse the robot via wake() from
@@ -1084,7 +1084,8 @@ class NarwalClient:
                     #
                     # The connection still needs traffic, though. The robot
                     # closes a socket 60s after the last app command
-                    # (close 1000 "Idle timeout", Freo X10 Pro v01.03.10.03);
+                    # (close 1000 "Idle timeout" at 60.0s on both a Freo X10 Pro
+                    # v01.03.10.03 and a Flow v01.08.03.07);
                     # websocket pings do not count, and the 60s poll races
                     # it. Each close meant a reconnect and a wake burst,
                     # about 10 an hour. The app heartbeat resets the timer

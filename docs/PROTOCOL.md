@@ -116,7 +116,13 @@ The client therefore records every request that is owed a response, in send orde
 each response to the oldest one still waiting. A timed-out command keeps its place for a
 further 10 s so its late answer is discarded rather than returned to the next caller.
 
-Not every command is answered. Measured on a Freo X10 Pro (`v01.03.10.03`, awake):
+The robot also closes any socket **60 s after the last command it received** (close 1000
+`Idle timeout`; websocket pings do not count). `status/app_status_heartbeat` resets that timer, is
+never answered, and does not wake a docked robot, which is why the client sends it on every
+keepalive tick (#113; measured on the X10 Pro and the Flow).
+
+Not every command is answered. Measured on a Freo X10 Pro (`v01.03.10.03`, awake) and, with
+identical results, on a Flow (AX12, `v01.08.03.07`, docked and idle; latencies 3-5 ms):
 
 | Command | Responses | Latency |
 |---|---|---|
@@ -125,7 +131,7 @@ Not every command is answered. Measured on a Freo X10 Pro (`v01.03.10.03`, awake
 | `common/notify_app_event` | 1 | 45 ms |
 | `status/get_device_base_status` | 1 | 5 ms |
 
-A five-command wake burst drew exactly four responses. A heartbeat must not hold a place in
+A five-command wake burst drew exactly four responses on both models. A heartbeat must not hold a place in
 the order, or it would swallow the next real answer.
 
 ---
