@@ -151,3 +151,22 @@ def test_freo_20_is_a_selectable_model_and_broadcasts() -> None:
     assert configured_model_name(
         {CONF_MODEL: "Narwal Freo 20", CONF_PRODUCT_KEY: product_key}
     ) == "Freo 20"
+
+
+def test_freo_20_edge_is_a_selectable_model_and_broadcasts() -> None:
+    """Freo 20 Edge confirmed by @cwisor (#109) as "Unknown (ulonq49mm1)".
+
+    Broadcasts on its own status topic, streams the map and completed a room
+    clean on fw v01.06.10.48. Its key differs from the plain Freo 20, so it is
+    a selector entry of its own, and listing it in KNOWN_PRODUCT_KEYS is what
+    lets auto-detect reach it while the robot is asleep.
+    """
+    product_key = NARWAL_MODELS["Narwal Freo 20 Edge"]
+    assert product_key == "ulonq49mm1"
+    assert product_key != NARWAL_MODELS["Narwal Freo 20"]
+    assert product_key in KNOWN_PRODUCT_KEYS
+    assert product_key not in NO_BROADCAST_PRODUCT_KEYS
+    assert model_label_for_product_key(product_key) == "Narwal Freo 20 Edge"
+    assert configured_model_name(
+        {CONF_MODEL: "Narwal Freo 20 Edge", CONF_PRODUCT_KEY: product_key}
+    ) == "Freo 20 Edge"

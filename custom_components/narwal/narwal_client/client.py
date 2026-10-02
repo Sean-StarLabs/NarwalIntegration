@@ -8,6 +8,7 @@ import ipaddress
 import logging
 import random
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -24,6 +25,7 @@ from .const import (
     HEARTBEAT_INTERVAL,
     KEEPALIVE_INTERVAL,
     KNOWN_PRODUCT_KEYS,
+    LATE_RESPONSE_GRACE,
     RECONNECT_BACKOFF_FACTOR,
     RECONNECT_INITIAL_DELAY,
     RECONNECT_MAX_DELAY,
@@ -57,6 +59,8 @@ from .const import (
     TOPIC_CMD_WASH_MOP,
     TOPIC_CMD_WASH_MOP_BY_ROBOT_STATUS,
     TOPIC_CMD_YELL,
+    UNACKNOWLEDGED_TOPICS,
+    UNAWAITED_ACK_WINDOW,
     WAKE_TIMEOUT,
     AmbientLightCtrlType,
     CleaningRoute,
@@ -122,7 +126,10 @@ def _clean_session_context(state: NarwalState) -> bool:
         state.is_cleaning
         or state.has_assumed_robot_clean
         or state.working_status in ACTIVE_CLEANING_STATUSES
-        or state.working_status == WorkingStatus.TASK_COMPLETED
+        or (
+            state.working_status == WorkingStatus.TASK_COMPLETED
+            and not state.has_current_dock_presence_signal
+        )
         or state.has_recent_active_working_status
         or state.has_paused_clean_task_context
         or state.is_returning
@@ -193,6 +200,46 @@ def _base_status_working_status(decoded: dict[str, Any] | object) -> WorkingStat
         return None
 
 
+def _base_status_dock_evidence(decoded: dict[str, Any] | object) -> bool | None:
+    """Return explicit current dock evidence, or None when the payload is silent."""
+    if not isinstance(decoded, dict):
+        return None
+    field3 = decoded.get("3")
+    if isinstance(field3, list):
+        field3 = field3[0] if field3 else None
+    if not isinstance(field3, dict):
+        field3 = {}
+    def optional_int(value: Any) -> int | None:
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+
+    presence = optional_int(field3.get("3"))
+    sub_state = optional_int(field3.get("10"))
+    dock_activity = optional_int(field3.get("12"))
+    field11 = optional_int(decoded.get("11"))
+    field47 = optional_int(decoded.get("47"))
+    reports_docked = (
+        presence in (1, 6)
+        or sub_state == 1
+        or (dock_activity is not None and dock_activity > 0)
+        or (field11 is not None and field11 >= 2)
+        or field47 in (1, 3)
+    )
+    reports_off_dock = (
+        presence == 2
+        or sub_state == 2
+        or field11 == 1
+        or field47 == 2
+    )
+    if reports_off_dock:
+        return False
+    if reports_docked:
+        return True
+    return None
+
+
 def _base_status_payload(response: CommandResponse) -> dict[str, Any] | None:
     """Return the decoded robot_base_status payload from a command response."""
     if not isinstance(response.data, dict):
@@ -234,6 +281,15 @@ def _dock_status_confirms_idle(state: NarwalState) -> bool:
             WorkingStatus.TASK_COMPLETED,
         )
     )
+
+
+@dataclass
+class _ExpectedResponse:
+    """A field5 response the robot owes us, in the order requests went out."""
+
+    topic: str
+    expires: float  # monotonic time after which we stop holding its place
+    future: asyncio.Future[NarwalMessage] | None = None  # None: nobody waits
 
 
 class NarwalConnectionError(Exception):
@@ -285,6 +341,7 @@ class NarwalClient:
         self.supports_broadcasts = supports_broadcasts
         self.state = NarwalState()
         self.on_state_update: Callable[[NarwalState], None] | None = None
+        self.on_display_map: Callable[[NarwalState], None] | None = None
         self.on_message: Callable[[NarwalMessage], None] | None = None
 
         self._ws: Any = None
@@ -298,9 +355,11 @@ class NarwalClient:
         self._last_broadcast_time: float = 0.0  # monotonic time of last broadcast
         self._last_response_time: float = 0.0  # monotonic time of last addressed response
         self._last_display_map_time: float = 0.0  # monotonic time of last display_map
-        # Queue for field5 command responses
-        self._response_queue: asyncio.Queue[NarwalMessage] = asyncio.Queue()
-        # Lock to prevent concurrent send_command calls from racing on the queue
+        self._last_subscription_time: float = 0.0  # monotonic time of last active_robot_publish
+        # Field5 responses carry no topic, so each one is matched to the oldest
+        # request still owed an answer (#108).
+        self._expected_responses: deque[_ExpectedResponse] = deque()
+        # Serialize send_command calls so only one caller waits at a time
         self._command_lock = asyncio.Lock()
         # Lock high-level action preflight through accepted-command reservation.
         # The lower command lock only serializes wire traffic; this prevents
@@ -344,6 +403,17 @@ class NarwalClient:
         return time.monotonic() - self._last_broadcast_time
 
     @property
+    def last_subscription_age(self) -> float:
+        """Seconds since active_robot_publish was last sent, by any path.
+
+        Covers the keepalive's renewals and wake bursts as well as explicit
+        subscribe_to_topics() calls (inf if never sent).
+        """
+        if self._last_subscription_time <= 0:
+            return float("inf")
+        return time.monotonic() - self._last_subscription_time
+
+    @property
     def last_display_map_age(self) -> float:
         """Seconds since last display_map broadcast (999.0 if none received)."""
         if self._last_display_map_time <= 0:
@@ -361,7 +431,22 @@ class NarwalClient:
             self.state.has_recent_active_working_status
             and status in _STALE_DOCK_BASE_STATUSES
         ):
+            terminal_dock_status = status in {
+                WorkingStatus.DOCKED,
+                WorkingStatus.CHARGED,
+                WorkingStatus.DOCKED_V2,
+            }
+            dock_evidence = _base_status_dock_evidence(decoded)
+            if dock_evidence is True or (
+                dock_evidence is None
+                and terminal_dock_status
+                and not self.state.has_explicit_off_dock_signal
+            ):
+                self.state.terminal_working_status_generation += 1
             self.state.update_battery_from_base_status(decoded)
+            self.state.update_dock_evidence_from_base_status(
+                decoded, include_activity=False
+            )
             _LOGGER.debug(
                 "Ignoring stale base_status=%s while working_status task metrics are fresh",
                 status.name if status else "unknown",
@@ -372,13 +457,16 @@ class NarwalClient:
 
     def _update_from_display_map_broadcast(self, decoded: dict[str, Any]) -> None:
         """Apply a display-map broadcast and mark the trajectory as fresh."""
-        self.state.map_display_data = MapDisplayData.from_broadcast(decoded)
+        display = MapDisplayData.from_broadcast(decoded)
+        self.state.map_display_data = display
         self._last_display_map_time = time.monotonic()
+        if self.on_display_map:
+            self.on_display_map(self.state)
         _LOGGER.debug(
             "display_map received: robot=(%.2f, %.2f) ts=%d",
-            self.state.map_display_data.robot_x,
-            self.state.map_display_data.robot_y,
-            self.state.map_display_data.timestamp,
+            display.robot_x,
+            display.robot_y,
+            display.timestamp,
         )
 
     async def connect(self) -> None:
@@ -391,6 +479,7 @@ class NarwalClient:
             self._ws = await websockets.connect(
                 self.url, ping_interval=30, ping_timeout=10
             )
+            self._expected_responses.clear()
             self._connected.set()
             _LOGGER.info("Connected to Narwal vacuum at %s", self.url)
         except (OSError, ValueError, websockets.exceptions.WebSocketException) as e:
@@ -547,6 +636,8 @@ class NarwalClient:
                 break
             except Exception:
                 break
+        # Whatever those requests were owed has just been thrown away.
+        self._expected_responses.clear()
         if drained:
             _LOGGER.debug("Drained %d stale messages from WebSocket buffer", drained)
 
@@ -641,8 +732,7 @@ class NarwalClient:
         # Field5 (0x2a) messages are command responses
         if msg.field_tag == PROTOBUF_FIELD5_TAG:
             self._mark_response_received()
-            _LOGGER.debug("Field5 response routed to queue: %s", msg.short_topic)
-            await self._response_queue.put(msg)
+            self._route_response(msg)
             return
 
         # Any broadcast means the robot is awake
@@ -768,10 +858,7 @@ class NarwalClient:
         if not self.connected or not self._ws:
             return
         payload = self._build_topic_subscription(duration)
-        frame = build_frame(
-            self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload
-        )
-        await self._ws.send(frame)
+        await self._send_unawaited(TOPIC_CMD_ACTIVE_ROBOT, payload)
         _LOGGER.info("Topic subscription sent (duration=%ds)", duration)
 
     def _build_wake_commands(self) -> list[tuple[str, bytes]]:
@@ -781,8 +868,8 @@ class NarwalClient:
         commands are passive (subscription / heartbeat).  The final
         command is a query (get_device_base_status) that forces the
         robot's main processor to fully wake and enter command-ready
-        mode.  Its field5 response ends up in _response_queue and is
-        harmlessly drained by send_command() before real commands.
+        mode.  Its field5 response is expected and discarded, so it can
+        never be mistaken for the answer to a real command.
         """
         cmds: list[tuple[str, bytes]] = []
 
@@ -800,8 +887,7 @@ class NarwalClient:
 
         # 5. get_device_base_status — forces robot CPU into command-ready
         #    state; passive commands alone only wake the WS server, not the
-        #    application processor.  The field5 response is drained by
-        #    send_command() before it processes real user commands.
+        #    application processor.  Its field5 response is discarded.
         cmds.append((TOPIC_CMD_GET_BASE_STATUS, b""))
 
         return cmds
@@ -818,9 +904,7 @@ class NarwalClient:
         commands = self._build_wake_commands()
         for short_topic, payload in commands:
             try:
-                full_topic = self._full_topic(short_topic)
-                frame = build_frame(full_topic, payload)
-                await self._ws.send(frame)
+                await self._send_unawaited(short_topic, payload)
                 _LOGGER.debug("Wake burst: sent %s (%d bytes)", short_topic, len(payload))
             except Exception:
                 _LOGGER.debug("Wake burst: failed to send %s", short_topic)
@@ -902,8 +986,7 @@ class NarwalClient:
             return False
         try:
             payload = self._build_topic_subscription(self._TOPIC_SUB_DURATION)
-            frame = build_frame(self._full_topic(TOPIC_CMD_ACTIVE_ROBOT), payload)
-            await self._ws.send(frame)
+            await self._send_unawaited(TOPIC_CMD_ACTIVE_ROBOT, payload)
             _LOGGER.debug("Topic subscription renewed")
             return True
         except Exception:
@@ -978,10 +1061,7 @@ class NarwalClient:
                     # robot state — it's safe during cleaning.
                     try:
                         payload = self._encode_varint_field(1, 1)
-                        frame = build_frame(
-                            self._full_topic(TOPIC_CMD_APP_HEARTBEAT), payload
-                        )
-                        await self._ws.send(frame)
+                        await self._send_unawaited(TOPIC_CMD_APP_HEARTBEAT, payload)
                         _LOGGER.debug("Keepalive heartbeat sent")
                     except Exception:
                         _LOGGER.debug("Keepalive send failed")
@@ -1001,9 +1081,27 @@ class NarwalClient:
                     # Docked state stays fresh through the 60s poll, and
                     # commands still rouse the robot via wake() from
                     # _ensure_awake, so nothing here needs to nag it.
+                    #
+                    # The connection still needs traffic, though. The robot
+                    # closes a socket 60s after the last app command
+                    # (close 1000 "Idle timeout", Freo X10 Pro v01.03.10.03);
+                    # websocket pings do not count, and the 60s poll races
+                    # it. Each close meant a reconnect and a wake burst,
+                    # about 10 an hour. The app heartbeat resets the timer
+                    # without waking the robot: every 30s for 240s, the
+                    # socket stayed open, drew no response and no wake-up.
                     consecutive_wake_failures = 0
+                    try:
+                        payload = self._encode_varint_field(1, 1)
+                        frame = build_frame(
+                            self._full_topic(TOPIC_CMD_APP_HEARTBEAT), payload
+                        )
+                        await self._ws.send(frame)
+                    except Exception:
+                        _LOGGER.debug("Docked keepalive heartbeat failed")
+                        break
                     _LOGGER.debug(
-                        "Docked and quiet for %.0fs — leaving the robot alone",
+                        "Docked and quiet for %.0fs — heartbeat only, not waking the robot",
                         time.monotonic() - self._last_broadcast_time,
                     )
 
@@ -1041,6 +1139,59 @@ class NarwalClient:
 
     # --- Command infrastructure ---
 
+    async def _send_expecting(
+        self, topic: str, frame: bytes, expected: _ExpectedResponse | None
+    ) -> None:
+        """Send a frame, first taking its place in the expected-response order.
+
+        The place is taken before the send so no response can overtake it.
+        """
+        if expected is not None:
+            self._expected_responses.append(expected)
+        try:
+            await self._ws.send(frame)
+        except BaseException:
+            if expected is not None:
+                with contextlib.suppress(ValueError):
+                    self._expected_responses.remove(expected)
+            raise
+
+    async def _send_unawaited(self, short_topic: str, payload: bytes) -> None:
+        """Send a command whose response nobody waits for.
+
+        Its ack is still expected, and discarded on arrival, so it cannot be
+        taken for the answer to a real command sent right after it.
+        """
+        expected = None
+        if short_topic not in UNACKNOWLEDGED_TOPICS:
+            expected = _ExpectedResponse(
+                short_topic, time.monotonic() + UNAWAITED_ACK_WINDOW
+            )
+        await self._send_expecting(
+            short_topic, build_frame(self._full_topic(short_topic), payload), expected
+        )
+        if short_topic == TOPIC_CMD_ACTIVE_ROBOT:
+            self._last_subscription_time = time.monotonic()
+
+    def _route_response(self, msg: NarwalMessage) -> None:
+        """Hand a field5 response to the oldest request still owed one."""
+        now = time.monotonic()
+        while self._expected_responses:
+            expected = self._expected_responses.popleft()
+            if expected.expires < now:
+                _LOGGER.debug(
+                    "Stopped expecting a response to %s; none arrived", expected.topic
+                )
+                continue
+            if expected.future is None or expected.future.done():
+                # Fire-and-forget ack, or the late answer to a timed-out command
+                _LOGGER.debug("Discarded field5 response to %s", expected.topic)
+                return
+            _LOGGER.debug("Field5 response routed to %s", expected.topic)
+            expected.future.set_result(msg)
+            return
+        _LOGGER.debug("Discarded field5 response that no request was owed")
+
     async def send_command(
         self,
         short_topic: str,
@@ -1049,8 +1200,11 @@ class NarwalClient:
     ) -> CommandResponse:
         """Send a command and wait for the field5 response.
 
-        Uses a lock to prevent concurrent commands from racing on the
-        response queue. Works both with and without start_listening().
+        Responses carry no topic, so each request takes a place in the order
+        of expected responses (#108). A command that times out keeps that
+        place for LATE_RESPONSE_GRACE seconds, so its late answer is dropped
+        instead of being returned to the next caller. Works both with and
+        without start_listening().
 
         Args:
             short_topic: Command topic without prefix/device_id.
@@ -1068,35 +1222,37 @@ class NarwalClient:
             raise NarwalConnectionError("Not connected to vacuum")
 
         async with self._command_lock:
-            # Drain any stale responses (e.g. from fire-and-forget wake burst)
-            drained = 0
-            while not self._response_queue.empty():
-                try:
-                    self._response_queue.get_nowait()
-                    drained += 1
-                except asyncio.QueueEmpty:
-                    break
-            if drained:
-                _LOGGER.debug("Drained %d stale field5 responses", drained)
-
-            full_topic = self._full_topic(short_topic)
-            frame = build_frame(full_topic, payload)
-            await self._ws.send(frame)
+            frame = build_frame(self._full_topic(short_topic), payload)
+            future: asyncio.Future[NarwalMessage] = (
+                asyncio.get_running_loop().create_future()
+            )
+            await self._send_expecting(
+                short_topic,
+                frame,
+                _ExpectedResponse(
+                    short_topic,
+                    time.monotonic() + timeout + LATE_RESPONSE_GRACE,
+                    future,
+                ),
+            )
             _LOGGER.debug("Sent command: %s (%d bytes)", short_topic, len(frame))
 
-            # If listener is running, wait on the queue (avoid concurrent recv)
-            if self._listener_active:
-                try:
-                    msg = await asyncio.wait_for(
-                        self._response_queue.get(), timeout=timeout
-                    )
-                except TimeoutError:
-                    raise NarwalCommandError(
-                        f"No response for command '{short_topic}' within {timeout}s"
-                    ) from None
-            else:
-                # No listener — read directly from websocket
-                msg = await self._wait_for_field5_response(timeout)
+            try:
+                # If listener is running, it routes the response to our future
+                # (avoid concurrent recv)
+                if self._listener_active:
+                    try:
+                        msg = await asyncio.wait_for(future, timeout=timeout)
+                    except TimeoutError:
+                        raise NarwalCommandError(
+                            f"No response for command '{short_topic}' within {timeout}s"
+                        ) from None
+                else:
+                    # No listener — read directly from websocket
+                    msg = await self._wait_for_field5_response(timeout, future)
+            finally:
+                # A late answer now finds a done future and is discarded
+                future.cancel()
 
             self._mark_response_received()
 
@@ -1122,11 +1278,16 @@ class NarwalClient:
         )
 
     async def _wait_for_field5_response(
-        self, timeout: float
+        self,
+        timeout: float,
+        future: asyncio.Future[NarwalMessage] | None = None,
     ) -> NarwalMessage:
-        """Read from WebSocket until a field5 response arrives."""
-        import time
+        """Read from WebSocket until the awaited field5 response arrives.
 
+        With a future, every field5 response goes through _route_response and
+        this returns once the future's own response lands. Without one, the
+        first field5 response is returned.
+        """
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             remaining = deadline - time.monotonic()
@@ -1148,7 +1309,12 @@ class NarwalClient:
                 continue
 
             if msg.field_tag == PROTOBUF_FIELD5_TAG:
-                return msg
+                if future is None:
+                    return msg
+                self._route_response(msg)
+                if future.done():
+                    return future.result()
+                continue
 
             # Process broadcast messages while waiting
             short_topic = msg.short_topic
@@ -1189,7 +1355,11 @@ class NarwalClient:
             raise NarwalConnectionError("Not connected to vacuum")
 
         frame = build_frame(topic, payload, header_byte)
-        await self._ws.send(frame)
+        await self._send_expecting(
+            topic,
+            frame,
+            _ExpectedResponse(topic, time.monotonic() + UNAWAITED_ACK_WINDOW),
+        )
         _LOGGER.debug("Sent raw to topic: %s (%d bytes)", topic, len(frame))
 
     # --- High-level commands ---
@@ -1601,7 +1771,34 @@ class NarwalClient:
 
     async def resume(self, timeout: float = COMMAND_RESPONSE_TIMEOUT) -> CommandResponse:
         """Resume paused task."""
-        return await self.send_command(TOPIC_CMD_RESUME, timeout=timeout)
+        had_paused_clean_context = self.state.is_paused and (
+            self.state.working_status in ACTIVE_CLEANING_STATUSES
+            or self.state.has_paused_clean_task_context
+        )
+        terminal_generation = self.state.terminal_working_status_generation
+        pause_generation = self.state.pause_state_generation
+        response = await self.send_command(TOPIC_CMD_RESUME, timeout=timeout)
+        off_dock_handoff = (
+            self.state.working_status == WorkingStatus.TASK_COMPLETED
+            and self.state.has_explicit_off_dock_signal
+        )
+        terminal_during_request = (
+            self.state.terminal_working_status_generation != terminal_generation
+            or self.state.working_status == WorkingStatus.ERROR
+            or (
+                self.state.working_status == WorkingStatus.TASK_COMPLETED
+                and not off_dock_handoff
+            )
+            or self.state.has_error
+        )
+        if (
+            _accepted_response(response)
+            and had_paused_clean_context
+            and not terminal_during_request
+            and self.state.pause_state_generation == pause_generation
+        ):
+            self.state.mark_robot_resumed()
+        return response
 
     async def stop(self, timeout: float = 15.0) -> CommandResponse:
         """Force-stop current task.

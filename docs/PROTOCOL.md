@@ -110,6 +110,24 @@ Because the topic is empty, responses are **not self-identifying**. You cannot t
 command a response belongs to from the frame itself. Serialize your commands, or you will
 mis-attribute results — this integration holds a lock across send-and-await for that reason.
 
+Serializing is not enough on its own. A response can arrive *after* its command has timed
+out (1.3 s late in #108), and the keepalive sends commands of its own that are answered too.
+The client therefore records every request that is owed a response, in send order, and hands
+each response to the oldest one still waiting. A timed-out command keeps its place for a
+further 10 s so its late answer is discarded rather than returned to the next caller.
+
+Not every command is answered. Measured on a Freo X10 Pro (`v01.03.10.03`, awake):
+
+| Command | Responses | Latency |
+|---|---|---|
+| `status/app_status_heartbeat` | **none** | — |
+| `common/active_robot_publish` (either form) | 1 | 4–9 ms |
+| `common/notify_app_event` | 1 | 45 ms |
+| `status/get_device_base_status` | 1 | 5 ms |
+
+A five-command wake burst drew exactly four responses. A heartbeat must not hold a place in
+the order, or it would swallow the next real answer.
+
 ---
 
 ## 3. Topics
