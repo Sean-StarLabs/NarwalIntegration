@@ -223,6 +223,17 @@ def fan_speed_list_for(data: dict) -> list[str]:
     return list(fan_speed_map_for(data, include_aliases=False))
 
 
+def live_fan_speed_list_for(
+    data: dict,
+    active_fan: FanLevel | None,
+) -> list[str]:
+    """Return live suction choices, retaining an active level-five state."""
+    options = fan_speed_list_for(data)
+    if active_fan != FanLevel.SUPER and "Ultra Powerful" in options:
+        options.remove("Ultra Powerful")
+    return options
+
+
 def fan_speed_map_for(
     data: dict,
     *,
