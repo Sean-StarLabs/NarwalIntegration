@@ -2451,6 +2451,7 @@ async def test_setup_clears_completed_route_when_clean_starts_without_new_window
     coordinator._pending_map_display_cache_restore = None
     coordinator._clean_session_active = False
     coordinator._clean_session_terminal = False
+    coordinator._cloud_client = None
     coordinator._listen_task = None
     coordinator._fast_poll_remaining = 0
     coordinator.config_entry.async_create_background_task.side_effect = (
