@@ -202,7 +202,10 @@ class WorkingStatus(IntEnum):
 
     Values confirmed via live WebSocket monitoring:
       1  = STANDBY (idle, transition state between cleaning and docked)
-      2  = DOCKED_V2 (on dock; confirmed v01.07.23.00 while charging at 10-36%)
+      2  = DOCKED_V2 (on dock; confirmed v01.07.23.00 while charging at 10-36%,
+           sub-field 4 = 1). v01.09.10.02 also reports 2 while cleaning OFF the
+           dock, with sub-field 4 = 3 — that pair is promoted to CLEANING_V2 at
+           parse time (#124, #115). Sub-field 4 looks like the task kind.
       3  = CLEANING_V2 (active cleaning; observed on newer Flow 2 firmware)
       4  = CLEANING (plan-based start; also stays 4 while returning to dock on older FW)
       5  = CLEANING_ALT (observed live: robot was physically stuck when reporting 5)

@@ -1883,6 +1883,16 @@ class NarwalState:
                 previous_working_status = self.working_status
                 try:
                     next_working_status = WorkingStatus(int(field3["1"]))
+                    # v01.09.10+ keeps reporting 2 while the robot is out
+                    # cleaning, distinguished only by sub-field 4 = 3 (the
+                    # charging capture that named DOCKED_V2 carried 4 = 1).
+                    # Promote it so every active-clean predicate agrees;
+                    # raw_base_status still shows the wire value (#124).
+                    if (
+                        next_working_status == WorkingStatus.DOCKED_V2
+                        and _optional_int(field3.get("4")) == 3
+                    ):
+                        next_working_status = WorkingStatus.CLEANING_V2
                 except (ValueError, TypeError):
                     raw_val = field3["1"]
                     if raw_val not in _WARNED_WORKING_STATUS:

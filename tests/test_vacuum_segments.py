@@ -341,6 +341,32 @@ class TestVacuumSupportedFeatures:
         assert not features & VacuumEntityFeature.START
         assert not features & VacuumEntityFeature.CLEAN_AREA
 
+    @pytest.mark.parametrize(
+        "payload",
+        (
+            {"3": {"1": 2, "4": 3}, "47": 2, "26": 4},
+            {"3": {"1": 2, "4": 3, "14": 1}, "11": 1, "47": 2},
+        ),
+        ids=("issue-124", "issue-115"),
+    )
+    def test_status_2_subfield4_cleaning_exposes_stop_and_pause(
+        self, payload: dict
+    ) -> None:
+        """v01.09.10 reports status 2 mid-clean; the entity must say cleaning (#124)."""
+        state = NarwalState()
+        state.update_from_base_status(payload)
+        vac = _make_vacuum(state=state)
+
+        features = vac.supported_features
+
+        assert vac.activity == VacuumActivity.CLEANING
+        assert vac.extra_state_attributes["task_status"] == "cleaning"
+        assert features & VacuumEntityFeature.STOP
+        assert features & VacuumEntityFeature.PAUSE
+        assert features & VacuumEntityFeature.RETURN_HOME
+        assert not features & VacuumEntityFeature.START
+        assert not features & VacuumEntityFeature.CLEAN_AREA
+
     def test_active_clean_exposes_active_native_features(self) -> None:
         state = _active_clean_state()
         vac = _make_vacuum(state=state)
