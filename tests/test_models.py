@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 import pytest
 
-from narwal_client.const import WorkingStatus
+from narwal_client.const import ACTIVE_CLEANING_STATUSES, WorkingStatus
 from narwal_client.models import (
     DOCK_TASK_DRY_DOCK_BAG,
     DOCK_TASK_DRY_DUST_BIN,
@@ -1241,6 +1241,53 @@ class TestNarwalState:
         })
         assert state.working_status == WorkingStatus.DOCKED_V2
         assert state.is_docked
+
+    # v01.09.10.02 keeps reporting 2 while the robot is out cleaning, with
+    # sub-field 4 = 3 (#124, #115). The charging capture above carried 4 = 1.
+    @pytest.mark.parametrize(
+        "payload",
+        (
+            # #124: field 11 absent, 47 = 2 (off dock), 26 = 4 (fan level)
+            {"3": {"1": 2, "4": 3}, "47": 2, "26": 4},
+            # #115: field 11 = 1, 47 = 2, extra sub-field 14
+            {"3": {"1": 2, "4": 3, "14": 1}, "11": 1, "47": 2},
+        ),
+        ids=("issue-124", "issue-115"),
+    )
+    def test_status_2_with_subfield4_cleaning_is_an_active_clean(
+        self, payload: dict
+    ) -> None:
+        """Status 2 with sub-field 4 = 3 is an active clean, not a docked state."""
+        state = NarwalState()
+
+        state.update_from_base_status(payload)
+
+        assert state.is_cleaning
+        assert not state.is_docked
+        assert state.working_status in ACTIVE_CLEANING_STATUSES
+        assert state.raw_base_status["3"]["1"] == 2
+
+    def test_status_2_cleaning_keeps_task_details_across_base_status(self) -> None:
+        """A following base_status packet must not wipe the broadcast task details."""
+        state = NarwalState()
+        state.update_from_base_status({"3": {"1": 2, "4": 3}, "47": 2})
+        state.update_from_working_status({"3": 12})
+        assert state.cleaning_time == 12
+
+        state.update_from_base_status({"3": {"1": 2, "4": 3}, "47": 2})
+
+        assert state.cleaning_time == 12
+        assert state.is_cleaning
+
+    def test_status_2_off_dock_without_subfield4_stays_not_cleaning(self) -> None:
+        """The wash-mop anomaly (status 2, off-dock fields, no 4 = 3) is unchanged."""
+        state = NarwalState()
+
+        state.update_from_base_status({"3": {"1": 2}, "11": 1, "47": 2})
+
+        assert state.working_status == WorkingStatus.DOCKED_V2
+        assert not state.is_cleaning
+        assert not state.is_docked
 
     def test_cleaning_v2_working_status(self) -> None:
         """CLEANING_V2(3) on newer Flow 2 firmware maps to active cleaning."""

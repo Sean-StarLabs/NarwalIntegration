@@ -376,7 +376,7 @@ was accepted by the robot with `SUCCESS` in the same state.
 | Value | Meaning |
 |---|---|
 | 1 | `STANDBY` — idle; also a transition state |
-| 2 | `DOCKED_V2` — on dock (v01.07.23.00+) |
+| 2 | `DOCKED_V2` — on dock (v01.07.23.00+, sub-field 4 = 1 while charging). **On v01.09.10.02 the robot also reports 2 while cleaning off the dock, with sub-field 4 = 3** (#124, #115, two Flow 2 robots); the integration promotes that pair to `CLEANING_V2` at parse time. Sub-field 4 therefore looks like a task kind (1 = charging, 3 = cleaning), with 2 meaning "a task is running" — the one observation that does not fit (status 2 off-dock with no sub-field 4, after a `start_clean` rejected during `wash_mop`) stays not-cleaning. |
 | 4 | `CLEANING` |
 | 5 | `CLEANING_ALT` — observed while the robot was physically stuck |
 | 7 | `REMAPPING` — exploring/rebuilding; camera active |
