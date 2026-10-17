@@ -64,3 +64,5 @@ robot_commands_i18n.txt
 nul
 run_analysis*.py
 prompt.md
+.planning.bak-*/
+.claude.bak-*/

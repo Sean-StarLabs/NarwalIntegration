@@ -1,0 +1,53 @@
+{
+  "mode": "yolo",
+  "granularity": "coarse",
+  "model_profile": "budget",
+  "model_overrides": {
+    "gsd-planner": "opus"
+  },
+  "parallelization": {
+    "enabled": true,
+    "plan_level": true,
+    "task_level": false,
+    "skip_checkpoints": true,
+    "max_concurrent_agents": 2,
+    "min_plans_for_parallel": 2
+  },
+  "planning": {
+    "commit_docs": false,
+    "search_gitignored": false,
+    "sub_repos": []
+  },
+  "workflow": {
+    "research": false,
+    "plan_check": false,
+    "verifier": false,
+    "nyquist_validation": false,
+    "ai_integration_phase": false,
+    "pattern_mapper": false,
+    "ui_phase": false,
+    "ui_safety_gate": false,
+    "ui_review": false,
+    "code_review": false,
+    "post_planning_gaps": false,
+    "security_enforcement": false,
+    "auto_prune_state": true,
+    "compact_content": true,
+    "context_guard_mode": "warn",
+    "auto_advance": false,
+    "skip_discuss": false,
+    "_auto_chain_active": false
+  },
+  "gates": {
+    "execute_next_plan": false,
+    "confirm_transition": false,
+    "confirm_milestone_scope": false
+  },
+  "hooks": {
+    "context_warnings": true,
+    "workflow_guard": false
+  },
+  "intel": { "enabled": false },
+  "graphify": { "enabled": false, "auto_update": false },
+  "features": { "thinking_partner": false, "global_learnings": false }
+}
