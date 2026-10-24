@@ -458,6 +458,17 @@ def install() -> None:
 
     ha_number.NumberMode = _NumberMode  # type: ignore[attr-defined]
 
+    class _NumberEntity:
+        """Stub for NumberEntity base class."""
+
+        def __init_subclass__(cls, **kw: object) -> None:
+            pass
+
+        def async_write_ha_state(self) -> None:
+            pass
+
+    ha_number.NumberEntity = _NumberEntity  # type: ignore[attr-defined]
+
     class _RestoreNumber:
         """Stub for RestoreNumber base class."""
 

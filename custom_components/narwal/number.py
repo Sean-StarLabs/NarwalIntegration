@@ -7,7 +7,7 @@ CleanParam tag for the current mode (sweep->5, mop->6, sweep_then_mop->5+6, sync
 from __future__ import annotations
 
 import voluptuous as vol
-from homeassistant.components.number import NumberMode, RestoreNumber
+from homeassistant.components.number import NumberEntity, NumberMode, RestoreNumber
 from homeassistant.const import EntityCategory
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.exceptions import HomeAssistantError
@@ -110,7 +110,7 @@ class NarwalPassesNumber(NarwalEntity, RestoreNumber):
         self.coordinator.async_update_listeners()
 
 
-class NarwalRoomOrderNumber(NarwalEntity, RestoreNumber):
+class NarwalRoomOrderNumber(NarwalEntity, NumberEntity):
     """One-based room position for the next native vacuum start."""
 
     _attr_entity_registry_enabled_default = False

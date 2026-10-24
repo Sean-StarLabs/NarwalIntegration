@@ -11,7 +11,7 @@ import tests.ha_stubs  # noqa: E402
 
 tests.ha_stubs.install()
 
-from homeassistant.components.number import RestoreNumber  # noqa: E402
+from homeassistant.components.number import NumberEntity  # noqa: E402
 from homeassistant.exceptions import HomeAssistantError  # noqa: E402
 
 from custom_components.narwal.coordinator import NarwalCoordinator  # noqa: E402
@@ -180,7 +180,7 @@ async def test_room_order_number_moves_room_and_updates_name() -> None:
     coordinator = _coordinator()
     number = NarwalRoomOrderNumber(coordinator, 5, "Hallway", map_id="100")
 
-    assert issubclass(NarwalRoomOrderNumber, RestoreNumber)
+    assert issubclass(NarwalRoomOrderNumber, NumberEntity)
     assert NarwalRoomOrderNumber._attr_entity_registry_enabled_default is False
     assert number.native_value == 2
     assert number.native_max_value == 3
