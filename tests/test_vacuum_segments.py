@@ -1334,6 +1334,17 @@ class TestVacuumFanSpeed:
 
         vac.coordinator.client.set_fan_speed.assert_not_awaited()
 
+    @pytest.mark.parametrize("pending", [FanLevel.UNSPECIFIED, FanLevel.SUPER])
+    def test_unknown_active_fan_does_not_report_ai_or_ultra_pending_value(
+        self, pending: FanLevel
+    ) -> None:
+        """Vacuum state stays unknown when only pending AI/Ultra is known."""
+        vac = _make_vacuum(state=_active_clean_state())
+        vac.coordinator.clean_settings.fan = pending
+        vac.coordinator.active_clean_setting.return_value = None
+
+        assert vac.fan_speed is None
+
     async def test_unknown_fan_speed_raises(self) -> None:
         """Unsupported suction labels must not silently no-op."""
         state = NarwalState(working_status=WorkingStatus.CHARGED)

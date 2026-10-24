@@ -467,6 +467,21 @@ class TestLegacyNarwalSettingSelect:
 
         assert "Ultra Powerful" in sel.options
 
+    @pytest.mark.parametrize("pending", [FanLevel.UNSPECIFIED, FanLevel.SUPER])
+    def test_unknown_active_suction_does_not_expose_ai_or_ultra_pending_values(
+        self, pending: FanLevel
+    ) -> None:
+        """Pending AI/Ultra settings cannot be presented as live state."""
+        coord = _coordinator(state=_state(WorkingStatus.CLEANING))
+        coord.clean_settings.fan = pending
+        coord.active_clean_work_mode = None
+        coord.active_clean_setting.return_value = None
+        select = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
+
+        assert select.current_option is None
+        assert "AI" not in select.options
+        assert "Ultra Powerful" not in select.options
+
     def test_ax26_legacy_suction_omits_ultra(self) -> None:
         coord = _coordinator(product_key="qV6BujoYLz")
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])

@@ -1130,11 +1130,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         if key == "suction" and live_available and not setup_available:
             requested_fan = self._suction_map[option]
             if requested_fan in {FanLevel.UNSPECIFIED, FanLevel.SUPER}:
-                if requested_fan == self._active_suction_level:
-                    return
-                raise HomeAssistantError(
-                    f"{option} suction cannot be selected mid-clean"
-                )
+                return
         response = None
         live_value = None
         if live_available and live_applies and not setup_available:
