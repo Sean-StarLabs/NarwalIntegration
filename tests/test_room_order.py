@@ -42,6 +42,11 @@ class _Store:
 
 def _coordinator() -> NarwalCoordinator:
     """Return a coordinator with a current three-room map."""
+    entry = MagicMock()
+    entry.entry_id = "room-order-test"
+    entry.data = {"host": "127.0.0.1", "port": 9002, "device_id": "dev1"}
+    coordinator = NarwalCoordinator(MagicMock(), entry)
+    coordinator.config_entry = entry
     state = NarwalState(working_status=WorkingStatus.DOCKED)
     state.map_data = MapData(
         map_id=100,
@@ -51,17 +56,14 @@ def _coordinator() -> NarwalCoordinator:
             RoomInfo(room_id=6, name="Lounge"),
         ],
     )
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
-    coordinator.config_entry = MagicMock()
-    coordinator.config_entry.data = {"device_id": "dev1"}
-    coordinator.client = MagicMock()
     coordinator.client.state = state
     coordinator.data = state
     coordinator.last_update_success = True
-    coordinator.selected_clean_rooms = {}
-    coordinator.room_clean_orders = {}
+    coordinator._dock_status_refresh_failed = False
     coordinator._room_selection_store_loaded = True
+    coordinator._room_profile_store_loaded = True
     coordinator._room_order_store_loaded = True
+    coordinator._schedule_room_order_save = MagicMock()
     coordinator._schedule_room_order_save = MagicMock()
     coordinator.async_update_listeners = MagicMock()
     coordinator.async_add_listener = MagicMock()
@@ -87,6 +89,29 @@ def test_selected_rooms_follow_persisted_order() -> None:
     coordinator.selected_clean_rooms = {"100": {4, 5}}
 
     assert coordinator.selected_clean_room_ids_for([4, 5, 6], map_id="100") == [4, 5]
+
+
+def test_new_rooms_keep_map_order_before_selection_filter() -> None:
+    """New rooms append in map order before selected-room filtering."""
+    coordinator = _coordinator()
+    coordinator.client.state.map_data = MapData(
+        map_id=100,
+        rooms=[
+            RoomInfo(room_id=6),
+            RoomInfo(room_id=9),
+            RoomInfo(room_id=4),
+            RoomInfo(room_id=7),
+        ],
+    )
+    coordinator.room_clean_orders = {"100": [6, 4]}
+    coordinator.selected_clean_rooms = {"100": {7, 9}}
+
+    assert coordinator.ordered_clean_room_ids_for(
+        [6, 9, 4, 7], map_id="100"
+    ) == [6, 4, 9, 7]
+    assert coordinator.selected_clean_room_ids_for(
+        [6, 9, 4, 7], map_id="100"
+    ) == [9, 7]
 
 
 async def test_room_order_survives_restart() -> None:

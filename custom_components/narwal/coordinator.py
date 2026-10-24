@@ -718,7 +718,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         fallback = default or self.default_room_clean_settings()
         if not use_room_profiles:
             return {room_id: fallback for room_id in room_ids}
-        customized = getattr(self, "room_clean_settings_customized", {})
+        customized = self.room_clean_settings_customized
         settings: dict[int, RoomCleanSettings] = {}
         for room_id in room_ids:
             key = (map_key, room_id)
@@ -748,7 +748,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         map_id: str | None = None,
     ) -> list[int]:
         """Return selected rooms without broadening a stale explicit selection."""
-        if not getattr(self, "_room_selection_store_loaded", True):
+        if not self._room_selection_store_loaded:
             return []
         map_key = map_id if map_id is not None else self.room_settings_map_id()
         if map_key is not None:
@@ -771,12 +771,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     ) -> list[int]:
         """Return current rooms in their persisted cleaning order."""
         current = list(dict.fromkeys(room_ids))
-        if not getattr(self, "_room_order_store_loaded", True):
+        if not self._room_order_store_loaded:
             return current
         map_key = map_id if map_id is not None else self.room_settings_map_id()
         if map_key is None:
             return current
-        orders = getattr(self, "room_clean_orders", {})
+        orders = self.room_clean_orders
         saved = orders.get(map_key, [])
         current_set = set(current)
         ordered = [room_id for room_id in saved if room_id in current_set]
@@ -806,7 +806,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         map_id: str | None = None,
     ) -> None:
         """Move one room to a one-based position and persist the full order."""
-        if not getattr(self, "_room_order_store_loaded", True):
+        if not self._room_order_store_loaded:
             raise ValueError("Narwal room cleaning order is not restored yet")
         ordered = self.ordered_clean_room_ids_for(room_ids, map_id=map_id)
         if room_id not in ordered:
@@ -818,8 +818,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         map_key = map_id if map_id is not None else self.room_settings_map_id()
         if map_key is None:
             raise ValueError("Narwal room map is not available")
-        if not hasattr(self, "room_clean_orders"):
-            self.room_clean_orders = {}
         self.room_clean_orders[map_key] = ordered
         self._schedule_room_order_save()
         self.async_update_listeners()
@@ -867,8 +865,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             selected_rooms.discard(room_id)
             if not selected_rooms:
                 self.selected_clean_rooms.pop(map_key, None)
-        if not hasattr(self, "_room_selection_dirty_maps"):
-            self._room_selection_dirty_maps = set()
         self._room_selection_dirty_maps.add(map_key)
         self._schedule_room_selection_save()
 
@@ -876,8 +872,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         """Resolve unidentified state and persist the newly known map key."""
         if not self._migrate_unidentified_room_state(map_id):
             return
-        if not hasattr(self, "_room_selection_dirty_maps"):
-            self._room_selection_dirty_maps = set()
         if None in self._room_selection_dirty_maps:
             self._room_selection_dirty_maps.remove(None)
         self._room_selection_dirty_maps.add(map_id)
@@ -888,13 +882,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         changed = False
         if None in self.selected_clean_rooms:
             unresolved = self.selected_clean_rooms.pop(None)
-            dirty_maps = getattr(self, "_room_selection_dirty_maps", set())
+            dirty_maps = self._room_selection_dirty_maps
             if map_id not in self.selected_clean_rooms or None in dirty_maps:
                 self.selected_clean_rooms[map_id] = unresolved
             changed = True
-        customized = getattr(self, "room_clean_settings_customized", {})
-        settings = getattr(self, "room_clean_settings", {})
-        pending_profiles = getattr(self, "_room_profile_pending_resolution", set())
+        customized = self.room_clean_settings_customized
+        settings = self.room_clean_settings
+        pending_profiles = self._room_profile_pending_resolution
         for source_key in [key for key in settings if key[0] is None]:
             target_key = (map_id, source_key[1])
             source_profile = settings.pop(source_key)
@@ -920,8 +914,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     ) -> dict[str, object]:
         """Return durable room selections and customized profile fields."""
         profiles: list[dict[str, object]] = []
-        customized = getattr(self, "room_clean_settings_customized", {})
-        room_settings = getattr(self, "room_clean_settings", {})
+        customized = self.room_clean_settings_customized
+        room_settings = self.room_clean_settings
         for (map_id, room_id), custom_fields in sorted(
             customized.items(),
             key=lambda item: (item[0][0] or "", item[0][1]),
@@ -942,7 +936,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                         {"pending_map_resolution": True}
                         if map_id is None
                         and room_id
-                        in getattr(self, "_room_profile_pending_resolution", set())
+                        in self._room_profile_pending_resolution
                         else {}
                     ),
                 }
@@ -956,7 +950,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                         {"pending_map_resolution": True}
                         if map_id is None
                         and None
-                        in getattr(self, "_room_selection_dirty_maps", set())
+                        in self._room_selection_dirty_maps
                         else {}
                     ),
                 }
@@ -1075,7 +1069,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             restored_customized[key] = custom_fields
             if pending:
                 restored_pending_profiles.add(room_id)
-        dirty_maps = getattr(self, "_room_selection_dirty_maps", set())
+        dirty_maps = self._room_selection_dirty_maps
         for map_id in dirty_maps:
             if selected := self.selected_clean_rooms.get(map_id):
                 restored[map_id] = set(selected)
@@ -1139,8 +1133,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     def _schedule_room_order_save(self) -> None:
         """Persist room cleaning order after an entity changes it."""
-        if not hasattr(self, "_room_order_store"):
-            return
         self.config_entry.async_create_background_task(
             self.hass,
             self._async_save_room_orders(),
@@ -1169,8 +1161,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     def _schedule_room_selection_save(self) -> None:
         """Persist explicit room selections after a switch changes."""
-        if not hasattr(self, "_room_selection_store"):
-            return
         self.config_entry.async_create_background_task(
             self.hass,
             self._async_save_room_selections(),
@@ -1202,7 +1192,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     if parsed is None or not isinstance(profiles, list):
                         return
                     restored, stored_dirty_maps = parsed
-                    if not getattr(self, "_room_profile_store_loaded", True):
+                    if not self._room_profile_store_loaded:
                         preserved_profiles = list(profiles)
                 for map_id in local_dirty_maps:
                     if selected := self.selected_clean_rooms.get(map_id):
@@ -1214,7 +1204,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 )
                 self.selected_clean_rooms = restored
                 self._room_selection_store_loaded = True
-            if not getattr(self, "_room_profile_store_loaded", True):
+            if not self._room_profile_store_loaded:
                 if preserved_profiles is None:
                     try:
                         stored = await self._room_selection_store.async_load()
@@ -1251,7 +1241,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             else:
                 saved = True
             if saved:
-                dirty_maps = getattr(self, "_room_selection_dirty_maps", set())
+                dirty_maps = self._room_selection_dirty_maps
                 self._room_selection_dirty_maps = (
                     {None}
                     if None in dirty_maps and None in self.selected_clean_rooms
@@ -1273,12 +1263,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             raise AttributeError(f"Unsupported room clean setting: {attr}")
         key = self._room_clean_settings_key(room_id, map_id)
         setattr(self.room_clean_settings_for(room_id, map_id=map_id), attr, value)
-        if not hasattr(self, "room_clean_settings_customized"):
-            self.room_clean_settings_customized = {}
         self.room_clean_settings_customized.setdefault(key, set()).add(attr)
         if key[0] is None:
-            if not hasattr(self, "_room_profile_pending_resolution"):
-                self._room_profile_pending_resolution = set()
             self._room_profile_pending_resolution.add(room_id)
         self._schedule_room_selection_save()
 
@@ -2859,8 +2845,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         The listener's keepalive loop handles waking independently.
         """
         await self._async_restore_room_selections()
-        if hasattr(self, "_room_order_store"):
-            await self._async_restore_room_orders()
+        await self._async_restore_room_orders()
         await self.client.connect()
         self._local_available = True
 
@@ -3234,8 +3219,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         failures (~5 minutes) before raising UpdateFailed.
         """
         if (
-            not getattr(self, "_room_selection_store_loaded", True)
-            or not getattr(self, "_room_profile_store_loaded", True)
+            not self._room_selection_store_loaded
+            or not self._room_profile_store_loaded
         ):
             async with self._room_selection_save_lock:
                 if (
@@ -3243,7 +3228,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     or not self._room_profile_store_loaded
                 ):
                     await self._async_restore_room_selections()
-        if not getattr(self, "_room_order_store_loaded", True):
+        if not self._room_order_store_loaded:
             await self._async_restore_room_orders()
 
         try:
@@ -3485,6 +3470,5 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 await self._listen_task
         await self._async_flush_map_display_cache()
         await self._async_save_room_selections()
-        if hasattr(self, "_room_order_store"):
-            await self._async_save_room_orders()
+        await self._async_save_room_orders()
         await super().async_shutdown()
