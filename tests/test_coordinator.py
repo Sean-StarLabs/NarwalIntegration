@@ -1614,7 +1614,7 @@ def test_active_cached_trajectory_ignores_pose_only_window_for_validation() -> N
 
 def test_active_cached_trajectory_replacement_keeps_off_dock_handoff() -> None:
     """Replacing stale restored history must retain an off-dock session."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     previous = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     current = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
     state = NarwalState(working_status=WorkingStatus.TASK_COMPLETED)
@@ -1729,7 +1729,7 @@ def test_retain_native_trajectory_clears_when_active_map_changes() -> None:
 
 def test_retain_native_trajectory_keeps_route_for_same_slot_refresh() -> None:
     """A same-slot map refresh must not erase an active clean route."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = NarwalState(working_status=WorkingStatus.CLEANING)
     state.map_data = MapData(map_id=12, created_at=35)
     state.map_display_data = _trajectory_display(
@@ -2361,7 +2361,7 @@ async def test_setup_preserves_restored_active_route_after_pose_update() -> None
 
 async def test_setup_reconciles_clean_started_during_final_refresh() -> None:
     """A clean beginning during setup clears a restored terminal session latch."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -2430,7 +2430,7 @@ async def test_setup_reconciles_clean_started_during_final_refresh() -> None:
 
 async def test_setup_clears_completed_route_when_clean_starts_without_new_window() -> None:
     """A clean status alone cannot reuse the previous completed trajectory."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -2491,7 +2491,7 @@ async def test_setup_reconciles_terminal_pose_with_retained_trajectory(
     initial_status: WorkingStatus,
 ) -> None:
     """A terminal pose-only startup packet cannot hide the completed route."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -2560,7 +2560,7 @@ async def test_setup_reconciles_terminal_pose_with_retained_trajectory(
 
 async def test_setup_checkpoints_terminal_route_before_later_pose_packet() -> None:
     """A completed route received during setup survives a later pose-only packet."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -2628,7 +2628,7 @@ async def test_setup_checkpoints_terminal_route_before_later_pose_packet() -> No
 
 def test_terminal_display_packet_waits_for_new_clean_status() -> None:
     """A route window cannot replace completed history before a clean starts."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     old_display = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
@@ -2676,7 +2676,7 @@ def test_terminal_display_packet_waits_for_new_clean_status() -> None:
 
 def test_multiple_staged_windows_retain_their_complete_prefix() -> None:
     """Rolling windows received before status are staged as one route."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     state = _trajectory_state()
     first = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
@@ -2705,7 +2705,7 @@ def test_multiple_staged_windows_retain_their_complete_prefix() -> None:
 
 def test_staged_display_still_reconciles_static_map_identity() -> None:
     """A map switch invalidates completed history before route staging."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     coordinator.client.state.map_data = replace(
@@ -2733,7 +2733,7 @@ def test_staged_display_still_reconciles_static_map_identity() -> None:
 
 def test_pose_only_display_reconciles_static_map_identity() -> None:
     """A pose-only packet cannot keep history from a different map."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     state.map_data = replace(state.map_data, map_id=99)
     state.map_display_data = MapDisplayData(robot_x=8.0, robot_y=9.0)
@@ -2752,7 +2752,7 @@ def test_pose_only_display_reconciles_static_map_identity() -> None:
 
 async def test_missing_map_fetch_reconciles_restored_history() -> None:
     """Loading a different static map immediately invalidates retained history."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     state.map_data = None
     state.map_display_data = _trajectory_display(
@@ -2779,7 +2779,7 @@ async def test_missing_map_fetch_reconciles_restored_history() -> None:
 
 def test_display_before_status_starts_new_route_without_old_history() -> None:
     """The first live window is retained when status announces the new clean."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     old_display = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
@@ -2826,7 +2826,7 @@ def test_display_before_status_starts_new_route_without_old_history() -> None:
 
 def test_staged_display_expires_before_a_later_clean() -> None:
     """A delayed completed window cannot seed an unrelated future clean."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     old_display = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
@@ -2855,7 +2855,7 @@ def test_staged_display_expires_before_a_later_clean() -> None:
 
 def test_expired_staged_display_is_not_merged_into_a_later_window() -> None:
     """A late window starts a fresh staged route after the grace period."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     old_display = _trajectory_display((1.0, 1.0), timestamp=100)
     expired = _trajectory_display((8.0, 8.0), timestamp=200)
@@ -2887,7 +2887,7 @@ def test_expired_staged_display_is_not_merged_into_a_later_window() -> None:
 
 def test_pose_only_window_keeps_retained_history_while_route_is_staged() -> None:
     """Live robot pose remains visible without publishing unconfirmed geometry."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     staged = _trajectory_display((8.0, 8.0), timestamp=200)
@@ -2921,7 +2921,7 @@ def test_pose_only_window_keeps_retained_history_while_route_is_staged() -> None
 
 def test_repeated_staged_geometry_keeps_original_reconciliation_deadline() -> None:
     """Retransmissions update pose without postponing terminal reconciliation."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((9.0, 9.0), timestamp=50)
     pending = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
@@ -2956,7 +2956,7 @@ def test_repeated_staged_geometry_keeps_original_reconciliation_deadline() -> No
 
 def test_repeated_rolling_window_keeps_original_reconciliation_deadline() -> None:
     """A retransmitted suffix cannot postpone terminal reconciliation."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((9.0, 9.0), timestamp=50)
     pending = _trajectory_display(
@@ -2997,7 +2997,7 @@ def test_repeated_rolling_window_keeps_original_reconciliation_deadline() -> Non
 
 def test_in_memory_terminal_session_stages_route_before_next_status() -> None:
     """Pre-status windows are staged after a normal, non-restored clean."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     current = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
@@ -3022,7 +3022,7 @@ def test_in_memory_terminal_session_stages_route_before_next_status() -> None:
 
 def test_in_memory_terminal_session_accepts_first_window_after_status() -> None:
     """A status-first clean keeps its first route when no old trail is retained."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     current = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
     state.map_display_data = current
@@ -3050,7 +3050,7 @@ def test_in_memory_terminal_session_accepts_first_window_after_status() -> None:
 
 def test_in_memory_terminal_retransmission_is_not_staged() -> None:
     """An unchanged completed route cannot seed or extend the next session."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     retransmission = _trajectory_display(
@@ -3078,7 +3078,7 @@ def test_in_memory_terminal_retransmission_is_not_staged() -> None:
 
 def test_in_memory_terminal_rolling_tail_is_not_staged() -> None:
     """A completed rolling tail cannot seed the next cleaning session."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display(
         (1.0, 1.0),
@@ -3127,7 +3127,7 @@ def test_in_memory_terminal_rolling_tail_is_not_staged() -> None:
 
 def test_restored_terminal_retransmission_is_not_staged() -> None:
     """A restored completed route retransmission cannot seed the next session."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     state.map_display_data = _trajectory_display(
@@ -3154,7 +3154,7 @@ def test_restored_terminal_retransmission_is_not_staged() -> None:
 
 def test_remapping_display_is_not_staged_as_a_new_clean() -> None:
     """Map-rebuilding geometry is reduced to pose before new-clean staging."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     remapping = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
@@ -3179,7 +3179,7 @@ def test_remapping_display_is_not_staged_as_a_new_clean() -> None:
 
 def test_terminal_staged_display_is_reconciled_after_grace() -> None:
     """A late final route is published and persisted when no clean follows it."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     pending = _trajectory_display((2.0, 2.0), (3.0, 3.0), timestamp=200)
@@ -3223,7 +3223,7 @@ def test_terminal_staged_display_is_reconciled_after_grace() -> None:
 
 def test_staged_display_is_promoted_when_clean_status_arrives_during_grace() -> None:
     """The grace callback must keep a window confirmed by active telemetry."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     pending = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
@@ -3259,7 +3259,7 @@ def test_staged_display_is_promoted_when_clean_status_arrives_during_grace() -> 
 
 def test_staged_display_is_discarded_after_another_terminal_generation() -> None:
     """An intervening terminal cycle invalidates a previously staged window."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     pending = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
@@ -3285,7 +3285,7 @@ def test_staged_display_is_discarded_after_another_terminal_generation() -> None
 
 def test_staged_display_is_discarded_after_static_map_changes() -> None:
     """A delayed route window cannot be persisted against another map."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     pending = _trajectory_display((2.0, 2.0), (3.0, 3.0), timestamp=200)
@@ -3323,7 +3323,7 @@ def test_staged_display_is_discarded_after_static_map_changes() -> None:
 
 def test_status_refresh_promotes_staged_first_window() -> None:
     """A poll-driven clean transition retains its pre-status route window."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     old_display = _trajectory_display((1.0, 1.0), timestamp=100)
     staged = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
@@ -3355,7 +3355,7 @@ def test_status_refresh_promotes_staged_first_window() -> None:
 
 def test_staged_display_persists_only_validated_history() -> None:
     """Periodic and shutdown snapshots cannot save an unconfirmed window."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     old_display = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     staged_display = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
@@ -3395,7 +3395,7 @@ async def test_setup_replaces_inactive_cache_with_first_new_clean_window(
     accepted: bool,
 ) -> None:
     """A restored completed route cannot discard or absorb a fresh route window."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -3476,7 +3476,7 @@ async def test_setup_replaces_inactive_cache_with_first_new_clean_window(
 
 async def test_setup_keeps_staged_window_separate_from_published_history() -> None:
     """Setup must promote the staged route, not its retained display substitute."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     old_display = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     staged_display = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
@@ -3511,7 +3511,7 @@ async def test_setup_keeps_staged_window_separate_from_published_history() -> No
 
 def test_staged_display_reconciles_later_static_map_change() -> None:
     """A map switch invalidates retained history while a route is staged."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     state = coordinator.client.state
@@ -3545,7 +3545,7 @@ def test_staged_display_reconciles_later_static_map_change() -> None:
 
 async def test_setup_reconciles_dock_completion_before_sparse_refresh() -> None:
     """Sparse setup telemetry cannot hide an earlier dock-confirmed completion."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -3853,13 +3853,8 @@ def test_restored_active_trail_validation_grace_expires() -> None:
     assert not coordinator._map_display_cache_restored_from_active
 
 
-@pytest.mark.parametrize(
-    "working_status", (WorkingStatus.TASK_COMPLETED, WorkingStatus.ERROR)
-)
-def test_explicit_terminal_status_bypasses_active_trail_restore_grace(
-    working_status: WorkingStatus,
-) -> None:
-    """Completion and fault packets end a restored session immediately."""
+def test_error_status_bypasses_active_trail_restore_grace() -> None:
+    """A fault packet ends a restored session immediately."""
     coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.UNKNOWN
     coordinator._clean_session_active = False
@@ -3869,7 +3864,7 @@ def test_explicit_terminal_status_bypasses_active_trail_restore_grace(
     coordinator._pending_map_display_cache_restore = None
     coordinator._clear_map_display_cache_for_new_clean = MagicMock()
     state = _trajectory_state()
-    state.working_status = working_status
+    state.working_status = WorkingStatus.ERROR
 
     with patch(
         "custom_components.narwal.coordinator.time.monotonic", return_value=101.0
@@ -3889,7 +3884,7 @@ def test_explicit_terminal_status_bypasses_active_trail_restore_grace(
 
 def test_off_dock_task_completed_to_cleaning_keeps_current_trajectory() -> None:
     """A room handoff cannot split one multi-room cleaning session."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.CLEANING
     coordinator._clean_session_active = True
     coordinator._map_display_cache_restored = False
@@ -3910,7 +3905,7 @@ def test_off_dock_task_completed_to_cleaning_keeps_current_trajectory() -> None:
 
 def test_restart_during_off_dock_task_completed_keeps_current_session() -> None:
     """Explicit off-dock handoff telemetry rebuilds the session latch."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.UNKNOWN
     coordinator._clean_session_active = False
     coordinator._map_display_cache_restored = True
@@ -3931,7 +3926,7 @@ def test_restart_during_off_dock_task_completed_keeps_current_session() -> None:
 
 def test_docked_task_completed_ends_session_before_next_clean() -> None:
     """Dock evidence makes TASK_COMPLETED a genuine clean boundary."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.CLEANING
     coordinator._clean_session_active = True
     coordinator._map_display_cache_restored = False
@@ -3953,7 +3948,7 @@ def test_docked_task_completed_ends_session_before_next_clean() -> None:
 
 def test_sparse_completion_cannot_reopen_dock_confirmed_session() -> None:
     """A sparse late completion packet cannot make a finished route active."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.CLEANING
     coordinator._clean_session_active = True
     coordinator._clean_session_terminal = False
@@ -3982,7 +3977,7 @@ def test_sparse_completion_cannot_reopen_dock_confirmed_session() -> None:
 
 def test_delayed_off_dock_completion_cannot_reopen_confirmed_session() -> None:
     """Off-dock completion received after docking remains terminal."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.CLEANING
     coordinator._clean_session_active = True
     coordinator._clean_session_terminal = False
@@ -4078,7 +4073,7 @@ def test_restored_off_dock_task_completed_is_not_new_clean(
     terminal: bool,
 ) -> None:
     """A restored room handoff is not a new route in either terminal phase."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._clean_session_active = False
     coordinator._clean_session_terminal = terminal
     coordinator._map_display_cache_restored = True
@@ -4095,7 +4090,7 @@ def test_restored_off_dock_task_completed_is_not_new_clean(
 
 def test_restored_handoff_promotes_pending_native_route() -> None:
     """A staged room handoff is merged before later native windows continue."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     state.working_status = WorkingStatus.TASK_COMPLETED
     state.dock_presence = 2
@@ -5180,6 +5175,27 @@ class TestCoordinatorResilience:
         assert seen == [True]
         assert coordinator.local_available
         coordinator._reconcile_map_display_after_status_refresh.assert_called_once_with()
+
+    def test_partial_dock_publish_reconciles_without_marking_fresh(self) -> None:
+        """Partial stop telemetry updates map/task context but retains stale latch."""
+        coordinator = self._make_coordinator()
+        coordinator._dock_status_refresh_failed = True
+        coordinator._local_available = False
+        coordinator._reconcile_map_display_after_status_refresh = MagicMock()
+        coordinator._sync_active_clean_context = MagicMock()
+        seen: list[bool] = []
+        coordinator.async_set_updated_data = MagicMock(
+            side_effect=lambda _state: seen.append(coordinator.has_fresh_state)
+        )
+
+        coordinator.async_set_partial_dock_data()
+
+        assert seen == [False]
+        assert not coordinator.local_available
+        coordinator._reconcile_map_display_after_status_refresh.assert_called_once_with()
+        coordinator._sync_active_clean_context.assert_called_once_with(
+            coordinator.client.state
+        )
 
     def test_set_stale_dock_data_marks_stale_before_notifying(self) -> None:
         """Client refresh failures mark dock data stale before notifying listeners."""

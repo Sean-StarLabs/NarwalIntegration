@@ -418,14 +418,17 @@ async def test_partial_stop_refresh_does_not_mark_stale_dock_state_fresh() -> No
     coordinator = _coordinator(state)
     coordinator.has_fresh_state = False
     coordinator.client.stop_dock_task = AsyncMock(
-        return_value=CommandResponse(result_code=CommandResult.SUCCESS)
+        return_value=CommandResponse(
+            result_code=CommandResult.SUCCESS,
+            dock_status_freshness=DockStatusFreshness.PARTIAL,
+        )
     )
     switch = NarwalDockTaskSwitch(coordinator, DOCK_TASK_SWITCHES[4])
 
     await switch.async_turn_off()
 
     coordinator.async_set_refreshed_dock_data.assert_not_called()
-    coordinator.async_set_updated_data.assert_called_once_with(state)
+    coordinator.async_set_partial_dock_data.assert_called_once_with()
 
 
 async def test_failed_stop_preflight_marks_dock_state_stale() -> None:

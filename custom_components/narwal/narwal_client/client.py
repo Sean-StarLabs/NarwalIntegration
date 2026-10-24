@@ -78,6 +78,8 @@ from .models import (
     DOCK_TASK_DRY_DUST_BIN,
     DOCK_TASK_DRY_MOP,
     DOCK_TASK_EMPTY_DUSTBIN,
+    DOCK_TASK_KEYS,
+    DOCK_DRYING_TASKS,
     DOCK_TASK_WASH_MOP,
     CommandResponse,
     DeviceInfo,
@@ -116,18 +118,6 @@ _DOCK_TASK_FORCE_END_PAYLOADS = {
     # Live-validated on Flow 2: the app's ForceEndTask.Request uses field 1
     # with ParallelTaskType.DRY_BAG to stop robot dust-bin drying.
     DOCK_TASK_DRY_DUST_BIN: b"\x08\x05",
-}
-_KNOWN_DOCK_TASKS = {
-    DOCK_TASK_EMPTY_DUSTBIN,
-    DOCK_TASK_WASH_MOP,
-    DOCK_TASK_DRY_MOP,
-    DOCK_TASK_DRY_DUST_BIN,
-    DOCK_TASK_DRY_DOCK_BAG,
-}
-_DOCK_DRYING_TASKS = {
-    DOCK_TASK_DRY_MOP,
-    DOCK_TASK_DRY_DUST_BIN,
-    DOCK_TASK_DRY_DOCK_BAG,
 }
 
 
@@ -304,10 +294,7 @@ def _apply_accepted_dock_stop(state: NarwalState, task: str) -> None:
             state.station_activity = 0
         if state.dock_activity == 3:
             state.dock_activity = 0
-    elif (
-        task in {DOCK_TASK_DRY_MOP, DOCK_TASK_DRY_DUST_BIN, DOCK_TASK_DRY_DOCK_BAG}
-        and not state.active_dock_drying_tasks
-    ):
+    elif task in DOCK_DRYING_TASKS and not state.active_dock_drying_tasks:
         if state.station_activity == 4:
             state.station_activity = 0
         if state.dock_activity == 4:
@@ -1950,7 +1937,7 @@ class NarwalClient:
                 return status_result(CommandResult.NOT_APPLICABLE)
             active_tasks = self.state.active_dock_task_keys
             if task is not None and task not in active_tasks:
-                if task in _KNOWN_DOCK_TASKS:
+                if task in DOCK_TASK_KEYS:
                     self.state.clear_assumed_dock_task(task)
                     return status_result(CommandResult.SUCCESS)
                 return status_result(CommandResult.NOT_APPLICABLE)
@@ -2014,7 +2001,7 @@ class NarwalClient:
                 active_task in self.state.telemetry_dock_task_keys
                 and (
                     (
-                        active_task not in _DOCK_DRYING_TASKS
+                        active_task not in DOCK_DRYING_TASKS
                         and (refreshed or has_new_coarse_activity)
                     )
                     or (

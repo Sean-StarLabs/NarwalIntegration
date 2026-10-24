@@ -881,7 +881,16 @@ async def test_cloud_refresh_waits_for_in_flight_refresh() -> None:
 @pytest.mark.asyncio
 async def test_local_poll_does_not_wait_for_cloud_consumables() -> None:
     """The independent cloud loop must not delay successful LAN polling."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.entry_id = "cloud-poll-test"
+    entry.data = {"host": "127.0.0.1", "port": 9002, "device_id": "test-device"}
+    coordinator = NarwalCoordinator(hass, entry)
+    coordinator.hass = hass
+    coordinator.config_entry = entry
+    coordinator._room_selection_store_loaded = True
+    coordinator._room_profile_store_loaded = True
+    coordinator._room_order_store_loaded = True
     coordinator.client = MagicMock()
     coordinator.client.connected = True
     coordinator.client.state = NarwalState()

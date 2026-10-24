@@ -265,6 +265,8 @@ class NarwalDockTaskSwitch(NarwalDockEntity, SwitchEntity):
                 self.coordinator.async_set_stale_dock_data()
             elif response.dock_status_freshness is DockStatusFreshness.FRESH:
                 self.coordinator.async_set_refreshed_dock_data()
+            elif response.dock_status_freshness is DockStatusFreshness.PARTIAL:
+                self.coordinator.async_set_partial_dock_data()
             else:
                 self.coordinator.async_set_updated_data(client.state)
             self._raise_if_command_failed(response, "stop")

@@ -544,6 +544,12 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._sync_active_clean_context(self.client.state)
         self.async_set_updated_data(self.client.state)
 
+    def async_set_partial_dock_data(self) -> None:
+        """Publish partial dock data without promoting dock-state freshness."""
+        self._reconcile_map_display_after_status_refresh()
+        self._sync_active_clean_context(self.client.state)
+        self.async_set_updated_data(self.client.state)
+
     def async_set_stale_dock_data(self) -> None:
         """Publish client state while recording that dock telemetry is stale."""
         self._mark_dock_status_refresh_failed()

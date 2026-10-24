@@ -2507,6 +2507,75 @@ class TestDockTaskCommands:
         assert result is success
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is None
 
+    @pytest.mark.parametrize(
+        ("verification_fails", "timer_age"),
+        [(False, 179.0), (True, 181.0)],
+    )
+    async def test_stop_decoder_push_does_not_survive_status_verification(
+        self,
+        verification_fails: bool,
+        timer_age: float,
+    ) -> None:
+        """Working-status decode during stop is not task survival evidence."""
+        client = self._docked_client()
+        client.state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+        working_frame = build_frame(
+            client._full_topic("status/working_status"), b"working-status"
+        )
+        command_count = 0
+
+        async def send_command(topic: str, **kwargs) -> CommandResponse:
+            nonlocal command_count
+            command_count += 1
+            if topic == TOPIC_CMD_FORCE_END:
+                client.state.dock_drying_status_time = time.monotonic() - timer_age
+                with patch.object(
+                    client,
+                    "_decode_protobuf",
+                    side_effect=({"3": 120}, {"3": 121}),
+                ):
+                    await client._handle_message(working_frame)
+                    await client._handle_message(working_frame)
+                assert client.state.has_recent_active_working_status
+                assert client.state.has_recent_dock_drying_status is (
+                    timer_age < 180.0
+                )
+                return success
+            if topic == TOPIC_CMD_GET_BASE_STATUS:
+                if verification_fails and command_count == 3:
+                    raise NarwalConnectionError("verification timeout")
+                return CommandResponse(
+                    data={
+                        "2": {
+                            "3": {
+                                "1": int(WorkingStatus.DOCKED),
+                                "3": 6,
+                                "11": 2,
+                            }
+                        }
+                    }
+                )
+            raise AssertionError(f"Unexpected command topic: {topic}")
+
+        client.send_command = AsyncMock(side_effect=send_command)
+        with patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock):
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+        assert result is success
+        assert result.dock_status_freshness is (
+            DockStatusFreshness.STALE
+            if verification_fails
+            else DockStatusFreshness.PARTIAL
+        )
+        assert client.state.raw_working_status == {"3": 121}
+        assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is None
+
     @pytest.mark.asyncio
     async def test_stop_dry_mop_preserves_fresh_coarse_activity(self) -> None:
         """Current dock activity can confirm mop drying without timer fields."""
