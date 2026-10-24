@@ -4593,10 +4593,6 @@ class TestCoordinatorResilience:
         coordinator._map_display_cache_last_save = 0.0
         coordinator._map_display_cache_restored = False
         coordinator.update_interval = None
-        def _close_background_task(*args: object) -> None:
-            for arg in args:
-                if hasattr(arg, "close"):
-                    arg.close()
         return coordinator
 
     async def test_display_map_frame_uses_client_callbacks_and_grace_timer(self) -> None:

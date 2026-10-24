@@ -709,6 +709,36 @@ class TestAsyncCleanSegments:
         )
         vac.coordinator.ordered_clean_room_ids_for.assert_called_once_with([11, 9])
 
+    async def test_segment_dispatch_filters_complete_saved_map_order(self) -> None:
+        """New map rooms participate in saved ordering before segment filtering."""
+        state = _docked_state()
+        state.map_data = MapData(
+            map_id=12,
+            rooms=[
+                RoomInfo(room_id=6),
+                RoomInfo(room_id=9),
+                RoomInfo(room_id=4),
+                RoomInfo(room_id=7),
+            ],
+        )
+        vac = _make_vacuum(state=state)
+        vac.coordinator._room_order_store_loaded = True
+        vac.coordinator.room_clean_orders = {"12": [6, 4]}
+        vac.coordinator.room_settings_map_id = MagicMock(return_value="12")
+        vac.coordinator.ordered_clean_room_ids_for = (
+            NarwalCoordinator.ordered_clean_room_ids_for.__get__(
+                vac.coordinator, NarwalCoordinator
+            )
+        )
+        vac.coordinator.client.robot_awake = True
+        vac.coordinator.client.start_rooms = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+
+        await vac.async_clean_segments(["7", "9"])
+
+        assert vac.coordinator.client.start_rooms.await_args.args[0] == [9, 7]
+
     async def test_segment_clean_accepted_response_does_not_warn(self, caplog) -> None:
         """Accepted async start responses are not room-clean failures."""
         state = _docked_state()

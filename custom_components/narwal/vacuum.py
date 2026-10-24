@@ -778,7 +778,16 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
                     "Unknown Narwal room ID: "
                     f"{', '.join(str(room_id) for room_id in unknown_ids)}"
                 )
-            room_ids = self.coordinator.ordered_clean_room_ids_for(room_ids)
+            map_room_ids = [
+                room.room_id for room in state.map_data.rooms if room.room_id > 0
+            ]
+            ordered_map_room_ids = self.coordinator.ordered_clean_room_ids_for(
+                map_room_ids
+            )
+            selected_room_ids = set(room_ids)
+            room_ids = [
+                room_id for room_id in ordered_map_room_ids if room_id in selected_room_ids
+            ]
             settings = self.coordinator.clean_settings
             room_settings = self.coordinator.room_clean_settings_for_rooms(room_ids)
             await self._validate_clean_start()

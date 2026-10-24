@@ -64,7 +64,6 @@ def _coordinator() -> NarwalCoordinator:
     coordinator._room_profile_store_loaded = True
     coordinator._room_order_store_loaded = True
     coordinator._schedule_room_order_save = MagicMock()
-    coordinator._schedule_room_order_save = MagicMock()
     coordinator.async_update_listeners = MagicMock()
     coordinator.async_add_listener = MagicMock()
     return coordinator
