@@ -2503,7 +2503,42 @@ class TestDockTaskCommands:
             "narwal_client.client.asyncio.sleep", new_callable=AsyncMock
         ):
             result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+    @pytest.mark.asyncio
+    async def test_force_end_drying_frame_is_cleared_by_full_base_status(self) -> None:
+        """Force-end timer telemetry is not survival evidence after full verification."""
+        client = self._docked_client()
+        client.state.set_dock_drying_task(
+            DOCK_TASK_DRY_DOCK_BAG,
+            elapsed=60,
+            target=180,
+            fields=("12", "13"),
+        )
+        success = CommandResponse(result_code=CommandResult.SUCCESS)
+        working_frame = build_frame(client._full_topic("status/working_status"), b"drying")
+        command_count = 0
 
+        async def send_command(topic: str, **kwargs) -> CommandResponse:
+            nonlocal command_count
+            command_count += 1
+            if topic == TOPIC_CMD_FORCE_END:
+                with patch.object(
+                    client, "_decode_protobuf", return_value={"12": 66, "13": 180}
+                ):
+                    await client._handle_message(working_frame)
+                assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG).elapsed == 66
+                return success
+            if topic == TOPIC_CMD_GET_BASE_STATUS:
+                return self._docked_status_response()
+            raise AssertionError(f"Unexpected command topic: {topic}")
+
+        client.send_command = AsyncMock(side_effect=send_command)
+        with patch("narwal_client.client.asyncio.sleep", new_callable=AsyncMock):
+            result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
+
+        assert command_count == 3
+        assert result.dock_status_freshness is DockStatusFreshness.FRESH
+        assert client.state.raw_working_status == {"12": 66, "13": 180}
+        assert client.state.raw_base_status["3"]["1"] == int(WorkingStatus.DOCKED)
         assert result is success
         assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is None
 
