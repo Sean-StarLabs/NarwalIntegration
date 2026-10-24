@@ -2462,10 +2462,10 @@ class TestDockTaskCommands:
         assert timer.elapsed == 66
 
     @pytest.mark.asyncio
-    async def test_stop_preserves_fresh_push_during_command_when_query_fails(
+    async def test_stop_ignores_command_push_when_verification_fails(
         self,
     ) -> None:
-        """Telemetry received while awaiting the stop response remains authoritative."""
+        """The force-end response push alone cannot prove a task survived."""
         client = self._docked_client()
         client.state.set_dock_drying_task(
             DOCK_TASK_DRY_DOCK_BAG,
@@ -2505,9 +2505,7 @@ class TestDockTaskCommands:
             result = await client.stop_dock_task(DOCK_TASK_DRY_DOCK_BAG)
 
         assert result is success
-        timer = client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG)
-        assert timer is not None
-        assert timer.elapsed == 66
+        assert client.state.dock_task_timer(DOCK_TASK_DRY_DOCK_BAG) is None
 
     @pytest.mark.asyncio
     async def test_stop_dry_mop_preserves_fresh_coarse_activity(self) -> None:
