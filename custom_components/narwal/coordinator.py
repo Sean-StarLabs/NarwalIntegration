@@ -538,6 +538,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     def async_set_refreshed_dock_data(self) -> None:
         """Publish dock state that the client has already refreshed."""
+        self._local_available = True
         self._mark_dock_status_refresh_succeeded()
         self._reconcile_map_display_after_status_refresh()
         self._sync_active_clean_context(self.client.state)
@@ -3224,6 +3225,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.async_set_updated_data(self.client.state)
             return False
         if full_update:
+            self._local_available = True
             self._mark_dock_status_refresh_succeeded()
         self._reconcile_map_display_after_status_refresh()
         self._sync_active_clean_context(self.client.state)
@@ -3294,6 +3296,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self.async_set_updated_data(self.client.state)
             return False
         if full_update:
+            self._local_available = True
             self._mark_dock_status_refresh_succeeded()
         self._reconcile_map_display_after_status_refresh()
         self._sync_active_clean_context(self.client.state)

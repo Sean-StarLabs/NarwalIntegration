@@ -5101,6 +5101,7 @@ class TestCoordinatorResilience:
         """Client-owned dock refreshes clear stale state before notifying listeners."""
         coordinator = self._make_coordinator()
         coordinator._dock_status_refresh_failed = True
+        coordinator._local_available = False
         coordinator._reconcile_map_display_after_status_refresh = MagicMock()
         seen: list[bool] = []
 
@@ -5112,6 +5113,7 @@ class TestCoordinatorResilience:
         coordinator.async_set_refreshed_dock_data()
 
         assert seen == [True]
+        assert coordinator.local_available
         coordinator._reconcile_map_display_after_status_refresh.assert_called_once_with()
 
     def test_set_stale_dock_data_marks_stale_before_notifying(self) -> None:
@@ -5449,6 +5451,21 @@ class TestCoordinatorResilience:
             coordinator.client.state
         )
         assert not coordinator._dock_status_refresh_failed
+
+    async def test_action_refresh_restores_local_availability(self) -> None:
+        """A successful full action refresh restores entities after an outage."""
+        coordinator = self._make_coordinator()
+        coordinator._local_available = False
+        coordinator.client.get_status = AsyncMock(
+            return_value=CommandResponse(
+                data={"2": {"3": {"1": int(WorkingStatus.DOCKED)}}}
+            )
+        )
+        coordinator.async_set_updated_data = MagicMock()
+
+        assert await coordinator.async_refresh_action_status()
+
+        assert coordinator.local_available
 
     async def test_action_refresh_requires_dock_payload_when_full_update_needed(self) -> None:
         """Without active task telemetry, action refresh needs real dock/base status."""
