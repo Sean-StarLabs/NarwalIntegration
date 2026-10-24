@@ -57,6 +57,8 @@ from custom_components.narwal.narwal_client.models import (  # noqa: E402
     DOCK_TASK_EMPTY_DUSTBIN,
     DOCK_TASK_WASH_MOP,
 )
+from narwal_client.client import NarwalClient  # noqa: E402
+from narwal_client.protocol import build_frame  # noqa: E402
 
 UpdateFailed = sys.modules["homeassistant.helpers.update_coordinator"].UpdateFailed
 
@@ -4588,6 +4590,56 @@ class TestCoordinatorResilience:
             side_effect=_close_background_task
         )
         return coordinator
+
+    async def test_display_map_frame_uses_client_callbacks_and_grace_timer(self) -> None:
+        """A client frame stages then reconciles its route in production order."""
+        coordinator = self._make_coordinator()
+        client = NarwalClient("10.0.0.100", device_id="test_device")
+        coordinator.client = client
+        state = client.state
+        state.map_data = MapData(
+            map_id=12, width=100, height=100, created_at=34,
+            compressed_map=b"\x01",
+        )
+        state.working_status = WorkingStatus.CHARGED
+        coordinator._retained_map_display = _trajectory_display(
+            (1.0, 1.0), (2.0, 2.0), timestamp=100
+        )
+        coordinator._retained_map_identity = coordinator._static_map_identity(state)
+        coordinator._retained_map_geometry_identity = (
+            coordinator._static_map_geometry_identity(state)
+        )
+        coordinator._map_display_cache_restored = True
+        coordinator._clean_session_terminal = True
+        coordinator._pending_new_clean_map_display = None
+        coordinator._pending_new_clean_map_display_at = 0.0
+        coordinator._pending_new_clean_terminal_generation = None
+        coordinator._pending_new_clean_map_display_handle = None
+        coordinator.async_set_updated_data = MagicMock()
+        coordinator.hass.loop = asyncio.get_running_loop()
+        client.on_display_map = coordinator._on_display_map_update
+        client.on_state_update = coordinator._on_state_update
+        client._decode_protobuf = MagicMock(return_value={
+            "1": {"1": 3.0, "2": 3.0},
+            "2": {
+                "1": struct.pack("<ff", 3.0, 4.0),
+                "2": struct.pack("<ff", 3.0, 4.0),
+            },
+            "10": 200,
+        })
+
+        with patch("custom_components.narwal.coordinator.NATIVE_TRAJECTORY_NEW_CLEAN_GRACE", 0.1):
+            frame = build_frame(client._full_topic("map/display_map"), b"frame")
+            await client._handle_message(frame)
+            assert coordinator._pending_new_clean_map_display is not None
+            assert coordinator._pending_new_clean_map_display_handle is not None
+            await asyncio.sleep(0.15)
+
+        assert coordinator._pending_new_clean_map_display is None
+        assert state.map_display_data is not None
+        assert state.map_display_data.trajectory_points() == [
+            (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0)
+        ]
 
     async def test_stale_data_on_first_failure(self) -> None:
         """_async_update_data returns stale state on first poll failure."""

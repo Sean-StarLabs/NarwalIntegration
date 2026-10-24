@@ -184,7 +184,7 @@ class NarwalRoomOrderNumber(NarwalEntity, NumberEntity):
     def available(self) -> bool:
         """Return True when the current room order can be edited."""
         return (
-            getattr(self.coordinator, "_room_order_store_loaded", True)
+            self.coordinator._room_order_store_loaded
             and self._map_id is not None
             and self._room_id in self._current_room_ids()
             and can_edit_pending_clean_settings(self.coordinator.data)

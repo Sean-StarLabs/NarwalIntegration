@@ -1167,15 +1167,19 @@ class TestVacuumFanSpeed:
             "Ultra Powerful",
         ]
 
-    async def test_live_ultra_fan_is_rejected(self) -> None:
+    async def test_live_ultra_fan_is_clamped_for_legacy_service_call(self) -> None:
         state = _active_clean_state()
         vac = _make_vacuum(state=state)
-        vac.coordinator.client.set_fan_speed = AsyncMock()
+        vac.coordinator.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
 
-        with pytest.raises(HomeAssistantError, match="cannot be selected mid-clean"):
-            await vac.async_set_fan_speed("Ultra Powerful")
+        await vac.async_set_fan_speed("Ultra Powerful")
 
-        vac.coordinator.client.set_fan_speed.assert_not_awaited()
+        vac.coordinator.client.set_fan_speed.assert_awaited_once_with(FanLevel.DEEP)
+        vac.coordinator.set_active_clean_setting.assert_called_once_with(
+            "fan", FanLevel.DEEP
+        )
 
     async def test_reselecting_active_ultra_is_a_noop(self) -> None:
         vac = _make_vacuum(state=_active_clean_state())
@@ -1193,10 +1197,25 @@ class TestVacuumFanSpeed:
         vac.coordinator.client.set_fan_speed = AsyncMock()
 
         assert "Ultra Powerful" not in vac.fan_speed_list
-        with pytest.raises(HomeAssistantError, match="cannot be selected mid-clean"):
-            await vac.async_set_fan_speed("Ultra Powerful")
+        vac.coordinator.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+        await vac.async_set_fan_speed("Ultra Powerful")
 
-        vac.coordinator.client.set_fan_speed.assert_not_awaited()
+        vac.coordinator.client.set_fan_speed.assert_awaited_once_with(FanLevel.DEEP)
+        assert vac.coordinator.clean_settings.fan == FanLevel.DEEP
+
+    @pytest.mark.parametrize("alias", ["max", "Ultra", "Ultra Powerful"])
+    async def test_live_legacy_ultra_aliases_clamp_to_deep(self, alias: str) -> None:
+        vac = _make_vacuum(state=_active_clean_state())
+        vac.coordinator.client.set_fan_speed = AsyncMock(
+            return_value=CommandResponse(result_code=0)
+        )
+
+        await vac.async_set_fan_speed(alias)
+
+        vac.coordinator.client.set_fan_speed.assert_awaited_once_with(FanLevel.DEEP)
+        assert vac.coordinator.clean_settings.fan == FanLevel.DEEP
 
     async def test_live_fan_change_applies_while_paused(self) -> None:
         state = _active_clean_state()

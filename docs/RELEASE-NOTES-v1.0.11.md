@@ -6,5 +6,5 @@
   `Ultra` aliases. Select `Super Powerful` or `Ultra Powerful` instead.
   Vacuum `set_fan_speed` continues to accept `Super` and `Ultra` while docked;
   those aliases map to the highest level supported by the command path. During
-  a clean, unsupported Ultra requests are rejected instead of being silently
-  changed to another level.
+  a clean, Ultra requests are clamped to `Super Powerful`, matching the live
+  command's supported range.

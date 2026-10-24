@@ -1572,12 +1572,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._pending_new_clean_map_display = None
         self._pending_new_clean_map_display_at = 0.0
         self._pending_new_clean_terminal_generation = None
-        pending_handle = getattr(
-            self, "_pending_new_clean_map_display_handle", None
-        )
-        if pending_handle is not None:
-            pending_handle.cancel()
-        self._pending_new_clean_map_display_handle = None
+        self._cancel_pending_new_clean_map_display()
         if clear_memory:
             self.client.state.map_display_data = None
             self._retained_map_display = None
@@ -2002,15 +1997,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             current = state.map_display_data
             previous = getattr(self, "_retained_map_display", None)
             if current is not None and previous is not None:
-                retained = replace(
-                    previous,
-                    robot_x=current.robot_x,
-                    robot_y=current.robot_y,
-                    robot_heading=current.robot_heading,
-                    timestamp=current.timestamp,
-                    dock_ref_x=current.dock_ref_x,
-                    dock_ref_y=current.dock_ref_y,
-                )
+                retained = self._copy_map_display_pose(previous, current)
                 state.map_display_data = retained
                 self._retained_map_display = retained
             elif current is not None:
@@ -2430,22 +2417,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
     def _reconcile_map_display_after_status_refresh(self) -> None:
         """Apply refreshed task state to trajectory retention and persistence."""
         state = self.client.state
-        if (
-            getattr(self, "_map_display_cache_restored", False)
-            and not getattr(self, "_map_display_cache_restored_from_active", False)
-            and not getattr(self, "_clean_session_terminal", False)
-            and state.working_status == WorkingStatus.TASK_COMPLETED
-            and not state.has_dock_presence_signal
-        ):
-            self._promote_restored_handoff_trajectory(state)
-        initial_new_clean_display = None
-        if self._is_new_clean_transition(state):
-            initial_new_clean_display = self._take_pending_new_clean_map_display(state)
-        self._handle_working_status_transition(
-            state, initial_new_clean_display=initial_new_clean_display
-        )
-        if not self._map_display_awaits_new_clean_status(state):
-            self._retain_native_trajectory(state)
+        self._transition_clean_state(state)
         self._schedule_map_display_cache_save(state)
 
     def _checkpoint_terminal_setup_trajectory(self) -> None:
@@ -2456,6 +2428,53 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             and self._has_current_map_display_trajectory()
             and is_confirmed_terminal_clean_state(state)
         ):
+            self._retain_native_trajectory(state)
+
+    def _is_restored_off_dock_handoff(self, state: NarwalState) -> bool:
+        """Return true while restored history may continue off-dock."""
+        return (
+            getattr(self, "_map_display_cache_restored", False)
+            and not getattr(self, "_map_display_cache_restored_from_active", False)
+            and not getattr(self, "_clean_session_terminal", False)
+            and state.working_status == WorkingStatus.TASK_COMPLETED
+            and not state.has_dock_presence_signal
+        )
+
+    @staticmethod
+    def _copy_map_display_pose(
+        display: MapDisplayData, pose: MapDisplayData | None
+    ) -> MapDisplayData:
+        """Copy the latest robot pose onto retained trajectory geometry."""
+        if pose is None:
+            return display
+        return replace(
+            display,
+            robot_x=pose.robot_x,
+            robot_y=pose.robot_y,
+            robot_heading=pose.robot_heading,
+            timestamp=pose.timestamp,
+            dock_ref_x=pose.dock_ref_x,
+            dock_ref_y=pose.dock_ref_y,
+        )
+
+    def _cancel_pending_new_clean_map_display(self) -> None:
+        """Cancel the grace callback when its staged route is consumed."""
+        handle = getattr(self, "_pending_new_clean_map_display_handle", None)
+        if handle is not None:
+            handle.cancel()
+        self._pending_new_clean_map_display_handle = None
+
+    def _transition_clean_state(self, state: NarwalState) -> None:
+        """Reconcile staged routes before applying a task state transition."""
+        if self._is_restored_off_dock_handoff(state):
+            self._promote_restored_handoff_trajectory(state)
+        initial_display = None
+        if self._is_new_clean_transition(state):
+            initial_display = self._take_pending_new_clean_map_display(state)
+        self._handle_working_status_transition(
+            state, initial_new_clean_display=initial_display
+        )
+        if not self._map_display_awaits_new_clean_status(state):
             self._retain_native_trajectory(state)
 
     def _on_display_map_update(self, state: NarwalState) -> None:
@@ -2470,28 +2489,14 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             if self._map_display_awaits_new_clean_status(state):
                 pending = self._pending_new_clean_map_display
                 if pending is not None:
-                    self._pending_new_clean_map_display = replace(
-                        pending,
-                        robot_x=current.robot_x,
-                        robot_y=current.robot_y,
-                        robot_heading=current.robot_heading,
-                        timestamp=current.timestamp,
-                        dock_ref_x=current.dock_ref_x,
-                        dock_ref_y=current.dock_ref_y,
+                    self._pending_new_clean_map_display = self._copy_map_display_pose(
+                        pending, current
                     )
             if retained is not None and (
                 self._map_display_awaits_new_clean_status(state)
                 or self._has_clean_session_signal(state)
             ):
-                retained = replace(
-                    retained,
-                    robot_x=current.robot_x,
-                    robot_y=current.robot_y,
-                    robot_heading=current.robot_heading,
-                    timestamp=current.timestamp,
-                    dock_ref_x=current.dock_ref_x,
-                    dock_ref_y=current.dock_ref_y,
-                )
+                retained = self._copy_map_display_pose(retained, current)
                 state.map_display_data = retained
                 self._retained_map_display = retained
             return
@@ -2530,14 +2535,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 # Completed native routes can be retransmitted while docked.
                 # They are not evidence of a new session and must not refresh
                 # the pre-status staging grace window.
-                state.map_display_data = replace(
-                    retained,
-                    robot_x=current.robot_x,
-                    robot_y=current.robot_y,
-                    robot_heading=current.robot_heading,
-                    timestamp=current.timestamp,
-                    dock_ref_x=current.dock_ref_x,
-                    dock_ref_y=current.dock_ref_y,
+                state.map_display_data = self._copy_map_display_pose(
+                    retained, current
                 )
                 return
             # A display window can precede the status packet that announces a
@@ -2563,14 +2562,8 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                 )
             else:
                 if retained is not None:
-                    state.map_display_data = replace(
-                        retained,
-                        robot_x=current.robot_x,
-                        robot_y=current.robot_y,
-                        robot_heading=current.robot_heading,
-                        timestamp=current.timestamp,
-                        dock_ref_x=current.dock_ref_x,
-                        dock_ref_y=current.dock_ref_y,
+                    state.map_display_data = self._copy_map_display_pose(
+                        retained, current
                     )
             return
         self._retain_native_trajectory(state)
@@ -2615,13 +2608,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         self._pending_new_clean_map_display = None
         self._pending_new_clean_map_display_at = 0.0
         self._pending_new_clean_terminal_generation = None
-        is_restored_off_dock_handoff = (
-            getattr(self, "_map_display_cache_restored", False)
-            and not getattr(self, "_map_display_cache_restored_from_active", False)
-            and not getattr(self, "_clean_session_terminal", False)
-            and state.working_status == WorkingStatus.TASK_COMPLETED
-            and not state.has_dock_presence_signal
-        )
+        is_restored_off_dock_handoff = self._is_restored_off_dock_handoff(state)
         if generation != state.terminal_working_status_generation:
             state.map_display_data = self._retained_map_display
             return
@@ -2641,17 +2628,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             if retained is None
             else self._merge_native_trajectory_windows(retained, pending)
         )
-        latest_pose = state.map_display_data
-        if latest_pose is not None:
-            reconciled = replace(
-                reconciled,
-                robot_x=latest_pose.robot_x,
-                robot_y=latest_pose.robot_y,
-                robot_heading=latest_pose.robot_heading,
-                timestamp=latest_pose.timestamp,
-                dock_ref_x=latest_pose.dock_ref_x,
-                dock_ref_y=latest_pose.dock_ref_y,
-            )
+        reconciled = self._copy_map_display_pose(reconciled, state.map_display_data)
         state.map_display_data = reconciled
         self._retained_map_display = reconciled
         self._schedule_map_display_cache_save(state, immediate=True)
@@ -2678,12 +2655,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             self._pending_new_clean_map_display = None
             self._pending_new_clean_map_display_at = 0.0
             self._pending_new_clean_terminal_generation = None
-            pending_handle = getattr(
-                self, "_pending_new_clean_map_display_handle", None
-            )
-            if pending_handle is not None:
-                pending_handle.cancel()
-            self._pending_new_clean_map_display_handle = None
+            self._cancel_pending_new_clean_map_display()
             return None
         return pending
 
@@ -2698,26 +2670,13 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             if retained is None
             else self._merge_native_trajectory_windows(retained, pending)
         )
-        latest = state.map_display_data
-        if latest is not None:
-            promoted = replace(
-                promoted,
-                robot_x=latest.robot_x,
-                robot_y=latest.robot_y,
-                robot_heading=latest.robot_heading,
-                timestamp=latest.timestamp,
-                dock_ref_x=latest.dock_ref_x,
-                dock_ref_y=latest.dock_ref_y,
-            )
+        promoted = self._copy_map_display_pose(promoted, state.map_display_data)
         state.map_display_data = promoted
         self._retained_map_display = promoted
         self._pending_new_clean_map_display = None
         self._pending_new_clean_map_display_at = 0.0
         self._pending_new_clean_terminal_generation = None
-        pending_handle = getattr(self, "_pending_new_clean_map_display_handle", None)
-        if pending_handle is not None:
-            pending_handle.cancel()
-        self._pending_new_clean_map_display_handle = None
+        self._cancel_pending_new_clean_map_display()
 
     def _map_display_awaits_new_clean_status(self, state: NarwalState) -> bool:
         """Return true while the current route window is staged, not retained."""
@@ -2872,12 +2831,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
                     initial_new_clean_display
                 )
             self._pending_new_clean_map_display = None
-            pending_handle = getattr(
-                self, "_pending_new_clean_map_display_handle", None
-            )
-            if pending_handle is not None:
-                pending_handle.cancel()
-            self._pending_new_clean_map_display_handle = None
+            self._cancel_pending_new_clean_map_display()
         self._clean_session_active = self._has_clean_session_signal(state)
         self._previous_task_completed_off_dock = (
             state.working_status == WorkingStatus.TASK_COMPLETED
@@ -2978,7 +2932,6 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
             await self.client.get_consumable_info()
         except Exception:
             _LOGGER.debug("Could not fetch initial consumable info")
-        self._checkpoint_terminal_setup_trajectory()
 
         # Subscribe to broadcast topics (display_map, working_status, etc.)
         # Must be sent before listener starts so display_map flows during cleaning.
@@ -2993,31 +2946,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         # Setup awaits can receive push state before the listener starts. Merge a
         # live native window before replacing stale persisted history, then
         # reconcile the clean transition without discarding that first window.
-        if (
-            getattr(self, "_map_display_cache_restored", False)
-            and not getattr(self, "_map_display_cache_restored_from_active", False)
-            and not getattr(self, "_clean_session_terminal", False)
-            and self.client.state.working_status == WorkingStatus.TASK_COMPLETED
-            and not self.client.state.has_dock_presence_signal
-        ):
-            self._promote_restored_handoff_trajectory(self.client.state)
-        initial_new_clean_display = None
-        if self._is_new_clean_transition(self.client.state):
-            initial_new_clean_display = self._take_pending_new_clean_map_display(
-                self.client.state
-            )
-        self._handle_working_status_transition(
-            self.client.state,
-            initial_new_clean_display=initial_new_clean_display,
-        )
-        if (
-            not self._map_display_awaits_new_clean_status(self.client.state)
-            and (
-                self._has_clean_session_signal(self.client.state)
-                or self._retained_map_display is not None
-            )
-        ):
-            self._retain_native_trajectory(self.client.state)
+        self._transition_clean_state(self.client.state)
         self._schedule_map_display_cache_save(self.client.state)
         self.async_set_updated_data(self.client.state)
 
@@ -3080,22 +3009,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
         ):
             _LOGGER.info("Return-to-dock detected, refreshing dock status")
             self.hass.async_create_task(self._refresh_dock_status())
-        if (
-            getattr(self, "_map_display_cache_restored", False)
-            and not getattr(self, "_map_display_cache_restored_from_active", False)
-            and not getattr(self, "_clean_session_terminal", False)
-            and state.working_status == WorkingStatus.TASK_COMPLETED
-            and not state.has_dock_presence_signal
-        ):
-            self._promote_restored_handoff_trajectory(state)
-        initial_new_clean_display = None
-        if self._is_new_clean_transition(state):
-            initial_new_clean_display = self._take_pending_new_clean_map_display(state)
-        self._handle_working_status_transition(
-            state, initial_new_clean_display=initial_new_clean_display
-        )
-        if not self._map_display_awaits_new_clean_status(state):
-            self._retain_native_trajectory(state)
+        self._transition_clean_state(state)
         self._schedule_map_display_cache_save(state)
 
         # display_map dropout recovery: if cleaning but no display_map for
@@ -3563,12 +3477,7 @@ class NarwalCoordinator(DataUpdateCoordinator[NarwalState]):
 
     async def async_shutdown(self) -> None:
         """Disconnect from the vacuum."""
-        pending_handle = getattr(
-            self, "_pending_new_clean_map_display_handle", None
-        )
-        if pending_handle is not None:
-            pending_handle.cancel()
-            self._pending_new_clean_map_display_handle = None
+        self._cancel_pending_new_clean_map_display()
         await self.client.disconnect()
         if self._listen_task and not self._listen_task.done():
             self._listen_task.cancel()

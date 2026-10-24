@@ -46,7 +46,7 @@ from .coordinator import (
 from .dock_tasks import ROBOT_RETURN_COMPATIBLE_DOCK_TASKS
 from .entity import NarwalEntity
 from .narwal_client import CommandResult, FanLevel, WorkingStatus
-from .narwal_client.const import ACTIVE_CLEANING_STATUSES
+from .narwal_client.const import ACTIVE_CLEANING_STATUSES, fan_level_for_live_command
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -701,9 +701,7 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             if level == FanLevel.SUPER:
                 if level == self._active_fan_level:
                     return
-                raise HomeAssistantError(
-                    "Ultra Powerful suction cannot be selected mid-clean"
-                )
+                level = fan_level_for_live_command(level)
             resp = await self.coordinator.client.set_fan_speed(level)
             _raise_if_command_failed(resp, "set fan speed")
             self.coordinator.set_active_clean_setting("fan", level)
