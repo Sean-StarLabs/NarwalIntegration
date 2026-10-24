@@ -599,9 +599,13 @@ async def test_clean_rooms_service_skips_map_refresh_for_known_room_ids() -> Non
 async def test_clean_rooms_service_all_still_refreshes_map() -> None:
     """`all` resolves against a fresh map, not whatever was cached."""
     coordinator = _coordinator()
-    coordinator.client.state.map_data = MapData(map_id=1, rooms=[RoomInfo(room_id=4)])
+    coordinator.client.state.map_data = MapData(
+        map_id=1,
+        rooms=[RoomInfo(room_id=11), RoomInfo(room_id=4), RoomInfo(room_id=9)],
+    )
     coordinator.client.get_map = AsyncMock()
 
-    await _async_room_ids_for_coordinator(coordinator, ["all"])
+    room_ids = await _async_room_ids_for_coordinator(coordinator, ["all"])
 
+    assert room_ids == [4, 9, 11]
     coordinator.client.get_map.assert_awaited_once()
