@@ -443,6 +443,8 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
         and, while cleaning, written live via set_fan_speed).
         """
         fan = self.coordinator.active_clean_setting("fan")
+        if fan is None and is_live_clean_setting_available(self.coordinator.data):
+            return None
         if fan is None:
             fan = self.coordinator.clean_settings.fan
         return fan_speed_label_map_for(self.coordinator.config_entry.data).get(fan)

@@ -1050,7 +1050,7 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
         self.coordinator.async_update_listeners()
         return True
 
-    def _option_from_settings(self) -> str:
+    def _option_from_settings(self) -> str | None:
         """Return this legacy option from the shared clean settings."""
         key = self.entity_description.setting_key
         settings = self.coordinator.clean_settings
@@ -1058,6 +1058,8 @@ class LegacyNarwalSettingSelect(NarwalEntity, RestoreEntity, SelectEntity):
             option = LEGACY_MODE_LABELS.get(settings.work_mode)
         elif key == "suction":
             value = self.coordinator.active_clean_setting("fan")
+            if value is None and self._is_cleaning_or_paused:
+                return None
             option = self._suction_labels.get(
                 value if value is not None else settings.fan
             )

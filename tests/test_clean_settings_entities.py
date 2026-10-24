@@ -567,6 +567,7 @@ class TestLegacyNarwalSettingSelect:
         sel = LegacyNarwalSettingSelect(coord, _LEGACY_DESCS["suction"])
 
         assert "Ultra Powerful" not in sel.options
+        assert sel.current_option is None
         with pytest.raises(HomeAssistantError, match="Unsupported Narwal option"):
             await sel.async_select_option("Ultra Powerful")
 
