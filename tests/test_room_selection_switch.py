@@ -36,18 +36,25 @@ def _state(
 
 
 def _coordinator(state: NarwalState | None = None) -> NarwalCoordinator:
-    """Create a coordinator stub with real room-selection methods."""
+    """Create a coordinator using the real production constructor."""
     state = state or _state()
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
-    coordinator.config_entry = MagicMock()
-    coordinator.config_entry.data = {"device_id": "dev1"}
+    entry = MagicMock()
+    entry.entry_id = "room-selection-test"
+    entry.data = {"host": "127.0.0.1", "port": 9002, "device_id": "dev1"}
+    entry.async_create_background_task.side_effect = (
+        lambda _hass, coro, _name: (coro.close(), MagicMock())[1]
+    )
+    hass = MagicMock()
+    coordinator = NarwalCoordinator(hass, entry)
+    coordinator.config_entry = entry
+    coordinator.hass = hass
+    coordinator._room_selection_store_loaded = True
+    coordinator._room_profile_store_loaded = True
     coordinator.config_entry.title = "Narwal Test"
-    coordinator.client = MagicMock()
     coordinator.client.state = state
     coordinator.client.state.firmware_version = "1.0.0"
     coordinator.data = state
     coordinator.last_update_success = True
-    coordinator.selected_clean_rooms = {}
     coordinator.async_update_listeners = MagicMock()
     coordinator.async_add_listener = MagicMock()
     return coordinator
