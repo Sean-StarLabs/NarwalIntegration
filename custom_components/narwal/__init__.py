@@ -264,8 +264,16 @@ async def _async_room_ids_for_coordinator(
         raise HomeAssistantError("Narwal map could not be refreshed") from err
     if state.map_data is None:
         raise HomeAssistantError("Narwal map is not available")
-    known_room_ids = {room.room_id for room in state.map_data.rooms if room.room_id > 0}
+    map_room_ids = [room.room_id for room in state.map_data.rooms if room.room_id > 0]
+    known_room_ids = set(map_room_ids)
     if requested_all:
+        map_id = coordinator.room_settings_map_id(state.map_data)
+        saved_order = coordinator.room_clean_orders.get(map_id or "")
+        if saved_order:
+            return coordinator.ordered_clean_room_ids_for(
+                map_room_ids,
+                map_id=map_id,
+            )
         return sorted(known_room_ids)
 
     unknown_ids = [room_id for room_id in room_ids if room_id not in known_room_ids]

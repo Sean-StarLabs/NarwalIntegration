@@ -54,7 +54,21 @@ def _coordinator(
     result_code: int = CommandResult.SUCCESS,
     product_key: str = "QoEsI5qYXO",
 ) -> NarwalCoordinator:
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    entry = MagicMock()
+    entry.entry_id = "service-test"
+    entry.data = {
+        "host": "127.0.0.1",
+        "port": 9002,
+        "device_id": "service-test",
+        "product_key": product_key,
+    }
+    hass = MagicMock()
+    coordinator = NarwalCoordinator(hass, entry)
+    coordinator.hass = hass
+    coordinator.config_entry = entry
+    entry.async_create_background_task.side_effect = (
+        lambda _hass, coro, _name: (coro.close(), MagicMock())[1]
+    )
     state = NarwalState()
     if docked:
         state.update_from_base_status({"3": {"1": 10, "10": 1}})
@@ -75,8 +89,9 @@ def _coordinator(
 
     coordinator.async_prepare_clean_start = AsyncMock(side_effect=prepare_clean_start)
     coordinator.dock_action_lock = asyncio.Lock()
-    coordinator.config_entry = MagicMock()
-    coordinator.config_entry.data = {"product_key": product_key}
+    coordinator._room_selection_store_loaded = True
+    coordinator._room_profile_store_loaded = True
+    coordinator._room_order_store_loaded = True
     coordinator.clean_settings = CleanSettings()
     coordinator.room_clean_settings = {}
     coordinator.room_clean_settings_customized = {}
@@ -599,9 +614,33 @@ async def test_clean_rooms_service_skips_map_refresh_for_known_room_ids() -> Non
 async def test_clean_rooms_service_all_still_refreshes_map() -> None:
     """`all` resolves against a fresh map, not whatever was cached."""
     coordinator = _coordinator()
-    coordinator.client.state.map_data = MapData(map_id=1, rooms=[RoomInfo(room_id=4)])
+    coordinator.client.state.map_data = MapData(
+        map_id=1,
+        rooms=[RoomInfo(room_id=11), RoomInfo(room_id=4), RoomInfo(room_id=9)],
+    )
     coordinator.client.get_map = AsyncMock()
 
-    await _async_room_ids_for_coordinator(coordinator, ["all"])
+    room_ids = await _async_room_ids_for_coordinator(coordinator, ["all"])
 
+    assert room_ids == [4, 9, 11]
     coordinator.client.get_map.assert_awaited_once()
+
+
+async def test_clean_rooms_all_appends_new_rooms_in_current_map_order() -> None:
+    """A saved order is completed from the current map before new rooms append."""
+    coordinator = _coordinator()
+    coordinator.client.state.map_data = MapData(
+        map_id=100,
+        rooms=[
+            RoomInfo(room_id=6),
+            RoomInfo(room_id=9),
+            RoomInfo(room_id=4),
+            RoomInfo(room_id=7),
+        ],
+    )
+    coordinator.room_clean_orders = {"100": [6, 4]}
+    coordinator.client.get_map = AsyncMock()
+
+    room_ids = await _async_room_ids_for_coordinator(coordinator, ["all"])
+
+    assert room_ids == [6, 4, 9, 7]
