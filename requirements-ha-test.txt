@@ -1,0 +1,4 @@
+# Real-Home-Assistant load tests (tests_ha/). Pinned on purpose: bump deliberately,
+# together with the HA version it brings, and run `py -m pytest tests_ha -q` before merging.
+-r requirements.txt
+pytest-homeassistant-custom-component==0.13.316
