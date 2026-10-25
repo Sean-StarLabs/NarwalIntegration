@@ -133,7 +133,8 @@ Contributions and testing reports are welcome, especially from owners of models 
 Flow. [docs/PROTOCOL.md](docs/PROTOCOL.md#12-contributing-captures) explains how to take a
 capture that answers a protocol question. Run the test suite with `py -m pytest -q` (or
 `python -m pytest -q`); `narwal_client/` and `custom_components/narwal/narwal_client/` must stay
-identical.
+identical. A second suite in `tests_ha/` loads the integration in the genuine Home Assistant
+package (Linux only, pinned in `requirements-ha-test.txt`); CI runs it as the "Loads in HA" check.
 
 ## Disclaimer
 

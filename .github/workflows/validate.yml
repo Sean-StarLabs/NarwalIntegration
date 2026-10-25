@@ -58,3 +58,22 @@ jobs:
           pip install pytest pytest-asyncio
       - name: Run tests
         run: pytest tests/ -v
+
+  # The stub-based suite above cannot tell whether the integration loads in
+  # real Home Assistant (tests/ha_stubs.py fakes the whole package). This job
+  # installs the genuine one, pinned in requirements-ha-test.txt, and sets up a
+  # config entry end to end with the robot I/O mocked.
+  loads-in-ha:
+    name: Loads in HA
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: requirements-ha-test.txt
+      - name: Install Home Assistant test harness
+        run: pip install -r requirements-ha-test.txt
+      - name: Load the integration in Home Assistant
+        run: pytest tests_ha/ -v -rxX -p no:cacheprovider

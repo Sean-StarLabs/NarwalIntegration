@@ -1,0 +1,9 @@
+# Real-Home-Assistant load tests (tests_ha/). Pinned on purpose: bump deliberately,
+# together with the HA version it brings, and run `py -m pytest tests_ha -q` before merging.
+-r requirements.txt
+pytest-homeassistant-custom-component==0.13.316
+# Requirements of the core components our platforms depend on (camera -> PyTurboJPEG).
+# Real HA installs these itself when the platform loads; the test harness does not.
+# Versions are the ones pinned by HA 2026.2.3 (see each component manifest).
+
+PyTurboJPEG==1.8.0
