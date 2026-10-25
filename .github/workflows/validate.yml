@@ -76,4 +76,4 @@ jobs:
       - name: Install Home Assistant test harness
         run: pip install -r requirements-ha-test.txt
       - name: Load the integration in Home Assistant
-        run: pytest tests_ha/ -v -p no:cacheprovider
+        run: pytest tests_ha/ -v -rxX -p no:cacheprovider
