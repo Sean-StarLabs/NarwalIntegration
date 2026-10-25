@@ -20,6 +20,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.narwal.const import (
     CONF_DEVICE_ID,
+    CONF_DOCK_LIGHT_SUPPORTED,
     CONF_MODEL,
     CONF_PRODUCT_KEY,
     DOMAIN,
@@ -90,5 +91,9 @@ def flow_entry() -> MockConfigEntry:
             CONF_MODEL: "Narwal Flow",
             CONF_PRODUCT_KEY: FLOW_PRODUCT_KEY,
         },
+        # A Flow has no dock light by product key; the option override is the
+        # documented way to force it, and it makes the light platform register
+        # an entity so every platform is exercised.
+        options={CONF_DOCK_LIGHT_SUPPORTED: True},
         version=2,
     )
