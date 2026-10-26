@@ -476,10 +476,11 @@ class NarwalClient:
             NarwalConnectionError: If connection cannot be established.
         """
         try:
-            self._ws = await websockets.connect(
+            ws = await websockets.connect(
                 self.url, ping_interval=30, ping_timeout=10
             )
-            self._expected_responses.clear()
+            self._fail_pending_responses("WebSocket connection replaced")
+            self._ws = ws
             self._connected.set()
             _LOGGER.info("Connected to Narwal vacuum at %s", self.url)
         except (OSError, ValueError, websockets.exceptions.WebSocketException) as e:
@@ -643,10 +644,12 @@ class NarwalClient:
 
     async def disconnect(self) -> None:
         """Disconnect from the vacuum and stop all tasks."""
+        ws = self._ws
         self._should_reconnect = False
         self._listener_active = False
         self._robot_awake = False
         self._connected.clear()
+        self._fail_pending_responses("Disconnected from vacuum")
 
         for task in (self._heartbeat_task, self._keepalive_task, self._listen_task):
             if task and not task.done():
@@ -654,9 +657,10 @@ class NarwalClient:
                 with contextlib.suppress(asyncio.CancelledError):
                     await task
 
-        if self._ws:
-            await self._ws.close()
-            self._ws = None
+        if ws:
+            await ws.close()
+            if self._ws is ws:
+                self._ws = None
 
         _LOGGER.info("Disconnected from Narwal vacuum")
 
@@ -669,9 +673,12 @@ class NarwalClient:
         retry_delay = RECONNECT_INITIAL_DELAY
 
         while self._should_reconnect:
+            ws = self._ws
+            heartbeat_task = keepalive_task = None
             try:
                 if not self.connected:
                     await self.connect()
+                    ws = self._ws
                     # Immediate wake burst on (re)connect — the fresh TCP
                     # connection may trigger the robot's deep-sleep wake
                     # interrupt, but only if we send commands before it
@@ -681,11 +688,15 @@ class NarwalClient:
                         await self._send_wake_burst()
 
                 retry_delay = RECONNECT_INITIAL_DELAY  # reset on success
-                self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
-                self._keepalive_task = asyncio.create_task(self._keepalive_loop())
+                heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+                keepalive_task = asyncio.create_task(self._keepalive_loop())
+                self._heartbeat_task = heartbeat_task
+                self._keepalive_task = keepalive_task
                 self._listener_active = True
 
-                async for raw_message in self._ws:
+                async for raw_message in ws:
+                    if self._ws is not ws:
+                        break
                     if isinstance(raw_message, bytes):
                         await self._handle_message(raw_message)
 
@@ -699,10 +710,12 @@ class NarwalClient:
             except Exception:
                 _LOGGER.exception("Unexpected error in listener")
             finally:
-                self._listener_active = False
-                self._robot_awake = False
-                self._connected.clear()
-                for task in (self._heartbeat_task, self._keepalive_task):
+                if self._ws is ws:
+                    self._listener_active = False
+                    self._robot_awake = False
+                    self._connected.clear()
+                    self._fail_pending_responses("WebSocket listener disconnected")
+                for task in (heartbeat_task, keepalive_task):
                     if task and not task.done():
                         task.cancel()
 
@@ -1140,6 +1153,13 @@ class NarwalClient:
 
     # --- Command infrastructure ---
 
+    def _fail_pending_responses(self, reason: str) -> None:
+        """Release callers whose replies cannot arrive on this connection."""
+        while self._expected_responses:
+            expected = self._expected_responses.popleft()
+            if expected.future is not None and not expected.future.done():
+                expected.future.set_exception(NarwalConnectionError(reason))
+
     async def _send_expecting(
         self, topic: str, frame: bytes, expected: _ExpectedResponse | None
     ) -> None:
@@ -1223,22 +1243,24 @@ class NarwalClient:
             raise NarwalConnectionError("Not connected to vacuum")
 
         async with self._command_lock:
+            if not self.connected:
+                raise NarwalConnectionError("Not connected to vacuum")
             frame = build_frame(self._full_topic(short_topic), payload)
             future: asyncio.Future[NarwalMessage] = (
                 asyncio.get_running_loop().create_future()
             )
-            await self._send_expecting(
-                short_topic,
-                frame,
-                _ExpectedResponse(
-                    short_topic,
-                    time.monotonic() + timeout + LATE_RESPONSE_GRACE,
-                    future,
-                ),
-            )
-            _LOGGER.debug("Sent command: %s (%d bytes)", short_topic, len(frame))
-
             try:
+                await self._send_expecting(
+                    short_topic,
+                    frame,
+                    _ExpectedResponse(
+                        short_topic,
+                        time.monotonic() + timeout + LATE_RESPONSE_GRACE,
+                        future,
+                    ),
+                )
+                _LOGGER.debug("Sent command: %s (%d bytes)", short_topic, len(frame))
+
                 # If listener is running, it routes the response to our future
                 # (avoid concurrent recv)
                 if self._listener_active:
@@ -1254,6 +1276,8 @@ class NarwalClient:
             finally:
                 # A late answer now finds a done future and is discarded
                 future.cancel()
+                if not future.cancelled():
+                    future.exception()
 
             self._mark_response_received()
 
@@ -1289,15 +1313,33 @@ class NarwalClient:
         this returns once the future's own response lands. Without one, the
         first field5 response is returned.
         """
+        ws = self._ws
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
+            if future is not None and future.done():
+                return future.result()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 break
             try:
-                data = await asyncio.wait_for(
-                    self._ws.recv(), timeout=min(remaining, 1.0)
-                )
+                receive = asyncio.create_task(ws.recv())
+                try:
+                    if future is None:
+                        data = await asyncio.wait_for(receive, timeout=min(remaining, 1.0))
+                    else:
+                        done, _ = await asyncio.wait(
+                            (receive, future),
+                            timeout=min(remaining, 1.0),
+                            return_when=asyncio.FIRST_COMPLETED,
+                        )
+                        if future in done:
+                            return future.result()
+                        if not done:
+                            continue
+                        data = receive.result()
+                finally:
+                    receive.cancel()
+                    await asyncio.gather(receive, return_exceptions=True)
             except TimeoutError:
                 continue
 
