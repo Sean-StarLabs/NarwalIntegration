@@ -736,11 +736,26 @@ class NarwalVacuum(NarwalEntity, RestoreEntity, StateVacuumEntity):
             raise HomeAssistantError("Narwal segment IDs must be positive")
 
         async with self.coordinator.dock_action_lock:
-            try:
-                await self.coordinator.client.get_map()
-            except Exception as err:
-                raise HomeAssistantError("Narwal map could not be refreshed") from err
             state = self.coordinator.client.state
+            cached_map = state.map_data
+            cached_ids = {
+                room.room_id
+                for room in getattr(cached_map, "rooms", ())
+                if room.room_id > 0
+            }
+            # A floor switch in the app since the last refresh is caught only when
+            # a requested room is missing; restored HA segments never count as a map.
+            use_cached_map = (
+                not self._trusts_state
+                and cached_map is not None
+                and bool(cached_map.map_id)
+                and all(room_id in cached_ids for room_id in room_ids)
+            )
+            if not use_cached_map:
+                try:
+                    await self.coordinator.client.get_map()
+                except Exception as err:
+                    raise HomeAssistantError("Narwal map could not be refreshed") from err
             known_ids = {
                 room.room_id
                 for room in getattr(getattr(state, "map_data", None), "rooms", ())
