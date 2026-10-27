@@ -20,6 +20,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .const import DOMAIN, NO_BROADCAST_PRODUCT_KEYS
 from .dock_tasks import (
+    ROBOT_START_COMPATIBLE_DOCK_TASKS,
     ROBOT_START_STOP_REQUIRED_DOCK_TASKS,
     can_start_robot_clean,
     can_stop_dock_task,
@@ -249,7 +250,25 @@ def can_edit_pending_clean_settings(state: NarwalState | None) -> bool:
         return True
     if has_blocking_error(state):
         return False
-    return not is_narwal_task_busy(state)
+    if not is_narwal_task_busy(state):
+        return True
+    # Local defaults can change even when missing drying timers block a start.
+    drying_tasks = set(state.telemetry_dock_task_keys)
+    return (
+        state.working_status in {
+            WorkingStatus.STANDBY,
+            WorkingStatus.DOCKED,
+            WorkingStatus.DOCKED_V2,
+            WorkingStatus.CHARGED,
+        }
+        and state.is_docked
+        and not is_clean_session_context(state)
+        and not _state_attr_is_true(state, "is_charging_to_resume")
+        and not state.has_unmapped_active_dock_task
+        and state.assumed_active_dock_task is None
+        and bool(drying_tasks)
+        and drying_tasks <= ROBOT_START_COMPATIBLE_DOCK_TASKS
+    )
 
 
 def can_start_cleaning(state: NarwalState | None) -> bool:
