@@ -158,6 +158,22 @@ def _close_background_task(_hass: object, coro: object, _name: str) -> MagicMock
     return task
 
 
+def _new_coordinator() -> NarwalCoordinator:
+    """Create a coordinator with its production constructor and stored fields."""
+    hass = MagicMock()
+    entry = MagicMock()
+    entry.entry_id = "coordinator-test"
+    entry.data = {"host": "127.0.0.1", "port": 9002, "device_id": "test-device"}
+    entry.async_create_background_task.side_effect = _close_background_task
+    coordinator = NarwalCoordinator(hass, entry)
+    coordinator.hass = hass
+    coordinator.config_entry = entry
+    coordinator._room_selection_store_loaded = True
+    coordinator._room_profile_store_loaded = True
+    coordinator._room_order_store_loaded = True
+    return coordinator
+
+
 def test_non_broadcast_product_key_configures_polling_client() -> None:
     """Coordinator propagates the product capability to the client."""
     product_key = next(iter(NO_BROADCAST_PRODUCT_KEYS))
@@ -183,7 +199,7 @@ def test_non_broadcast_product_key_configures_polling_client() -> None:
 
 def test_room_profiles_only_override_customized_fields() -> None:
     """Read-only room profile creation must not freeze global defaults."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
     coordinator.data = coordinator.client.state
@@ -209,7 +225,7 @@ def test_room_profiles_only_override_customized_fields() -> None:
 
 def test_effective_room_profile_follows_global_defaults_until_customized() -> None:
     """Room entity reads should not materialize stale inherited defaults."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
     coordinator.data = coordinator.client.state
@@ -236,7 +252,7 @@ def test_effective_room_profile_follows_global_defaults_until_customized() -> No
 
 def test_room_profiles_can_be_bypassed_for_explicit_service_settings() -> None:
     """Callers can request exact settings without saved room-profile overrides."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
     coordinator.data = coordinator.client.state
@@ -258,7 +274,7 @@ def test_room_profiles_can_be_bypassed_for_explicit_service_settings() -> None:
 
 def test_selected_clean_rooms_fall_back_to_all_rooms() -> None:
     """No room selection means the native start command cleans every room."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
     coordinator.data = coordinator.client.state
@@ -269,7 +285,7 @@ def test_selected_clean_rooms_fall_back_to_all_rooms() -> None:
 
 def test_selected_clean_rooms_prune_stale_ids_and_are_map_scoped() -> None:
     """Known selected rooms remain scoped without mutating stale selections."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
     coordinator.data = coordinator.client.state
@@ -287,7 +303,7 @@ def test_selected_clean_rooms_prune_stale_ids_and_are_map_scoped() -> None:
 
 def test_selected_clean_rooms_fall_back_when_every_selected_room_vanished() -> None:
     """A vanished explicit selection continues to fail closed."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
     coordinator.data = coordinator.client.state
@@ -300,7 +316,7 @@ def test_selected_clean_rooms_fall_back_when_every_selected_room_vanished() -> N
 
 def test_unidentified_map_selection_remains_explicit_after_identification() -> None:
     """Learning a map id cannot broaden an unresolved explicit selection."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {None: {4}}
     coordinator._room_selection_store_loaded = True
 
@@ -319,7 +335,7 @@ def test_unidentified_map_selection_remains_explicit_after_identification() -> N
 async def test_room_selection_store_preserves_disappeared_selected_room() -> None:
     """Restart cannot broaden a stale explicit selection to every current room."""
     store = _RoomSelectionStore()
-    before = NarwalCoordinator.__new__(NarwalCoordinator)
+    before = _new_coordinator()
     before.selected_clean_rooms = {"upstairs": {4}}
     before._room_selection_store = store
     before._room_selection_save_lock = asyncio.Lock()
@@ -327,7 +343,7 @@ async def test_room_selection_store_preserves_disappeared_selected_room() -> Non
 
     await before._async_save_room_selections()
 
-    after = NarwalCoordinator.__new__(NarwalCoordinator)
+    after = _new_coordinator()
     after.selected_clean_rooms = {}
     after._room_selection_store = store
     after._room_selection_store_loaded = False
@@ -340,7 +356,7 @@ async def test_room_selection_store_preserves_disappeared_selected_room() -> Non
 async def test_room_store_restores_customized_profile_without_entities() -> None:
     """Disabled room controls cannot lose their raw customized values."""
     store = _RoomSelectionStore()
-    before = NarwalCoordinator.__new__(NarwalCoordinator)
+    before = _new_coordinator()
     before.selected_clean_rooms = {}
     before.room_clean_settings = {
         ("upstairs", 4): RoomCleanSettings(
@@ -358,7 +374,7 @@ async def test_room_store_restores_customized_profile_without_entities() -> None
 
     await before._async_save_room_selections()
 
-    after = NarwalCoordinator.__new__(NarwalCoordinator)
+    after = _new_coordinator()
     after.selected_clean_rooms = {}
     after.room_clean_settings = {}
     after.room_clean_settings_customized = {}
@@ -377,7 +393,7 @@ async def test_room_store_restores_customized_profile_without_entities() -> None
 
 async def test_room_selection_load_failure_cannot_overwrite_stored_state() -> None:
     """A failed restore must not replace unread selections during shutdown."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {}
     coordinator._room_selection_store = MagicMock()
     coordinator._room_selection_store.async_load = AsyncMock(side_effect=OSError)
@@ -395,7 +411,7 @@ async def test_room_selection_load_failure_cannot_overwrite_stored_state() -> No
 
 async def test_selection_change_cannot_authorize_unread_profile_overwrite() -> None:
     """A room toggle after failed restore cannot replace durable profiles."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {}
     coordinator.room_clean_settings = {
         ("upstairs", 4): RoomCleanSettings(fan=FanLevel.MUTE)
@@ -427,7 +443,7 @@ async def test_selection_change_cannot_authorize_unread_profile_overwrite() -> N
 
 async def test_selection_retry_preserves_other_stored_maps() -> None:
     """A local toggle after a failed read must merge unrelated stored maps."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {}
     coordinator.room_clean_settings = {}
     coordinator.room_clean_settings_customized = {}
@@ -466,7 +482,7 @@ async def test_selection_retry_preserves_other_stored_maps() -> None:
 
 def test_map_identification_migrates_unresolved_profiles_with_selection() -> None:
     """Resolving a map keeps its customized room profiles attached."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     profile = RoomCleanSettings(work_mode=WorkMode.VACUUM)
     coordinator.selected_clean_rooms = {None: {4}}
     coordinator.room_clean_settings = {(None, 4): profile}
@@ -485,7 +501,7 @@ def test_map_identification_migrates_unresolved_profiles_with_selection() -> Non
 
 def test_profile_resolution_does_not_require_another_selection_toggle() -> None:
     """A fetched map immediately attaches unresolved profiles to native starts."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.clean_settings = CleanSettings(work_mode=WorkMode.VACUUM_AND_MOP)
     coordinator.selected_clean_rooms = {None: {4}}
     coordinator.room_clean_settings = {
@@ -506,7 +522,7 @@ def test_profile_resolution_does_not_require_another_selection_toggle() -> None:
 
 async def test_newer_unresolved_selection_supersedes_same_stored_map() -> None:
     """A post-failure unresolved choice wins when its map becomes known."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {}
     coordinator.room_clean_settings = {}
     coordinator.room_clean_settings_customized = {}
@@ -546,7 +562,7 @@ async def test_newer_unresolved_selection_supersedes_same_stored_map() -> None:
         },
         {"map_id": "100", "room_ids": [4]},
     ]
-    restarted = NarwalCoordinator.__new__(NarwalCoordinator)
+    restarted = _new_coordinator()
     restarted.selected_clean_rooms = {}
     restarted.room_clean_settings = {}
     restarted.room_clean_settings_customized = {}
@@ -576,7 +592,7 @@ async def test_persisted_unresolved_precedence_survives_failed_read_retry() -> N
         ],
         "profiles": [],
     }
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {}
     coordinator.room_clean_settings = {}
     coordinator.room_clean_settings_customized = {}
@@ -596,7 +612,7 @@ async def test_persisted_unresolved_precedence_survives_failed_read_retry() -> N
     saved = coordinator._room_selection_store.async_save.await_args.args[0]
     assert saved["maps"] == stored["maps"]
 
-    restarted = NarwalCoordinator.__new__(NarwalCoordinator)
+    restarted = _new_coordinator()
     restarted.selected_clean_rooms = {}
     restarted.room_clean_settings = {}
     restarted.room_clean_settings_customized = {}
@@ -630,7 +646,7 @@ async def test_newer_unresolved_profile_overrides_scoped_profile_after_restart()
             },
         ],
     }
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {}
     coordinator.room_clean_settings = {}
     coordinator.room_clean_settings_customized = {}
@@ -667,7 +683,7 @@ async def test_unresolved_profile_edit_preserves_other_scoped_fields() -> None:
             },
         ],
     }
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.clean_settings = CleanSettings(work_mode=WorkMode.VACUUM_AND_MOP)
     coordinator.selected_clean_rooms = {}
     coordinator.room_clean_settings = {}
@@ -690,7 +706,7 @@ async def test_unresolved_profile_edit_preserves_other_scoped_fields() -> None:
 
 async def test_room_selection_write_failure_does_not_escape() -> None:
     """Store write failures are logged without aborting coordinator shutdown."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {"100": {4}}
     coordinator.room_clean_settings = {}
     coordinator.room_clean_settings_customized = {}
@@ -710,7 +726,7 @@ async def test_room_selection_write_failure_does_not_escape() -> None:
 
 async def test_cancelled_room_save_cannot_overwrite_newer_selection() -> None:
     """Serialization remains held until a cancelled Store write completes."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {"upstairs": {4}}
     coordinator.room_clean_settings = {}
     coordinator.room_clean_settings_customized = {}
@@ -748,7 +764,7 @@ async def test_cancelled_room_save_cannot_overwrite_newer_selection() -> None:
 
 async def test_malformed_room_selection_store_remains_non_authoritative() -> None:
     """Malformed nested data cannot enable starts or be overwritten."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.selected_clean_rooms = {}
     coordinator._room_selection_store = MagicMock()
     coordinator._room_selection_store.async_load = AsyncMock(
@@ -768,7 +784,7 @@ async def test_malformed_room_selection_store_remains_non_authoritative() -> Non
 
 def test_selected_clean_room_presence_is_map_scoped() -> None:
     """Whole-floor setup can distinguish explicit selections per map."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
     coordinator.data = coordinator.client.state
@@ -780,7 +796,7 @@ def test_selected_clean_room_presence_is_map_scoped() -> None:
 
 def test_active_clean_settings_follow_current_room_and_runtime_updates() -> None:
     """Live controls report dispatched room profiles instead of pending globals."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = NarwalState(working_status=WorkingStatus.CLEANING)
     state.current_room_id = 5
     coordinator.client = MagicMock()
@@ -809,7 +825,7 @@ def test_active_clean_settings_follow_current_room_and_runtime_updates() -> None
 
 def test_runtime_setting_is_retained_without_reconstructed_room_profiles() -> None:
     """An accepted live command remains visible without startup task profiles."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = NarwalState(working_status=WorkingStatus.CLEANING)
     coordinator.client = MagicMock()
     coordinator.client.state = state
@@ -830,7 +846,7 @@ def test_runtime_setting_is_retained_without_reconstructed_room_profiles() -> No
 
 def test_active_clean_profile_survives_recoverable_robot_error() -> None:
     """A transient fault must not lose runtime controls when cleaning resumes."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = NarwalState(working_status=WorkingStatus.CLEANING)
     state.current_room_id = 5
     coordinator.client = MagicMock()
@@ -863,7 +879,7 @@ def test_fault_at_confirmed_dock_clears_active_clean_profile(
     status: WorkingStatus,
 ) -> None:
     """Positive dock telemetry must outrank profile retention during a fault."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = NarwalState(working_status=status)
     state.dock_presence = 1
     state.dock_field11 = 2
@@ -888,7 +904,7 @@ def test_fault_at_confirmed_dock_clears_active_clean_profile(
 
 def test_mixed_active_clean_uses_current_room_mode_for_live_controls() -> None:
     """Runtime control applicability follows the room currently being cleaned."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = NarwalState(working_status=WorkingStatus.CLEANING)
     state.current_room_id = 5
     coordinator.client = MagicMock()
@@ -996,7 +1012,7 @@ def test_terminal_status_does_not_expose_live_clean_settings(
 
 def test_map_display_cache_payload_round_trips_native_trajectory() -> None:
     """Native display-map trails can be serialized through HA storage."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     state.map_display_data.trajectory_breaks = (1,)
 
@@ -1390,7 +1406,7 @@ def test_compacted_route_tail_matches_repeated_x_coordinates() -> None:
 
 def test_active_cached_trajectory_requires_live_window_overlap() -> None:
     """A clean started during HA downtime must not inherit the previous route."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     previous = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     current = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
     state = NarwalState(working_status=WorkingStatus.CLEANING)
@@ -1410,7 +1426,7 @@ def test_active_cached_trajectory_requires_live_window_overlap() -> None:
 
 def test_active_cached_trajectory_merges_overlapping_live_window() -> None:
     """An overlapping first live window proves an active-cache reconnect."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     previous = _trajectory_display(
         (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0), timestamp=100
     )
@@ -1439,7 +1455,7 @@ def test_active_cached_trajectory_merges_overlapping_live_window() -> None:
 
 def test_active_compacted_cache_accepts_full_live_window_after_restart() -> None:
     """A retained recent tail validates a compacted active route after restart."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     full_previous = _trajectory_display(
         *((float(index), float(index)) for index in range(10)), timestamp=100
     )
@@ -1485,7 +1501,7 @@ def test_active_compacted_cache_accepts_full_live_window_after_restart() -> None
 
 def test_metric_only_overlap_completes_active_cache_validation() -> None:
     """An overlapping live window validates a route despite coarse standby."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     previous = _trajectory_display(
         (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), (4.0, 4.0), timestamp=100
     )
@@ -1509,7 +1525,7 @@ def test_metric_only_overlap_completes_active_cache_validation() -> None:
 
 def test_active_cached_trajectory_rejects_single_point_overlap() -> None:
     """One coincidental point cannot join routes from different clean sessions."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     previous = _trajectory_display(
         (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), timestamp=100
     )
@@ -1531,7 +1547,7 @@ def test_active_cached_trajectory_rejects_single_point_overlap() -> None:
 
 def test_active_cached_trajectory_waits_for_validation_window() -> None:
     """A tiny first live window defers the restored-route decision."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     previous = _trajectory_display(
         (1.0, 1.0), (2.0, 2.0), (3.0, 3.0), timestamp=100
     )
@@ -1569,7 +1585,7 @@ def test_active_cached_trajectory_waits_for_validation_window() -> None:
 
 def test_active_cached_trajectory_ignores_pose_only_window_for_validation() -> None:
     """A pose-only packet cannot validate a route restored after restart."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     previous = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     coordinator._retained_map_display = previous
     coordinator._map_display_cache_signature = previous.trajectory_signature
@@ -1627,7 +1643,7 @@ def test_nonoverlapping_window_after_restart_keeps_both_native_sections() -> Non
 
 def test_retain_native_trajectory_updates_shared_state() -> None:
     """Coordinator state and persistence see the accumulated native route."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._retained_map_display = _trajectory_display(
         (1.0, 1.0), (2.0, 2.0), timestamp=100
     )
@@ -1648,7 +1664,7 @@ def test_retain_native_trajectory_updates_shared_state() -> None:
 
 def test_retain_native_trajectory_clears_when_active_map_changes() -> None:
     """A route from one floor must not be retained against another map."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = NarwalState()
     state.map_data = MapData(map_id=13, created_at=35)
     state.map_display_data = _trajectory_display(
@@ -1686,7 +1702,7 @@ def test_retain_native_trajectory_clears_when_active_map_changes() -> None:
 
 def test_retained_trajectory_adopts_delayed_static_map_identity() -> None:
     """A map loaded after the first route still scopes later trajectory data."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = NarwalState()
     state.map_data = MapData(map_id=12, created_at=34)
     state.map_display_data = _trajectory_display(
@@ -1722,7 +1738,7 @@ def test_retained_trajectory_adopts_delayed_static_map_identity() -> None:
 
 def test_remapping_trajectory_does_not_replace_retained_clean_route() -> None:
     """Map-building geometry must not contaminate the cleaning trail."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     retained = _trajectory_display((1.0, 1.0), (2.0, 2.0), timestamp=100)
     coordinator._retained_map_display = retained
     state = NarwalState(working_status=WorkingStatus.REMAPPING)
@@ -1749,7 +1765,7 @@ def test_remapping_trajectory_does_not_replace_retained_clean_route() -> None:
 
 def test_remapping_without_retained_route_keeps_live_pose_only() -> None:
     """Map rebuilding keeps the marker without adopting mapping geometry."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._retained_map_display = None
     state = NarwalState(working_status=WorkingStatus.REMAPPING)
     remapping = _trajectory_display((8.0, 8.0), (9.0, 9.0), timestamp=200)
@@ -1769,7 +1785,7 @@ def test_remapping_without_retained_route_keeps_live_pose_only() -> None:
 
 def test_new_clean_drops_pre_status_trajectory_window() -> None:
     """A display packet before clean status is dropped to avoid stale routes."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.async_create_background_task = MagicMock(
@@ -1811,7 +1827,7 @@ def test_new_clean_drops_pre_status_trajectory_window() -> None:
 
 async def test_restore_map_display_cache_restores_matching_static_map() -> None:
     """A saved trail is restored after restart when the static map matches."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     source = _trajectory_state()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
@@ -1836,7 +1852,7 @@ async def test_restore_map_display_cache_restores_matching_static_map() -> None:
 async def test_restore_map_display_cache_rejects_inactive_route_during_clean() -> None:
     """A completed saved route cannot seed a clean already active at startup."""
     source = _trajectory_state()
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState(working_status=WorkingStatus.CLEANING)
     coordinator.client.state.map_data = source.map_data
@@ -1859,7 +1875,7 @@ async def test_restore_map_display_cache_preserves_live_pose_only_packet() -> No
     """Cached route bytes must not replace the robot's live startup pose."""
     cached = _trajectory_state()
     cached.working_status = WorkingStatus.CLEANING
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState(working_status=WorkingStatus.CLEANING)
     coordinator.client.state.map_data = cached.map_data
@@ -1890,7 +1906,7 @@ async def test_restore_map_display_cache_preserves_live_pose_only_packet() -> No
 
 async def test_restore_map_display_cache_does_not_overwrite_live_trail() -> None:
     """A live display_map packet received during startup wins over stored routes."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     cached = _trajectory_state()
     cached.map_display_data = MapDisplayData(
         robot_x=5.0,
@@ -1922,7 +1938,7 @@ async def test_restore_map_display_cache_does_not_overwrite_live_trail() -> None
 
 async def test_restore_active_cache_merges_early_live_window() -> None:
     """An early startup window validates and extends an active saved prefix."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     cached = _trajectory_state()
     cached.working_status = WorkingStatus.CLEANING
     cached.map_display_data = _trajectory_display(
@@ -1964,7 +1980,7 @@ async def test_stale_startup_status_keeps_validated_active_cache_until_cleaning(
         *((float(index), float(index)) for index in range(1, 31)),
         timestamp=100,
     )
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     payload = coordinator._map_display_cache_payload(cached)
     assert payload is not None
 
@@ -1999,7 +2015,7 @@ async def test_stale_startup_status_keeps_validated_active_cache_until_cleaning(
     assert persisted is not None
     assert persisted["active_clean"] is True
 
-    restarted = NarwalCoordinator.__new__(NarwalCoordinator)
+    restarted = _new_coordinator()
     restarted.client = MagicMock()
     restarted.client.state = NarwalState(working_status=WorkingStatus.CLEANING)
     restarted.client.state.map_data = cached.map_data
@@ -2045,7 +2061,7 @@ def test_restored_active_cache_uses_reconciled_terminal_state(
     expected_active: bool,
 ) -> None:
     """Dock evidence and explicit off-dock evidence override a bare status enum."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     state.working_status = working_status
     state.dock_presence = dock_presence
@@ -2063,7 +2079,7 @@ def test_restored_active_cache_uses_reconciled_terminal_state(
 
 def test_off_dock_docked_v2_does_not_end_clean_session() -> None:
     """Explicit off-dock telemetry preserves continuity across a stale dock enum."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     state = _trajectory_state()
     state.working_status = WorkingStatus.DOCKED_V2
     state.dock_presence = 2
@@ -2083,7 +2099,7 @@ def test_off_dock_docked_v2_does_not_end_clean_session() -> None:
 
 async def test_restore_map_display_cache_waits_for_static_map() -> None:
     """A saved trail is not restored until the active static map is known."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     source = _trajectory_state()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
@@ -2113,7 +2129,7 @@ async def test_restore_map_display_cache_waits_for_static_map() -> None:
 
 async def test_restore_map_display_cache_ignores_different_static_map() -> None:
     """A saved trail from another map must not be overlaid."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     source = _trajectory_state()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
@@ -2140,7 +2156,7 @@ async def test_restore_map_display_cache_ignores_different_static_map() -> None:
 
 async def test_restore_map_display_cache_rejects_missing_map_identity() -> None:
     """An unscoped persisted route cannot be assigned to an arbitrary map."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     source = _trajectory_state()
     payload = coordinator._map_display_cache_payload(source)
     assert payload is not None
@@ -2162,7 +2178,7 @@ async def test_restore_map_display_cache_rejects_missing_map_identity() -> None:
 
 async def test_setup_retains_trajectory_received_with_initial_map() -> None:
     """The first native window participates in later rolling-window merges."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -2221,7 +2237,7 @@ async def test_setup_retains_trajectory_received_with_initial_map() -> None:
 
 async def test_clear_map_display_cache_clears_memory_and_store() -> None:
     """Accepted clean starts clear both memory and persisted trail state."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     coordinator._map_display_cache_store = _FakeStore({"old": "trail"})
@@ -2265,7 +2281,7 @@ async def test_clear_waits_for_uncancellable_storage_write() -> None:
                 return
             await super().async_save(data)
 
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.async_create_background_task.side_effect = (
@@ -2307,7 +2323,7 @@ async def test_clear_waits_for_uncancellable_storage_write() -> None:
 
 async def test_new_clean_clear_preserves_later_trajectory_snapshot() -> None:
     """A delayed clear cannot discard the first route window of a new clean."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -2355,7 +2371,7 @@ async def test_new_clean_clear_preserves_later_trajectory_snapshot() -> None:
 
 async def test_overlapping_new_clean_clears_keep_route_writes_gated() -> None:
     """Concurrent command/status clears finish before a new route is saved."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -2401,7 +2417,7 @@ async def test_overlapping_new_clean_clears_keep_route_writes_gated() -> None:
 
 def test_reconnect_into_running_clean_keeps_restored_trail() -> None:
     """First cleaning update after restoring a cache is not a new clean start."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     coordinator.client.last_display_map_age = float("inf")
@@ -2417,7 +2433,7 @@ def test_reconnect_into_running_clean_keeps_restored_trail() -> None:
 
 def test_stale_docked_startup_keeps_active_trail_for_overlap_validation() -> None:
     """A stale idle enum cannot clear an active cache before a native window."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.STANDBY
     coordinator._clean_session_active = False
     coordinator._map_display_cache_restored = True
@@ -2451,7 +2467,7 @@ def test_stale_docked_startup_keeps_active_trail_for_overlap_validation() -> Non
 
 def test_restored_active_trail_validation_grace_expires() -> None:
     """Repeated terminal state revokes a restored-active marker after startup."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.UNKNOWN
     coordinator._clean_session_active = False
     coordinator._map_display_cache_restored = True
@@ -2477,7 +2493,7 @@ def test_explicit_terminal_status_bypasses_active_trail_restore_grace(
     working_status: WorkingStatus,
 ) -> None:
     """Completion and fault packets end a restored session immediately."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.UNKNOWN
     coordinator._clean_session_active = False
     coordinator._map_display_cache_restored = True
@@ -2506,7 +2522,7 @@ def test_explicit_terminal_status_bypasses_active_trail_restore_grace(
 
 def test_confirmed_terminal_revokes_restored_active_cache_exemption() -> None:
     """A later clean cannot inherit a route after confirmed completion."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.CLEANING
     coordinator._clean_session_active = True
     coordinator._map_display_cache_restored = True
@@ -2528,7 +2544,7 @@ def test_confirmed_terminal_revokes_restored_active_cache_exemption() -> None:
 
 def test_confirmed_terminal_revokes_pending_active_cache_without_map() -> None:
     """An unscoped pending route cannot exempt a later clean after docking."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.UNKNOWN
     coordinator._clean_session_active = False
     coordinator._map_display_cache_restored = False
@@ -2553,7 +2569,7 @@ def test_confirmed_terminal_revokes_pending_active_cache_without_map() -> None:
 
 def test_unknown_to_cleaning_clears_inactive_restored_trail() -> None:
     """A completed cached trail must not be treated as an active reconnect."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     coordinator.client.last_display_map_age = float("inf")
@@ -2569,7 +2585,7 @@ def test_unknown_to_cleaning_clears_inactive_restored_trail() -> None:
 
 def test_repeated_metric_only_updates_clear_trail_once() -> None:
     """A stale idle enum cannot reannounce one metric-only clean session."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.STANDBY
     coordinator._clean_session_active = False
     coordinator._map_display_cache_restored = False
@@ -2587,7 +2603,7 @@ def test_repeated_metric_only_updates_clear_trail_once() -> None:
 
 def test_paused_standby_resume_keeps_current_trajectory() -> None:
     """An expired active-metric TTL while paused cannot split one clean."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.CLEANING
     coordinator._clean_session_active = True
     coordinator._map_display_cache_restored = False
@@ -2615,7 +2631,7 @@ def test_paused_standby_resume_keeps_current_trajectory() -> None:
 
 def test_accepted_clean_latches_session_before_metric_handoff() -> None:
     """Early task metrics cannot clear a route already reset by an HA start."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.STANDBY
     coordinator._clean_session_active = False
     coordinator._map_display_cache_restored = False
@@ -2636,7 +2652,7 @@ def test_accepted_clean_latches_session_before_metric_handoff() -> None:
 
 def test_accepted_clean_latch_survives_pre_status_display_packet() -> None:
     """A cached dock status cannot end the accepted-start handoff."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.DOCKED_V2
     coordinator._clean_session_active = True
     coordinator._map_display_cache_restored = False
@@ -2654,7 +2670,7 @@ def test_accepted_clean_latch_survives_pre_status_display_packet() -> None:
 
 def test_terminal_late_metrics_do_not_clear_completed_trail() -> None:
     """Late counters from a completed task cannot announce a new clean."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator._prev_working_status = WorkingStatus.TASK_COMPLETED
     coordinator._map_display_cache_restored = False
@@ -2678,7 +2694,7 @@ def test_assumed_clean_docked_handoff_is_not_terminal() -> None:
 
 def test_returning_route_snapshot_remains_active() -> None:
     """Returning to dock remains part of the persisted cleaning session."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._map_display_cache_restored_from_active = False
     state = _trajectory_state()
     state.working_status = WorkingStatus.CLEANING
@@ -2693,7 +2709,7 @@ def test_returning_route_snapshot_remains_active() -> None:
 
 def test_remapping_transition_does_not_clear_completed_trail() -> None:
     """Map rebuilding is not a new cleaning session."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.STANDBY
     coordinator._clear_map_display_cache_for_new_clean = MagicMock()
     state = NarwalState(working_status=WorkingStatus.REMAPPING)
@@ -2706,7 +2722,7 @@ def test_remapping_transition_does_not_clear_completed_trail() -> None:
 
 def test_remapping_to_cleaning_starts_a_new_retained_route() -> None:
     """A clean after map rebuilding must clear the previous cleaning trail."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator._prev_working_status = WorkingStatus.REMAPPING
     coordinator._map_display_cache_restored = False
     coordinator._map_display_cache_restored_from_active = False
@@ -2721,7 +2737,7 @@ def test_remapping_to_cleaning_starts_a_new_retained_route() -> None:
 
 def test_idle_to_cleaning_transition_clears_stale_restored_trail() -> None:
     """A clean started while HA is running must drop the previous clean's trail."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.async_create_background_task = MagicMock()
@@ -2753,7 +2769,7 @@ def test_idle_to_cleaning_transition_clears_stale_restored_trail() -> None:
 
 def test_status_first_new_clean_drops_recent_previous_trajectory() -> None:
     """A recent old packet is not a new-clean packet when status arrives first."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.async_create_background_task = MagicMock(
@@ -2783,7 +2799,7 @@ def test_status_first_new_clean_drops_recent_previous_trajectory() -> None:
 
 def test_new_clean_with_recent_inactive_trail_still_clears_cache() -> None:
     """Recency alone cannot distinguish a late old packet from a new route."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.async_create_background_task = MagicMock()
@@ -2815,7 +2831,7 @@ def test_new_clean_with_recent_inactive_trail_still_clears_cache() -> None:
 
 def test_schedule_map_display_cache_save_defers_serialization() -> None:
     """Scheduling cache persistence must not encode full routes in callbacks."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.config_entry.async_create_background_task = MagicMock(
@@ -2839,7 +2855,7 @@ def test_schedule_map_display_cache_save_defers_serialization() -> None:
 
 async def test_schedule_map_display_cache_save_persists_terminal_metadata() -> None:
     """An unchanged completed route must replace its active cache marker."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator._map_display_cache_store = _FakeStore()
@@ -2872,7 +2888,7 @@ async def test_schedule_map_display_cache_save_persists_terminal_metadata() -> N
 
 async def test_shutdown_flushes_current_display_map_cache() -> None:
     """HA shutdown should persist the newest trail even when no save is queued."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = _trajectory_state()
     coordinator._map_display_cache_store = _FakeStore()
@@ -2895,7 +2911,7 @@ async def test_shutdown_flushes_current_display_map_cache() -> None:
 
 async def test_shutdown_does_not_replace_scoped_cache_with_pre_map_route() -> None:
     """A failed map fetch cannot make an existing route unrestorable."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     scoped_state = _trajectory_state()
     existing = coordinator._map_display_cache_payload(scoped_state)
     assert existing is not None
@@ -2917,7 +2933,7 @@ async def test_shutdown_does_not_replace_scoped_cache_with_pre_map_route() -> No
 
 async def test_shutdown_retries_failed_trajectory_cache_clear() -> None:
     """A failed clear remains pending when no replacement route arrives."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.client = MagicMock()
     coordinator.client.state = NarwalState()
     coordinator._map_display_cache_store = MagicMock()
@@ -2952,7 +2968,7 @@ async def test_shutdown_retries_failed_trajectory_cache_clear() -> None:
 
 async def test_shutdown_flush_waits_for_pending_cache_clear() -> None:
     """A delayed clear cannot overwrite the route persisted during shutdown."""
-    coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
+    coordinator = _new_coordinator()
     coordinator.hass = MagicMock()
     coordinator.config_entry = MagicMock()
     coordinator.client = MagicMock()
@@ -3010,8 +3026,8 @@ class TestCoordinatorResilience:
 
     def _make_coordinator(self) -> NarwalCoordinator:
         """Create a NarwalCoordinator with mocked hass and entry."""
-        mock_hass = MagicMock()
-        mock_entry = MagicMock()
+        coordinator = _new_coordinator()
+        mock_entry = coordinator.config_entry
         mock_entry.data = {
             "host": "10.0.0.100",
             "port": 9002,
@@ -3019,11 +3035,6 @@ class TestCoordinatorResilience:
             "product_key": "QoEsI5qYXO",
         }
 
-        coordinator = NarwalCoordinator.__new__(NarwalCoordinator)
-        # Initialize the attributes that __init__ sets, bypassing
-        # DataUpdateCoordinator.__init__ which needs a real hass.
-        coordinator.hass = mock_hass
-        coordinator.config_entry = mock_entry
         coordinator.client = MagicMock()
         coordinator.client.state = NarwalState()
         coordinator.last_update_success = True
@@ -3048,13 +3059,6 @@ class TestCoordinatorResilience:
         coordinator._map_display_cache_last_save = 0.0
         coordinator._map_display_cache_restored = False
         coordinator.update_interval = None
-        def _close_background_task(*args: object) -> None:
-            for arg in args:
-                if hasattr(arg, "close"):
-                    arg.close()
-        mock_entry.async_create_background_task = MagicMock(
-            side_effect=_close_background_task
-        )
         return coordinator
 
     async def test_stale_data_on_first_failure(self) -> None:
@@ -3906,7 +3910,7 @@ class TestTopicSubscriptionRenewal:
     """
 
     def _coordinator(self, last_subscribe: float) -> NarwalCoordinator:
-        c = NarwalCoordinator.__new__(NarwalCoordinator)
+        c = _new_coordinator()
         c.hass = MagicMock()
         c.config_entry = MagicMock()
         c.client = MagicMock()
